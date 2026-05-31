@@ -163,6 +163,10 @@ var sgp32ModuleInventory = []moduleStructureInventoryEntry{
 func TestSGP32ModuleInventoryMatchesASN1Module(t *testing.T) {
 	t.Parallel()
 
+	if _, err := os.Stat("../spec/SGP.32 v1.3.asn1"); os.IsNotExist(err) {
+		t.Skip("spec module not present (local-only); skipping inventory cross-check")
+	}
+
 	moduleTypes := parseSGP32ModuleTypes(t)
 	inventory := map[string]moduleStructureInventoryEntry{}
 	for _, entry := range sgp32ModuleInventory {
