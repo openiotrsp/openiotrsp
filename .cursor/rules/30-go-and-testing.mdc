@@ -1,0 +1,15 @@
+---
+description: Go style, testing requirements, and validation expectations
+globs: "**/*"
+alwaysApply: false
+---
+
+# Go Style And Testing
+
+Go style and testing.
+
+- Idiomatic Go. Wrap errors with fmt.Errorf and %w. Pass ctx context.Context first on I/O methods. Use defer for cleanup.
+- Write the test before or with the code. Use table-driven tests.
+- For every ASN.1 structure: a round-trip test, and a known-answer test wherever the spec or SGP.33-1 gives example bytes.
+- Validation and verification code must fail closed; write the negative tests first.
+- Unit tests run against the in-memory Store with no database. Integration tests use real Postgres in Docker.

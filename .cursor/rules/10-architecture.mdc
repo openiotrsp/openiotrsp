@@ -1,0 +1,15 @@
+---
+description: Open-core architecture boundaries and enterprise extension contracts
+globs: "**/*"
+alwaysApply: false
+---
+
+# Architecture Rules
+
+Open-core architecture. Define interfaces before implementations.
+
+- The Go module for the open source eIM core lives at the repository root and uses module path github.com/openiotrsp/openiotrsp.
+- Three extension interfaces are the contract for the enterprise build: Store, Signer, TenantResolver. Keep them stable and documented.
+- Protocol logic (asn1, euiccpkg, esipa, smdp, pki) lives in exported packages so the enterprise module can import it. Do not put protocol logic under internal/.
+- Depend on the Store, Signer, and TenantResolver interfaces, never on a concrete implementation, in protocol code.
+- Every per-device or per-fleet table and storage method carries a tenant_id, defaulted to a single value in the open source build.

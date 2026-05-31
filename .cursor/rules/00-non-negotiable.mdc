@@ -1,0 +1,16 @@
+---
+description: Non-negotiable project constraints for the open source SGP.32 eIM
+alwaysApply: true
+---
+
+# Non-Negotiable Rules
+
+You are building an Apache 2.0 open source SGP.32 eIM in pure Go.
+
+Hard rules, never violate:
+
+- Dependencies must be MIT, BSD, Apache 2.0, or ISC only. Never GPL, AGPL, LGPL, or MPL. If unsure of a license, stop and ask.
+- No CGO. Pure Go only. Never suggest mattn/go-sqlite3 or any C-linked library. SQLite is not used; the database is Postgres via jackc/pgx.
+- Never reproduce, translate, or imitate code from lpac, openeuicc, onomondo-eim, onomondo-ipa, or onomondo-uicc. Implement only from the SGP.32 v1.3 spec and its ASN.1 module.
+- Never invent an ASN.1 structure. Only implement structures present in /spec/SGP.32 v1.3.asn1 or imported from SGP.22. Cite the source structure.
+- When the spec is ambiguous, do not guess. Add a TODO and append an entry to INTERPRETATION_LOG.md with the spec section, the ambiguity, and the chosen reading.
