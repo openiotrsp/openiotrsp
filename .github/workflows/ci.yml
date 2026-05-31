@@ -34,3 +34,36 @@ jobs:
 
       - name: Check licenses
         run: go-licenses check ./...
+
+  storage-postgres-integration:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: openiotrsp
+          POSTGRES_PASSWORD: openiotrsp
+          POSTGRES_DB: openiotrsp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      OPENIOTRSP_POSTGRES_TEST_DSN: postgres://openiotrsp:openiotrsp@localhost:5432/openiotrsp?sslmode=disable
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test Postgres storage
+        run: go test -tags=integration ./storage/postgres/...

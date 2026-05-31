@@ -1,0 +1,8 @@
+DROP INDEX IF EXISTS notifications_device_idx;
+DROP TABLE IF EXISTS notifications;
+DROP TABLE IF EXISTS eim_config;
+DROP TABLE IF EXISTS operation_results;
+DROP INDEX IF EXISTS operations_poll_idx;
+DROP TABLE IF EXISTS operations;
+DROP TABLE IF EXISTS profile_state;
+DROP TABLE IF EXISTS devices;
