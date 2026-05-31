@@ -1,0 +1,24 @@
+package asn1
+
+import "github.com/damonto/euicc-go/bertlv"
+
+var (
+	tagSequence = bertlv.Universal.Constructed(16)
+	tagInteger  = bertlv.Universal.Primitive(2)
+	tagNull     = bertlv.Universal.Primitive(5)
+	tagUTF8     = bertlv.Universal.Primitive(12)
+
+	tagEID          = bertlv.Application.Primitive(26) // SGP.32 Octet16, tag 5A.
+	tagSignature    = bertlv.Application.Primitive(55) // SGP.32 eIM/eUICC signature, tag 5F37.
+	tagEuiccPkg     = bertlv.ContextSpecific.Constructed(81)
+	tagIpaEuiccData = bertlv.ContextSpecific.Constructed(82)
+	tagEimAck       = bertlv.ContextSpecific.Constructed(83)
+	tagDownloadTrig = bertlv.ContextSpecific.Constructed(84)
+
+	tagTransferEimPackage = bertlv.ContextSpecific.Constructed(78)
+	tagGetEimPackage      = bertlv.ContextSpecific.Constructed(79)
+	tagProvideEimResult   = bertlv.ContextSpecific.Constructed(80)
+
+	tagProfileInfoList     = bertlv.ContextSpecific.Constructed(45)
+	tagSetDefaultDPAddress = bertlv.ContextSpecific.Constructed(101)
+)

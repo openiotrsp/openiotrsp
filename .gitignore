@@ -1,3 +1,5 @@
+.cursor/
+.cursorignore
 spec/
 .cache/
 .vscode/
