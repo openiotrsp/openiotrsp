@@ -48,14 +48,36 @@ Each entry must include:
 
 - Spec section: SGP.32 `EuiccPackageResultDataSigned` and SGP.22
   `ProfileState`.
-- Ambiguity: The wire result reports operation success or failure, but the
-  open-source store's `profile_state` payload is an internal persistence
-  boundary and is not specified by SGP.32.
-- Chosen reading: Store the eIM's profile-state view as compact JSON containing
-  `profiles[]` entries keyed by canonical lowercase hex ICCID, with profile
-  states `enabled` or `disabled`. A successful delete removes the profile entry.
+- Ambiguity: The wire result reports operation success or failure, but the eIM's
+  queryable orchestration state is an internal persistence boundary and is not
+  specified by SGP.32.
+- Chosen reading: Store the eIM's profile-state view as relational rows keyed by
+  tenant, EID, and canonical lowercase hex ICCID, with discrete columns for
+  enabled state and SM-DP+ address. A successful delete removes the profile row.
 - Rationale: This keeps the wire encoding strictly in the ASN.1 package while
-  making the persisted state deterministic and easy to assert in conformance
-  tests.
-- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: The SGP.33-1
-  document is not present in this checkout, so no.
+  giving the orchestration layer indexed profile state for fleet-wide queries.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: Partly. SGP.33-1
+  sections 4.2.31 through 4.2.33 and Annex D settle the successful enable,
+  disable, and delete state transitions. The exact relational persistence shape
+  remains an OpenIoTRSP implementation detail.
+
+## SGP.33-1 eUICC Package Known-Answer DER
+
+- Spec section: SGP.33-1 sections 4.2.31 through 4.2.33, Annex C methods, and
+  Annex D ESep responses.
+- Ambiguity: SGP.33-1 defines symbolic ASN.1 fixtures such as
+  `MTD_EUICC_PACKAGE_REQUEST_ENABLE`, `ENABLE_RES_OK_1`, and dynamic signature
+  placeholders, but does not publish literal DER hex strings for those complete
+  eUICC Package request/result values.
+- Chosen reading: Keep known-answer tests hardcoded as DER hex, using fixed
+  substitute values for the SGP.33-1 symbols and fixed signature octets. Do not
+  derive the expected bytes by round-tripping the value under test.
+- Rationale: This still pins the encoder output byte-for-byte while making clear
+  which parts are fixed local substitutions for SGP.33-1 symbolic parameters.
+  The OpenSSL differential parse test adds independent evidence that the
+  produced DER is structurally well-formed and has the asserted ordered
+  tag-length-value tree, including application-class tags. OpenSSL is a generic
+  ASN.1 parser and does not know SGP.32, so this check does not independently
+  prove that the asserted tree is the correct SGP.32 semantic structure.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It settles the
+  ASN.1 structure and result behavior, not complete byte vectors.

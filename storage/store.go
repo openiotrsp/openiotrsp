@@ -24,10 +24,12 @@ type Device struct {
 	EID string
 }
 
-// ProfileState is the eIM's persisted view of one device's profile state.
+// ProfileState is the eIM's persisted view of one profile on one eUICC.
 type ProfileState struct {
-	EID  string
-	Data []byte
+	EID         string
+	ICCID       string
+	IsEnabled   bool
+	SMDPAddress string
 }
 
 // OperationStatus is the lifecycle state of an operation queued for an IPA poll.
@@ -104,8 +106,10 @@ type Notification struct {
 // I/O method takes context.Context first.
 type Store interface {
 	RegisterDevice(ctx context.Context, tenantID TenantID, device Device) error
-	GetProfileState(ctx context.Context, tenantID TenantID, eid string) (ProfileState, error)
+	GetProfileState(ctx context.Context, tenantID TenantID, eid string, iccid string) (ProfileState, error)
+	ListProfileStates(ctx context.Context, tenantID TenantID, eid string) ([]ProfileState, error)
 	SetProfileState(ctx context.Context, tenantID TenantID, state ProfileState) error
+	DeleteProfileState(ctx context.Context, tenantID TenantID, eid string, iccid string) error
 	NextEUICCPackageCounter(ctx context.Context, tenantID TenantID, eid string) (int64, error)
 	EnqueueOperation(ctx context.Context, tenantID TenantID, operation OperationRequest) (Operation, error)
 	FetchPendingOperations(ctx context.Context, tenantID TenantID, eid string, limit int) ([]Operation, error)

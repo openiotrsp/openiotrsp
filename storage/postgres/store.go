@@ -52,32 +52,90 @@ func (s *Store) RegisterDevice(ctx context.Context, tenantID storage.TenantID, d
 	return err
 }
 
-// GetProfileState reads one device's profile state.
-func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, eid string) (storage.ProfileState, error) {
+// GetProfileState reads one profile state.
+func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, eid string, iccid string) (storage.ProfileState, error) {
 	var state storage.ProfileState
 	err := s.pool.QueryRow(ctx, `
-		SELECT eid, state_payload
+		SELECT eid, iccid, is_enabled, smdp_address
 		FROM profile_state
-		WHERE tenant_id = $1 AND eid = $2
-	`, tenantString(tenantID), eid).Scan(&state.EID, &state.Data)
+		WHERE tenant_id = $1 AND eid = $2 AND iccid = $3
+	`, tenantString(tenantID), eid, iccid).Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.SMDPAddress)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ProfileState{}, storage.ErrNotFound
 	}
 	return cloneProfileState(state), err
 }
 
-// SetProfileState stores one device's profile state.
+// ListProfileStates reads all known profile states for one eUICC.
+func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.ProfileState, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT eid, iccid, is_enabled, smdp_address
+		FROM profile_state
+		WHERE tenant_id = $1 AND eid = $2
+		ORDER BY iccid
+	`, tenantString(tenantID), eid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	states := make([]storage.ProfileState, 0)
+	for rows.Next() {
+		var state storage.ProfileState
+		if err := rows.Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.SMDPAddress); err != nil {
+			return nil, err
+		}
+		states = append(states, cloneProfileState(state))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(states) == 0 {
+		var exists bool
+		err = s.pool.QueryRow(ctx, `
+			SELECT true
+			FROM devices
+			WHERE tenant_id = $1 AND eid = $2
+		`, tenantString(tenantID), eid).Scan(&exists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, storage.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return states, nil
+}
+
+// SetProfileState stores one profile state.
 func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, state storage.ProfileState) error {
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO profile_state (tenant_id, eid, state_payload)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (tenant_id, eid)
-		DO UPDATE SET state_payload = EXCLUDED.state_payload, updated_at = now()
-	`, tenantString(tenantID), state.EID, state.Data)
+		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, smdp_address)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (tenant_id, eid, iccid)
+		DO UPDATE SET is_enabled = EXCLUDED.is_enabled,
+			smdp_address = EXCLUDED.smdp_address,
+			updated_at = now()
+	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.SMDPAddress)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return storage.ErrNotFound
 		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return storage.ErrNotFound
+	}
+	return nil
+}
+
+// DeleteProfileState removes one profile state.
+func (s *Store) DeleteProfileState(ctx context.Context, tenantID storage.TenantID, eid string, iccid string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM profile_state
+		WHERE tenant_id = $1 AND eid = $2 AND iccid = $3
+	`, tenantString(tenantID), eid, iccid)
+	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
@@ -320,7 +378,7 @@ func isForeignKeyViolation(err error) bool {
 }
 
 func cloneProfileState(state storage.ProfileState) storage.ProfileState {
-	return storage.ProfileState{EID: state.EID, Data: cloneBytes(state.Data)}
+	return state
 }
 
 func cloneOperation(operation storage.Operation) storage.Operation {

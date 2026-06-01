@@ -11,12 +11,16 @@ CREATE TABLE devices (
 CREATE TABLE profile_state (
 	tenant_id text NOT NULL DEFAULT 'openiotrsp',
 	eid text NOT NULL,
-	state_payload bytea NOT NULL,
+	iccid text NOT NULL,
+	is_enabled boolean NOT NULL,
+	smdp_address text NOT NULL DEFAULT '',
 	created_at timestamptz NOT NULL DEFAULT now(),
 	updated_at timestamptz NOT NULL DEFAULT now(),
-	PRIMARY KEY (tenant_id, eid),
+	PRIMARY KEY (tenant_id, eid, iccid),
 	FOREIGN KEY (tenant_id, eid) REFERENCES devices (tenant_id, eid) ON DELETE CASCADE
 );
+
+CREATE INDEX profile_state_device_idx ON profile_state (tenant_id, eid, is_enabled, iccid);
 
 CREATE TABLE operations (
 	id bigserial PRIMARY KEY,

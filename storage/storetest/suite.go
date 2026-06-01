@@ -44,7 +44,7 @@ func testRecords(t *testing.T, store storage.Store) {
 	tenantID := storage.DefaultTenantID
 	eid := uniqueEID(t, "records")
 
-	if _, err := store.GetProfileState(ctx, tenantID, eid); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.GetProfileState(ctx, tenantID, eid, "891"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetProfileState() error = %v, want %v", err, storage.ErrNotFound)
 	}
 	if _, err := store.ReadEIMConfig(ctx, tenantID, "missing"); !errors.Is(err, storage.ErrNotFound) {
@@ -54,16 +54,34 @@ func testRecords(t *testing.T, store storage.Store) {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
 
-	statePayload := []byte(`{"profiles":[{"iccid":"891"}]}`)
-	if err := store.SetProfileState(ctx, tenantID, storage.ProfileState{EID: eid, Data: statePayload}); err != nil {
+	if err := store.SetProfileState(ctx, tenantID, storage.ProfileState{
+		EID:         eid,
+		ICCID:       "891",
+		IsEnabled:   true,
+		SMDPAddress: "smdp.example",
+	}); err != nil {
 		t.Fatalf("SetProfileState() error = %v", err)
 	}
-	statePayload[0] = '!'
-	gotState, err := store.GetProfileState(ctx, tenantID, eid)
+	gotState, err := store.GetProfileState(ctx, tenantID, eid, "891")
 	if err != nil {
 		t.Fatalf("GetProfileState() error = %v", err)
 	}
-	assertBytes(t, "profile state", gotState.Data, []byte(`{"profiles":[{"iccid":"891"}]}`))
+	if gotState.ICCID != "891" || !gotState.IsEnabled || gotState.SMDPAddress != "smdp.example" {
+		t.Fatalf("profile state = %#v, want enabled 891 with smdp.example", gotState)
+	}
+	gotStates, err := store.ListProfileStates(ctx, tenantID, eid)
+	if err != nil {
+		t.Fatalf("ListProfileStates() error = %v", err)
+	}
+	if len(gotStates) != 1 || gotStates[0].ICCID != "891" {
+		t.Fatalf("ListProfileStates() = %#v, want one profile 891", gotStates)
+	}
+	if err := store.DeleteProfileState(ctx, tenantID, eid, "891"); err != nil {
+		t.Fatalf("DeleteProfileState() error = %v", err)
+	}
+	if _, err := store.GetProfileState(ctx, tenantID, eid, "891"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetProfileState(deleted) error = %v, want %v", err, storage.ErrNotFound)
+	}
 
 	configPayload := []byte("encoded-eim-config")
 	if err := store.StoreEIMConfig(ctx, tenantID, storage.EIMConfig{EIMID: "eim.example", Data: configPayload}); err != nil {
@@ -113,23 +131,27 @@ func testTenantIsolation(t *testing.T, store storage.Store) {
 			t.Fatalf("RegisterDevice(%s) error = %v", tenantID, err)
 		}
 	}
-	if err := store.SetProfileState(ctx, tenantA, storage.ProfileState{EID: eid, Data: []byte("tenant-a")}); err != nil {
+	if err := store.SetProfileState(ctx, tenantA, storage.ProfileState{EID: eid, ICCID: "891", IsEnabled: true}); err != nil {
 		t.Fatalf("SetProfileState(tenantA) error = %v", err)
 	}
-	if err := store.SetProfileState(ctx, tenantB, storage.ProfileState{EID: eid, Data: []byte("tenant-b")}); err != nil {
+	if err := store.SetProfileState(ctx, tenantB, storage.ProfileState{EID: eid, ICCID: "891", IsEnabled: false}); err != nil {
 		t.Fatalf("SetProfileState(tenantB) error = %v", err)
 	}
 
-	gotA, err := store.GetProfileState(ctx, tenantA, eid)
+	gotA, err := store.GetProfileState(ctx, tenantA, eid, "891")
 	if err != nil {
 		t.Fatalf("GetProfileState(tenantA) error = %v", err)
 	}
-	gotB, err := store.GetProfileState(ctx, tenantB, eid)
+	gotB, err := store.GetProfileState(ctx, tenantB, eid, "891")
 	if err != nil {
 		t.Fatalf("GetProfileState(tenantB) error = %v", err)
 	}
-	assertBytes(t, "tenant A state", gotA.Data, []byte("tenant-a"))
-	assertBytes(t, "tenant B state", gotB.Data, []byte("tenant-b"))
+	if !gotA.IsEnabled {
+		t.Fatalf("tenant A profile enabled = false, want true")
+	}
+	if gotB.IsEnabled {
+		t.Fatalf("tenant B profile enabled = true, want false")
+	}
 
 	if _, err := store.EnqueueOperation(ctx, tenantA, storage.OperationRequest{EID: eid, Kind: storage.OperationEuiccPackage, Payload: []byte("a")}); err != nil {
 		t.Fatalf("EnqueueOperation(tenantA) error = %v", err)

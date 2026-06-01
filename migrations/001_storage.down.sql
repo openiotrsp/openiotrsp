@@ -4,5 +4,6 @@ DROP TABLE IF EXISTS eim_config;
 DROP TABLE IF EXISTS operation_results;
 DROP INDEX IF EXISTS operations_poll_idx;
 DROP TABLE IF EXISTS operations;
+DROP INDEX IF EXISTS profile_state_device_idx;
 DROP TABLE IF EXISTS profile_state;
 DROP TABLE IF EXISTS devices;

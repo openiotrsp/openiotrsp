@@ -15,7 +15,7 @@ type Store struct {
 	mu sync.Mutex
 
 	devices       map[deviceKey]memoryDevice
-	profileStates map[deviceKey]storage.ProfileState
+	profileStates map[profileStateKey]storage.ProfileState
 	operations    map[int64]memoryOperation
 	results       map[resultKey]storage.EUICCPackageResult
 	eimConfigs    map[configKey]storage.EIMConfig
@@ -45,6 +45,12 @@ type resultKey struct {
 	sequenceNumber int64
 }
 
+type profileStateKey struct {
+	tenantID storage.TenantID
+	eid      string
+	iccid    string
+}
+
 type configKey struct {
 	tenantID storage.TenantID
 	eimID    string
@@ -59,7 +65,7 @@ type storedNotification struct {
 func New() *Store {
 	return &Store{
 		devices:         make(map[deviceKey]memoryDevice),
-		profileStates:   make(map[deviceKey]storage.ProfileState),
+		profileStates:   make(map[profileStateKey]storage.ProfileState),
 		operations:      make(map[int64]memoryOperation),
 		results:         make(map[resultKey]storage.EUICCPackageResult),
 		eimConfigs:      make(map[configKey]storage.EIMConfig),
@@ -83,22 +89,44 @@ func (s *Store) RegisterDevice(ctx context.Context, tenantID storage.TenantID, d
 	return nil
 }
 
-// GetProfileState reads one device's profile state.
-func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, eid string) (storage.ProfileState, error) {
+// GetProfileState reads one profile state.
+func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, eid string, iccid string) (storage.ProfileState, error) {
 	if err := ctx.Err(); err != nil {
 		return storage.ProfileState{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	state, ok := s.profileStates[newDeviceKey(tenantID, eid)]
+	state, ok := s.profileStates[newProfileStateKey(tenantID, eid, iccid)]
 	if !ok {
 		return storage.ProfileState{}, storage.ErrNotFound
 	}
 	return cloneProfileState(state), nil
 }
 
-// SetProfileState stores one device's profile state.
+// ListProfileStates reads all known profile states for one eUICC.
+func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.ProfileState, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deviceKey := newDeviceKey(tenantID, eid)
+	if _, ok := s.devices[deviceKey]; !ok {
+		return nil, storage.ErrNotFound
+	}
+	states := make([]storage.ProfileState, 0)
+	for key, state := range s.profileStates {
+		if key.tenantID == deviceKey.tenantID && key.eid == eid {
+			states = append(states, cloneProfileState(state))
+		}
+	}
+	sortProfileStates(states)
+	return states, nil
+}
+
+// SetProfileState stores one profile state.
 func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, state storage.ProfileState) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -106,11 +134,31 @@ func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	key := newDeviceKey(tenantID, state.EID)
-	if _, ok := s.devices[key]; !ok {
+	deviceKey := newDeviceKey(tenantID, state.EID)
+	if _, ok := s.devices[deviceKey]; !ok {
 		return storage.ErrNotFound
 	}
-	s.profileStates[key] = cloneProfileState(state)
+	s.profileStates[newProfileStateKey(tenantID, state.EID, state.ICCID)] = cloneProfileState(state)
+	return nil
+}
+
+// DeleteProfileState removes one profile state.
+func (s *Store) DeleteProfileState(ctx context.Context, tenantID storage.TenantID, eid string, iccid string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deviceKey := newDeviceKey(tenantID, eid)
+	if _, ok := s.devices[deviceKey]; !ok {
+		return storage.ErrNotFound
+	}
+	key := newProfileStateKey(tenantID, eid, iccid)
+	if _, ok := s.profileStates[key]; !ok {
+		return storage.ErrNotFound
+	}
+	delete(s.profileStates, key)
 	return nil
 }
 
@@ -308,10 +356,22 @@ func newDeviceKey(tenantID storage.TenantID, eid string) deviceKey {
 	return deviceKey{tenantID: storage.NormalizeTenantID(tenantID), eid: eid}
 }
 
+func newProfileStateKey(tenantID storage.TenantID, eid string, iccid string) profileStateKey {
+	return profileStateKey{tenantID: storage.NormalizeTenantID(tenantID), eid: eid, iccid: iccid}
+}
+
 func sortOperations(operations []storage.Operation) {
 	for i := 1; i < len(operations); i++ {
 		for j := i; j > 0 && operations[j-1].SequenceNumber > operations[j].SequenceNumber; j-- {
 			operations[j-1], operations[j] = operations[j], operations[j-1]
+		}
+	}
+}
+
+func sortProfileStates(states []storage.ProfileState) {
+	for i := 1; i < len(states); i++ {
+		for j := i; j > 0 && states[j-1].ICCID > states[j].ICCID; j-- {
+			states[j-1], states[j] = states[j], states[j-1]
 		}
 	}
 }
@@ -324,7 +384,7 @@ func normalizeResultStatus(status storage.OperationStatus) storage.OperationStat
 }
 
 func cloneProfileState(state storage.ProfileState) storage.ProfileState {
-	return storage.ProfileState{EID: state.EID, Data: cloneBytes(state.Data)}
+	return state
 }
 
 func cloneOperation(operation storage.Operation) storage.Operation {
