@@ -86,6 +86,22 @@ func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, 
 	return nil
 }
 
+// NextEUICCPackageCounter returns the next eUICC package counter and persists
+// the increment atomically for this tenant and EID.
+func (s *Store) NextEUICCPackageCounter(ctx context.Context, tenantID storage.TenantID, eid string) (int64, error) {
+	var counter int64
+	err := s.pool.QueryRow(ctx, `
+		UPDATE devices
+		SET next_euicc_package_counter = next_euicc_package_counter + 1, updated_at = now()
+		WHERE tenant_id = $1 AND eid = $2
+		RETURNING next_euicc_package_counter - 1
+	`, tenantString(tenantID), eid).Scan(&counter)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, storage.ErrNotFound
+	}
+	return counter, err
+}
+
 // EnqueueOperation appends pending work for a device.
 func (s *Store) EnqueueOperation(ctx context.Context, tenantID storage.TenantID, request storage.OperationRequest) (storage.Operation, error) {
 	tx, err := s.pool.Begin(ctx)

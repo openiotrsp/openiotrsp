@@ -106,6 +106,7 @@ type Store interface {
 	RegisterDevice(ctx context.Context, tenantID TenantID, device Device) error
 	GetProfileState(ctx context.Context, tenantID TenantID, eid string) (ProfileState, error)
 	SetProfileState(ctx context.Context, tenantID TenantID, state ProfileState) error
+	NextEUICCPackageCounter(ctx context.Context, tenantID TenantID, eid string) (int64, error)
 	EnqueueOperation(ctx context.Context, tenantID TenantID, operation OperationRequest) (Operation, error)
 	FetchPendingOperations(ctx context.Context, tenantID TenantID, eid string, limit int) ([]Operation, error)
 	RecordEUICCPackageResult(ctx context.Context, tenantID TenantID, result EUICCPackageResult) error

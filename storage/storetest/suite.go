@@ -26,6 +26,7 @@ func Run(t *testing.T, factory Factory) {
 	}{
 		{"device profile config result notification", testRecords},
 		{"tenant isolation", testTenantIsolation},
+		{"eUICC package counter monotonicity", testEUICCPackageCounterMonotonicity},
 		{"operation queue polling", testOperationQueuePolling},
 		{"concurrent queue safety", testConcurrentQueueSafety},
 	}
@@ -149,6 +150,39 @@ func testTenantIsolation(t *testing.T, store storage.Store) {
 	}
 	if len(pendingB) != 1 || string(pendingB[0].Payload) != "b" {
 		t.Fatalf("tenant B pending = %#v, want one payload b", pendingB)
+	}
+}
+
+func testEUICCPackageCounterMonotonicity(t *testing.T, store storage.Store) {
+	ctx := context.Background()
+	tenantID := storage.DefaultTenantID
+	eid := uniqueEID(t, "counter")
+	otherEID := eid + "-other"
+
+	if _, err := store.NextEUICCPackageCounter(ctx, tenantID, eid); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("NextEUICCPackageCounter(missing) error = %v, want %v", err, storage.ErrNotFound)
+	}
+	for _, deviceEID := range []string{eid, otherEID} {
+		if err := store.RegisterDevice(ctx, tenantID, storage.Device{EID: deviceEID}); err != nil {
+			t.Fatalf("RegisterDevice(%s) error = %v", deviceEID, err)
+		}
+	}
+
+	for want := int64(1); want <= 3; want++ {
+		got, err := store.NextEUICCPackageCounter(ctx, tenantID, eid)
+		if err != nil {
+			t.Fatalf("NextEUICCPackageCounter(%d) error = %v", want, err)
+		}
+		if got != want {
+			t.Fatalf("counter = %d, want %d", got, want)
+		}
+	}
+	other, err := store.NextEUICCPackageCounter(ctx, tenantID, otherEID)
+	if err != nil {
+		t.Fatalf("NextEUICCPackageCounter(other) error = %v", err)
+	}
+	if other != 1 {
+		t.Fatalf("other EID counter = %d, want 1", other)
 	}
 }
 

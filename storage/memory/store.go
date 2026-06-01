@@ -25,7 +25,8 @@ type Store struct {
 }
 
 type memoryDevice struct {
-	nextSequence int64
+	nextSequence            int64
+	nextEUICCPackageCounter int64
 }
 
 type memoryOperation struct {
@@ -78,7 +79,7 @@ func (s *Store) RegisterDevice(ctx context.Context, tenantID storage.TenantID, d
 	if _, ok := s.devices[key]; ok {
 		return nil
 	}
-	s.devices[key] = memoryDevice{nextSequence: 1}
+	s.devices[key] = memoryDevice{nextSequence: 1, nextEUICCPackageCounter: 1}
 	return nil
 }
 
@@ -111,6 +112,26 @@ func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, 
 	}
 	s.profileStates[key] = cloneProfileState(state)
 	return nil
+}
+
+// NextEUICCPackageCounter returns the next eUICC package counter and persists
+// the increment atomically for this tenant and EID.
+func (s *Store) NextEUICCPackageCounter(ctx context.Context, tenantID storage.TenantID, eid string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := newDeviceKey(tenantID, eid)
+	device, ok := s.devices[key]
+	if !ok {
+		return 0, storage.ErrNotFound
+	}
+	counter := device.nextEUICCPackageCounter
+	device.nextEUICCPackageCounter++
+	s.devices[key] = device
+	return counter, nil
 }
 
 // EnqueueOperation appends pending work for a device.
