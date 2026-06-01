@@ -3,7 +3,9 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -16,6 +18,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5/pgxpool"
+	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/storage"
 	storepg "github.com/openiotrsp/openiotrsp/storage/postgres"
 	"github.com/openiotrsp/openiotrsp/storage/storetest"
@@ -156,6 +159,180 @@ func TestEUICCPackageCounterConcurrentSameEID(t *testing.T) {
 	}
 }
 
+func TestOperationRedeliversUntilResultRecorded(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	logPostgresTarget(t, dsn)
+	cleanDatabase(t, dsn)
+	runMigration(t, dsn, func(migration *migrate.Migrate) error {
+		return migration.Up()
+	})
+
+	ctx := context.Background()
+	store, err := storepg.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	eidBytes := postgresTestEID(0x81)
+	eid := hex.EncodeToString(eidBytes)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eid}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	payload := postgresEncode(t, postgresSampleEuiccPackageRequest(eidBytes, 42))
+	queued, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eid,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	first := fetchOnePendingOperation(t, store, ctx, eid)
+	if first.ID != queued.ID || first.SequenceNumber != queued.SequenceNumber {
+		t.Fatalf("first fetch = id %d seq %d, want id %d seq %d", first.ID, first.SequenceNumber, queued.ID, queued.SequenceNumber)
+	}
+	if first.Status != storage.OperationPending {
+		t.Fatalf("first fetch status = %s, want pending", first.Status)
+	}
+	if !bytes.Equal(first.Payload, payload) {
+		t.Fatalf("first fetch payload changed")
+	}
+	if got := postgresDecodeEuiccPackage(t, first.Payload).EuiccPackageSigned.CounterValue; got != 42 {
+		t.Fatalf("first fetch counterValue = %d, want 42", got)
+	}
+
+	second := fetchOnePendingOperation(t, store, ctx, eid)
+	if second.ID != first.ID || second.SequenceNumber != first.SequenceNumber {
+		t.Fatalf("redelivery = id %d seq %d, want id %d seq %d", second.ID, second.SequenceNumber, first.ID, first.SequenceNumber)
+	}
+	if !bytes.Equal(second.Payload, first.Payload) {
+		t.Fatalf("redelivered payload changed")
+	}
+	if got := postgresDecodeEuiccPackage(t, second.Payload).EuiccPackageSigned.CounterValue; got != 42 {
+		t.Fatalf("redelivered counterValue = %d, want 42", got)
+	}
+
+	if err := store.RecordEUICCPackageResult(ctx, storage.DefaultTenantID, storage.EUICCPackageResult{
+		EID:            eid,
+		OperationID:    second.ID,
+		SequenceNumber: second.SequenceNumber,
+		Status:         storage.OperationDone,
+		Payload:        []byte{0x30, 0x03, 0x02, 0x01, 0x00},
+	}); err != nil {
+		t.Fatalf("RecordEUICCPackageResult() error = %v", err)
+	}
+	afterResult, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eid, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations(after result) error = %v", err)
+	}
+	if len(afterResult) != 0 {
+		t.Fatalf("FetchPendingOperations(after result) returned %d operations, want 0", len(afterResult))
+	}
+}
+
+func TestConcurrentOperationPollsDoNotCorruptRedeliveryState(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	logPostgresTarget(t, dsn)
+	cleanDatabase(t, dsn)
+	runMigration(t, dsn, func(migration *migrate.Migrate) error {
+		return migration.Up()
+	})
+
+	ctx := context.Background()
+	store, err := storepg.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	eidBytes := postgresTestEID(0x82)
+	eid := hex.EncodeToString(eidBytes)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eid}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	payload := postgresEncode(t, postgresSampleEuiccPackageRequest(eidBytes, 77))
+	queued, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eid,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	results := make(chan storage.Operation, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for range 2 {
+		go func() {
+			defer wg.Done()
+			<-start
+			operations, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eid, 1)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if len(operations) != 1 {
+				errs <- fmt.Errorf("FetchPendingOperations() returned %d operations, want 1", len(operations))
+				return
+			}
+			results <- operations[0]
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(results)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	polls := make([]storage.Operation, 0, 2)
+	for operation := range results {
+		polls = append(polls, operation)
+	}
+	if len(polls) != 2 {
+		t.Fatalf("collected %d poll results, want 2", len(polls))
+	}
+	for _, poll := range polls {
+		if poll.ID != queued.ID || poll.SequenceNumber != queued.SequenceNumber {
+			t.Fatalf("concurrent poll = id %d seq %d, want id %d seq %d", poll.ID, poll.SequenceNumber, queued.ID, queued.SequenceNumber)
+		}
+		if poll.Status != storage.OperationPending {
+			t.Fatalf("concurrent poll status = %s, want pending", poll.Status)
+		}
+		if !bytes.Equal(poll.Payload, payload) {
+			t.Fatalf("concurrent poll payload changed")
+		}
+		if got := postgresDecodeEuiccPackage(t, poll.Payload).EuiccPackageSigned.CounterValue; got != 77 {
+			t.Fatalf("concurrent poll counterValue = %d, want 77", got)
+		}
+	}
+
+	if err := store.RecordEUICCPackageResult(ctx, storage.DefaultTenantID, storage.EUICCPackageResult{
+		EID:            eid,
+		OperationID:    queued.ID,
+		SequenceNumber: queued.SequenceNumber,
+		Status:         storage.OperationDone,
+		Payload:        []byte{0x30, 0x03, 0x02, 0x01, 0x00},
+	}); err != nil {
+		t.Fatalf("RecordEUICCPackageResult() error = %v", err)
+	}
+	afterResult, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eid, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations(after result) error = %v", err)
+	}
+	if len(afterResult) != 0 {
+		t.Fatalf("FetchPendingOperations(after result) returned %d operations, want 0", len(afterResult))
+	}
+}
+
 func postgresTestDSN(t testing.TB) string {
 	t.Helper()
 	dsn := os.Getenv(postgresTestDSNEnv)
@@ -277,4 +454,58 @@ func migrationDatabaseURL(t testing.TB, dsn string) string {
 	}
 	parsed.Scheme = "pgx5"
 	return parsed.String()
+}
+
+func fetchOnePendingOperation(t testing.TB, store storage.Store, ctx context.Context, eid string) storage.Operation {
+	t.Helper()
+	operations, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eid, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(operations) != 1 {
+		t.Fatalf("FetchPendingOperations() returned %d operations, want 1", len(operations))
+	}
+	return operations[0]
+}
+
+func postgresEncode(t testing.TB, value protocolasn1.Marshaler) []byte {
+	t.Helper()
+	payload, err := protocolasn1.Encode(value)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	return payload
+}
+
+func postgresDecodeEuiccPackage(t testing.TB, payload []byte) protocolasn1.EuiccPackageRequest {
+	t.Helper()
+	var request protocolasn1.EuiccPackageRequest
+	if err := protocolasn1.Decode(payload, &request); err != nil {
+		t.Fatalf("Decode(EuiccPackageRequest) error = %v", err)
+	}
+	return request
+}
+
+func postgresSampleEuiccPackageRequest(eid []byte, counterValue int64) *protocolasn1.EuiccPackageRequest {
+	return &protocolasn1.EuiccPackageRequest{
+		EuiccPackageSigned: protocolasn1.EuiccPackageSigned{
+			EimID:        "testeim1",
+			EID:          append([]byte(nil), eid...),
+			CounterValue: counterValue,
+			EuiccPackage: protocolasn1.EuiccPackage{
+				Kind: protocolasn1.EuiccPackagePSMO,
+				PSMOs: []protocolasn1.Psmo{{
+					Operation: protocolasn1.PsmoEnable,
+					ICCID:     []byte{0x89, 0x10, 0x10, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0xf1},
+				}},
+			},
+		},
+		EimSignature: []byte{0xa5, 0xa5, 0xa5},
+	}
+}
+
+func postgresTestEID(last byte) []byte {
+	eid := make([]byte, 16)
+	eid[15] = last
+	return eid
 }

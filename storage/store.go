@@ -36,10 +36,11 @@ type ProfileState struct {
 type OperationStatus string
 
 const (
-	// OperationPending is ready to be returned to the IPA.
+	// OperationPending is ready to be returned to the IPA. ESipa package delivery
+	// does not clear this state; the result upload does.
 	OperationPending OperationStatus = "pending"
-	// OperationInFlight has been returned to the IPA and awaits acknowledgement
-	// or package result handling.
+	// OperationInFlight is reserved for transports that use explicit leases. ESipa
+	// keeps operations pending until a result is recorded.
 	OperationInFlight OperationStatus = "in-flight"
 	// OperationDone completed successfully.
 	OperationDone OperationStatus = "done"

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/openiotrsp/openiotrsp/storage"
 )
@@ -247,8 +246,8 @@ func testOperationQueuePolling(t *testing.T, store storage.Store) {
 		if operation.SequenceNumber != wantSequence {
 			t.Fatalf("operation %d sequence = %d, want %d", index, operation.SequenceNumber, wantSequence)
 		}
-		if operation.Status != storage.OperationInFlight {
-			t.Fatalf("operation %d status = %q, want %q", index, operation.Status, storage.OperationInFlight)
+		if operation.Status != storage.OperationPending {
+			t.Fatalf("operation %d status = %q, want %q", index, operation.Status, storage.OperationPending)
 		}
 	}
 
@@ -256,8 +255,31 @@ func testOperationQueuePolling(t *testing.T, store storage.Store) {
 	if err != nil {
 		t.Fatalf("FetchPendingOperations(second) error = %v", err)
 	}
-	if len(secondPoll) != 0 {
-		t.Fatalf("second poll returned %d operations, want 0", len(secondPoll))
+	if len(secondPoll) != 3 {
+		t.Fatalf("second poll returned %d operations, want 3 redelivered operations", len(secondPoll))
+	}
+	for index, operation := range secondPoll {
+		wantSequence := int64(index + 1)
+		if operation.SequenceNumber != wantSequence {
+			t.Fatalf("redelivered operation %d sequence = %d, want %d", index, operation.SequenceNumber, wantSequence)
+		}
+	}
+	for _, operation := range secondPoll {
+		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
+			EID:            eid,
+			SequenceNumber: operation.SequenceNumber,
+			Status:         storage.OperationDone,
+			Payload:        []byte("result"),
+		}); err != nil {
+			t.Fatalf("RecordEUICCPackageResult(%d) error = %v", operation.SequenceNumber, err)
+		}
+	}
+	thirdPoll, err := store.FetchPendingOperations(ctx, tenantID, eid, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations(third) error = %v", err)
+	}
+	if len(thirdPoll) != 0 {
+		t.Fatalf("third poll returned %d operations, want 0 after results", len(thirdPoll))
 	}
 }
 
@@ -266,14 +288,13 @@ func testConcurrentQueueSafety(t *testing.T, store storage.Store) {
 	tenantID := storage.DefaultTenantID
 	eid := uniqueEID(t, "concurrent")
 	const operationCount = 64
-	const fetcherCount = 8
 
 	if err := store.RegisterDevice(ctx, tenantID, storage.Device{EID: eid}); err != nil {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
 
 	enqueuesDone := make(chan struct{})
-	errs := make(chan error, operationCount+fetcherCount)
+	errs := make(chan error, operationCount)
 	var enqueueWG sync.WaitGroup
 	enqueueWG.Add(operationCount)
 	for index := range operationCount {
@@ -295,41 +316,7 @@ func testConcurrentQueueSafety(t *testing.T, store storage.Store) {
 		close(enqueuesDone)
 	}()
 
-	var fetchedMu sync.Mutex
-	fetched := make(map[int64]storage.Operation)
-	var fetchWG sync.WaitGroup
-	fetchWG.Add(fetcherCount)
-	for range fetcherCount {
-		go func() {
-			defer fetchWG.Done()
-			for {
-				operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 3)
-				if err != nil {
-					errs <- fmt.Errorf("fetch: %w", err)
-					return
-				}
-				if len(operations) == 0 {
-					select {
-					case <-enqueuesDone:
-						return
-					default:
-						time.Sleep(time.Millisecond)
-						continue
-					}
-				}
-				fetchedMu.Lock()
-				for _, operation := range operations {
-					if _, exists := fetched[operation.ID]; exists {
-						errs <- fmt.Errorf("duplicate operation id %d", operation.ID)
-						continue
-					}
-					fetched[operation.ID] = operation
-				}
-				fetchedMu.Unlock()
-			}
-		}()
-	}
-	fetchWG.Wait()
+	<-enqueuesDone
 	close(errs)
 
 	for err := range errs {
@@ -337,14 +324,18 @@ func testConcurrentQueueSafety(t *testing.T, store storage.Store) {
 			t.Fatal(err)
 		}
 	}
+	fetched, err := store.FetchPendingOperations(ctx, tenantID, eid, operationCount)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations(after concurrent enqueue) error = %v", err)
+	}
 	if len(fetched) != operationCount {
 		t.Fatalf("fetched %d operations, want %d", len(fetched), operationCount)
 	}
 
 	seenSequences := make(map[int64]bool, operationCount)
 	for _, operation := range fetched {
-		if operation.Status != storage.OperationInFlight {
-			t.Fatalf("operation %d status = %q, want %q", operation.ID, operation.Status, storage.OperationInFlight)
+		if operation.Status != storage.OperationPending {
+			t.Fatalf("operation %d status = %q, want %q", operation.ID, operation.Status, storage.OperationPending)
 		}
 		if operation.SequenceNumber < 1 || operation.SequenceNumber > operationCount {
 			t.Fatalf("operation %d sequence = %d, outside 1..%d", operation.ID, operation.SequenceNumber, operationCount)
@@ -355,13 +346,6 @@ func testConcurrentQueueSafety(t *testing.T, store storage.Store) {
 		seenSequences[operation.SequenceNumber] = true
 	}
 
-	secondPoll, err := store.FetchPendingOperations(ctx, tenantID, eid, operationCount)
-	if err != nil {
-		t.Fatalf("FetchPendingOperations(after concurrent fetch) error = %v", err)
-	}
-	if len(secondPoll) != 0 {
-		t.Fatalf("second poll returned %d operations, want 0", len(secondPoll))
-	}
 }
 
 func uniqueEID(t testing.TB, suffix string) string {

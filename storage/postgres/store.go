@@ -207,33 +207,21 @@ func (s *Store) EnqueueOperation(ctx context.Context, tenantID storage.TenantID,
 	return cloneOperation(operation), nil
 }
 
-// FetchPendingOperations returns pending operations in sequence order and marks
-// them in-flight.
+// FetchPendingOperations returns pending operations in sequence order. Operations
+// remain pending until their result is recorded so a dropped IPA exchange can
+// safely fetch the same package again.
 func (s *Store) FetchPendingOperations(ctx context.Context, tenantID storage.TenantID, eid string, limit int) ([]storage.Operation, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 
 	rows, err := s.pool.Query(ctx, `
-		WITH selected AS (
-			SELECT id
-			FROM operations
-			WHERE tenant_id = $1 AND eid = $2 AND status = $3
-			ORDER BY sequence_number
-			LIMIT $4
-			FOR UPDATE SKIP LOCKED
-		), updated AS (
-			UPDATE operations AS operation
-			SET status = $5, updated_at = now()
-			FROM selected
-			WHERE operation.id = selected.id
-			RETURNING operation.id, operation.eid, operation.sequence_number, operation.kind,
-				operation.payload, operation.status, operation.created_at, operation.updated_at
-		)
 		SELECT id, eid, sequence_number, kind, payload, status, created_at, updated_at
-		FROM updated
+		FROM operations
+		WHERE tenant_id = $1 AND eid = $2 AND status = $3
 		ORDER BY sequence_number
-	`, tenantString(tenantID), eid, string(storage.OperationPending), limit, string(storage.OperationInFlight))
+		LIMIT $4
+	`, tenantString(tenantID), eid, string(storage.OperationPending), limit)
 	if err != nil {
 		return nil, err
 	}

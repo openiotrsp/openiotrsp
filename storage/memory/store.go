@@ -214,8 +214,9 @@ func (s *Store) EnqueueOperation(ctx context.Context, tenantID storage.TenantID,
 	return cloneOperation(operation), nil
 }
 
-// FetchPendingOperations returns pending operations in sequence order and marks
-// them in-flight.
+// FetchPendingOperations returns pending operations in sequence order. Operations
+// remain pending until their result is recorded so a dropped IPA exchange can
+// safely fetch the same package again.
 func (s *Store) FetchPendingOperations(ctx context.Context, tenantID storage.TenantID, eid string, limit int) ([]storage.Operation, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -239,14 +240,8 @@ func (s *Store) FetchPendingOperations(ctx context.Context, tenantID storage.Ten
 	if len(pending) > limit {
 		pending = pending[:limit]
 	}
-
-	now := time.Now().UTC()
 	for index := range pending {
-		operation := pending[index]
-		operation.Status = storage.OperationInFlight
-		operation.UpdatedAt = now
-		s.operations[operation.ID] = memoryOperation{tenantID: tenantID, operation: operation}
-		pending[index] = cloneOperation(operation)
+		pending[index] = cloneOperation(pending[index])
 	}
 	return pending, nil
 }
