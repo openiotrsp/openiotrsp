@@ -2,6 +2,7 @@ CREATE TABLE devices (
 	tenant_id text NOT NULL DEFAULT 'openiotrsp',
 	eid text NOT NULL,
 	next_sequence_number bigint NOT NULL DEFAULT 1 CHECK (next_sequence_number > 0),
+	next_euicc_package_counter bigint NOT NULL DEFAULT 1 CHECK (next_euicc_package_counter > 0),
 	created_at timestamptz NOT NULL DEFAULT now(),
 	updated_at timestamptz NOT NULL DEFAULT now(),
 	PRIMARY KEY (tenant_id, eid)
