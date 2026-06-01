@@ -46,6 +46,7 @@ var (
 	tagEID              = bertlv.Application.Primitive(26)
 	tagEuiccPackage     = bertlv.ContextSpecific.Constructed(81)
 	tagIpaEuiccData     = bertlv.ContextSpecific.Constructed(82)
+	tagDownloadTrig     = bertlv.ContextSpecific.Constructed(84)
 	tagTransferPackage  = bertlv.ContextSpecific.Constructed(78)
 	tagGetEimPackage    = bertlv.ContextSpecific.Constructed(79)
 	tagProvideResult    = bertlv.ContextSpecific.Constructed(80)
@@ -262,6 +263,9 @@ func recordEimPackageResult(
 	if err != nil {
 		return nil, err
 	}
+	if tlv.Tag.Equal(tagDownloadTrig) {
+		return recordProfileDownloadTriggerResult(ctx, store, tenantID, eid, tlv, payload)
+	}
 	resultTLV := tlv
 	if tlv.Tag.Equal(tagSequence) {
 		resultTLV = tlv.First(tagEuiccPackage)
@@ -292,6 +296,69 @@ func recordEimPackageResult(
 		}
 	}
 	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+}
+
+func recordProfileDownloadTriggerResult(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	tlv *bertlv.TLV,
+	payload []byte,
+) (*protocolasn1.EimAcknowledgements, error) {
+	var result protocolasn1.ProfileDownloadTriggerResult
+	if err := result.UnmarshalBERTLV(tlv); err != nil {
+		return nil, err
+	}
+	operation, ok, err := pendingProfileDownloadTrigger(ctx, store, tenantID, eid, result.EimTransactionID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+	status := storage.OperationDone
+	if result.Error != nil || result.ProfileInstallationSucceeded != nil && !*result.ProfileInstallationSucceeded {
+		status = storage.OperationFailed
+	}
+	if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
+		EID:            eid,
+		OperationID:    operation.ID,
+		SequenceNumber: operation.SequenceNumber,
+		Status:         status,
+		Payload:        cloneBytes(payload),
+	}); err != nil {
+		return nil, err
+	}
+	return &protocolasn1.EimAcknowledgements{
+		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)},
+	}, nil
+}
+
+func pendingProfileDownloadTrigger(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	transactionID []byte,
+) (storage.Operation, bool, error) {
+	operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 100)
+	if err != nil {
+		return storage.Operation{}, false, err
+	}
+	for _, operation := range operations {
+		if operation.Kind != storage.OperationProfileDownloadTrigger {
+			continue
+		}
+		var request protocolasn1.ProfileDownloadTriggerRequest
+		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+			return storage.Operation{}, false, err
+		}
+		if bytes.Equal(request.EimTransactionID, transactionID) {
+			return operation, true, nil
+		}
+	}
+	return storage.Operation{}, false, nil
 }
 
 func resultSequenceNumbers(result *protocolasn1.EuiccPackageResult) []protocolasn1.SequenceNumber {

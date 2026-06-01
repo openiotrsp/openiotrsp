@@ -5,6 +5,7 @@ import "github.com/damonto/euicc-go/bertlv"
 var (
 	tagSequence = bertlv.Universal.Constructed(16)
 	tagInteger  = bertlv.Universal.Primitive(2)
+	tagOctet    = bertlv.Universal.Primitive(4)
 	tagNull     = bertlv.Universal.Primitive(5)
 	tagUTF8     = bertlv.Universal.Primitive(12)
 
@@ -20,5 +21,8 @@ var (
 	tagProvideEimResult   = bertlv.ContextSpecific.Constructed(80)
 
 	tagProfileInfoList     = bertlv.ContextSpecific.Constructed(45)
+	tagProfileInstall      = bertlv.ContextSpecific.Constructed(55)
+	tagProfileInstallData  = bertlv.ContextSpecific.Constructed(39)
+	tagProfileFinalResult  = bertlv.ContextSpecific.Constructed(2)
 	tagSetDefaultDPAddress = bertlv.ContextSpecific.Constructed(101)
 )

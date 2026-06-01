@@ -127,6 +127,172 @@ func (r *ProfileDownloadTriggerRequest) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	return nil
 }
 
+// ProfileDownloadErrorReason identifies ProfileDownloadTriggerResult error reasons.
+type ProfileDownloadErrorReason int64
+
+const (
+	// ProfileDownloadErrorECallActive indicates that an emergency profile is enabled.
+	ProfileDownloadErrorECallActive ProfileDownloadErrorReason = 104
+	// ProfileDownloadErrorUndefined is the generic profile download error.
+	ProfileDownloadErrorUndefined ProfileDownloadErrorReason = 127
+)
+
+// ProfileDownloadError is the profileDownloadError branch of ProfileDownloadTriggerResult.
+type ProfileDownloadError struct {
+	Reason        ProfileDownloadErrorReason
+	ErrorResponse []byte
+}
+
+// ProfileDownloadTriggerResult is SGP.32 ProfileDownloadTriggerResult, tag BF54.
+type ProfileDownloadTriggerResult struct {
+	EimTransactionID             []byte
+	ProfileInstallationRaw       *bertlv.TLV
+	ProfileInstallationSucceeded *bool
+	Error                        *ProfileDownloadError
+}
+
+// MarshalBERTLV encodes ProfileDownloadTriggerResult.
+func (r *ProfileDownloadTriggerResult) MarshalBERTLV() (*bertlv.TLV, error) {
+	if r == nil {
+		return nil, errors.New("asn1: nil ProfileDownloadTriggerResult")
+	}
+	children := make([]*bertlv.TLV, 0, 2)
+	if r.EimTransactionID != nil {
+		children = append(children, octetTLV(bertlv.ContextSpecific.Primitive(2), r.EimTransactionID))
+	}
+	switch {
+	case r.ProfileInstallationRaw != nil:
+		if !r.ProfileInstallationRaw.Tag.Equal(tagProfileInstall) {
+			return nil, fmt.Errorf("%w: got %s, want %s", errUnexpectedTag, r.ProfileInstallationRaw.Tag.String(), tagProfileInstall.String())
+		}
+		children = append(children, cloneTLV(r.ProfileInstallationRaw))
+	case r.Error != nil:
+		errorTLV, err := r.Error.MarshalBERTLV()
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, errorTLV)
+	default:
+		return nil, errors.New("asn1: ProfileDownloadTriggerResult requires result data")
+	}
+	return constructed(tagDownloadTrig, children...), nil
+}
+
+// UnmarshalBERTLV decodes ProfileDownloadTriggerResult.
+func (r *ProfileDownloadTriggerResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if err := expectTag(tlv, tagDownloadTrig); err != nil {
+		return err
+	}
+	var out ProfileDownloadTriggerResult
+	if child := tlv.First(bertlv.ContextSpecific.Primitive(2)); child != nil {
+		out.EimTransactionID = copyBytes(child.Value)
+	}
+	switch child := profileDownloadResultData(tlv); {
+	case child == nil:
+		return errors.New("asn1: missing ProfileDownloadTriggerResult data")
+	case child.Tag.Equal(tagProfileInstall):
+		out.ProfileInstallationRaw = cloneTLV(child)
+		succeeded, err := profileInstallationSucceeded(child)
+		if err != nil {
+			return err
+		}
+		out.ProfileInstallationSucceeded = &succeeded
+	case child.Tag.Equal(tagSequence):
+		out.Error = new(ProfileDownloadError)
+		if err := out.Error.UnmarshalBERTLV(child); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%w: unknown ProfileDownloadTriggerResult data tag %s", errUnexpectedTag, child.Tag.String())
+	}
+	*r = out
+	return nil
+}
+
+// MarshalBERTLV encodes ProfileDownloadError.
+func (e *ProfileDownloadError) MarshalBERTLV() (*bertlv.TLV, error) {
+	if e == nil {
+		return nil, errors.New("asn1: nil ProfileDownloadError")
+	}
+	reason, err := integerTLV(bertlv.ContextSpecific.Primitive(0), e.Reason)
+	if err != nil {
+		return nil, err
+	}
+	children := []*bertlv.TLV{reason}
+	if e.ErrorResponse != nil {
+		children = append(children, octetTLV(tagOctet, e.ErrorResponse))
+	}
+	return constructed(tagSequence, children...), nil
+}
+
+// UnmarshalBERTLV decodes ProfileDownloadError.
+func (e *ProfileDownloadError) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if err := expectTag(tlv, tagSequence); err != nil {
+		return err
+	}
+	var out ProfileDownloadError
+	reason, err := integerValue[ProfileDownloadErrorReason](tlv.First(bertlv.ContextSpecific.Primitive(0)))
+	if err != nil {
+		return err
+	}
+	out.Reason = reason
+	if child := tlv.First(tagOctet); child != nil {
+		out.ErrorResponse = copyBytes(child.Value)
+	}
+	*e = out
+	return nil
+}
+
+func profileInstallationSucceeded(tlv *bertlv.TLV) (bool, error) {
+	if err := expectTag(tlv, tagProfileInstall); err != nil {
+		return false, err
+	}
+	data := tlv.First(tagProfileInstallData)
+	if data == nil {
+		return false, errors.New("asn1: ProfileInstallationResult missing ProfileInstallationResultData")
+	}
+	finalResult := data.First(tagProfileFinalResult)
+	if finalResult == nil {
+		return false, errors.New("asn1: ProfileInstallationResultData missing finalResult")
+	}
+	succeeded, ok := finalResultSucceeded(finalResult.Children)
+	if !ok {
+		return false, errors.New("asn1: cannot determine ProfileInstallationResult finalResult outcome")
+	}
+	return succeeded, nil
+}
+
+func finalResultSucceeded(children []*bertlv.TLV) (bool, bool) {
+	if len(children) == 0 {
+		return false, false
+	}
+	first := children[0]
+	switch {
+	case first.Tag.ContextSpecific() && first.Tag.Value() == 0:
+		return true, true
+	case first.Tag.ContextSpecific() && first.Tag.Value() == 1:
+		return false, true
+	case first.Tag.Equal(tagSequence):
+		return finalResultSucceeded(first.Children)
+	case first.Tag.Equal(bertlv.Application.Primitive(15)):
+		return true, true
+	case first.Tag.Equal(tagInteger):
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func profileDownloadResultData(tlv *bertlv.TLV) *bertlv.TLV {
+	for _, child := range tlv.Children {
+		if child.Tag.Equal(bertlv.ContextSpecific.Primitive(2)) {
+			continue
+		}
+		return child
+	}
+	return nil
+}
+
 // SequenceNumber is SGP.32 SequenceNumber.
 type SequenceNumber int64
 

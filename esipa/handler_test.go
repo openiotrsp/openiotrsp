@@ -20,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
 	piondtls "github.com/pion/dtls/v3"
@@ -243,25 +245,19 @@ func TestProfileDownloadTriggerPoll(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := memory.New()
+	store := &recordingStore{Store: memory.New()}
 	eid := testEID(0x33)
 	eidKey := hex.EncodeToString(eid)
 	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
-	trigger := &protocolasn1.ProfileDownloadTriggerRequest{
-		ProfileDownloadData: &protocolasn1.ProfileDownloadData{
-			Kind:           protocolasn1.ProfileDownloadActivationCode,
-			ActivationCode: "1$example.com$ACT",
-		},
-		EimTransactionID: []byte{0x01, 0x02},
+	transactionID := []byte{0x01, 0x02}
+	trigger, err := profiledownload.NewActivationCodeTrigger("1$example.com$ACT", transactionID)
+	if err != nil {
+		t.Fatalf("NewActivationCodeTrigger() error = %v", err)
 	}
-	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
-		EID:     eidKey,
-		Kind:    storage.OperationProfileDownloadTrigger,
-		Payload: encode(t, trigger),
-	}); err != nil {
-		t.Fatalf("EnqueueOperation() error = %v", err)
+	if _, err := profiledownload.EnqueueTrigger(ctx, store, storage.DefaultTenantID, eidKey, trigger); err != nil {
+		t.Fatalf("EnqueueTrigger() error = %v", err)
 	}
 
 	response, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
@@ -274,6 +270,102 @@ func TestProfileDownloadTriggerPoll(t *testing.T) {
 	}
 	if decoded.ProfileDownloadTriggerRequest == nil || decoded.ProfileDownloadTriggerRequest.ProfileDownloadData.ActivationCode != "1$example.com$ACT" {
 		t.Fatalf("trigger response = %#v", decoded.ProfileDownloadTriggerRequest)
+	}
+
+	resultResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, &protocolasn1.ProfileDownloadTriggerResult{
+					EimTransactionID: transactionID,
+					ProfileInstallationRaw: profileInstallationResultTLV(
+						bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)),
+					),
+				}),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(profile download result) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
+		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != storage.OperationDone {
+		t.Fatalf("recorded results = %#v, want one done result", results)
+	}
+
+	emptyResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	if err != nil {
+		t.Fatalf("Handle(second poll after profile result) error = %v", err)
+	}
+	empty := decodeGetResponse(t, encodeResponse(t, emptyResponse))
+	if empty.Kind != protocolasn1.GetEimPackageError || empty.Error == nil || *empty.Error != getEimPackageErrorNoPackage {
+		t.Fatalf("second poll = %#v, want noEimPackageAvailable", empty)
+	}
+}
+
+func TestProfileDownloadTriggerFailedInstallRecordsFailed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x34)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	transactionID := []byte{0x03, 0x04}
+	trigger := profiledownload.NewDefaultSMDPTrigger(transactionID)
+	if _, err := profiledownload.EnqueueTrigger(ctx, store, storage.DefaultTenantID, eidKey, trigger); err != nil {
+		t.Fatalf("EnqueueTrigger() error = %v", err)
+	}
+
+	_, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, &protocolasn1.ProfileDownloadTriggerResult{
+					EimTransactionID: transactionID,
+					ProfileInstallationRaw: profileInstallationResultTLV(
+						bertlv.NewChildren(bertlv.ContextSpecific.Constructed(1)),
+					),
+				}),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(profile download failed install) error = %v", err)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != storage.OperationFailed {
+		t.Fatalf("recorded results = %#v, want one failed result", results)
+	}
+	pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eidKey, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v, want trigger removed after failed result", pending)
+	}
+}
+
+func TestUnknownEimPackageResultFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x35)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+
+	_, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)))
+	if err == nil {
+		t.Fatal("recordEimPackageResult() succeeded for unknown result tag, want rejection")
 	}
 }
 
@@ -593,6 +685,14 @@ func sampleEuiccPackageResultForTag(sequence int64, resultTag uint64, resultCode
 			EuiccSignEPR: []byte{0x30, 0x03, 0x02, 0x01, 0x02},
 		},
 	}
+}
+
+func profileInstallationResultTLV(finalResultChild *bertlv.TLV) *bertlv.TLV {
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(55),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(39),
+			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(2), finalResultChild),
+		),
+	)
 }
 
 func mustTLV(t *testing.T, value protocolasn1.Marshaler) *protocolasn1.TLV {

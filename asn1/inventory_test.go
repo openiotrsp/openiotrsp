@@ -71,7 +71,7 @@ var sgp32ModuleInventory = []moduleStructureInventoryEntry{
 	{"PendingNotificationList", implementationNotImplemented, "Deferred notification model; imported SGP.22 notification objects are not rebuilt here."},
 	{"EuiccPackageResultList", implementationNotImplemented, "Deferred IPA eUICC data model."},
 	{"IpaEuiccData", implementationNotImplemented, "Deferred IPA eUICC data model."},
-	{"ProfileDownloadTriggerResult", implementationNotImplemented, "Deferred profile download result model."},
+	{"ProfileDownloadTriggerResult", implementationPartial, "Part 3 direct download result; ProfileInstallationResult remains raw SGP.22 TLV but finalResult success/failure is decoded."},
 	{"ISDRProprietaryApplicationTemplateIoT", implementationNotImplemented, "Out of Part 3 Stage 2 package/message scope."},
 	{"IpaeActivationRequest", implementationNotImplemented, "Out of Part 3 Stage 2 package/message scope."},
 	{"IpaeActivationResponse", implementationNotImplemented, "Out of Part 3 Stage 2 package/message scope."},

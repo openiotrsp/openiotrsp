@@ -223,6 +223,22 @@ func knownAnswerDERCases(request *EuiccPackageRequest) []knownAnswerDERCase {
 			wantHex: "bf540ba005800341435482020102",
 		},
 		{
+			name: "ProfileDownloadTriggerRequest default SMDP",
+			source: "Independent OpenSSL DER fixture. Generated with: " +
+				"`openssl asn1parse -genconf` using `asn1=IMPLICIT:84,SEQUENCE:trigger`, " +
+				"`profileDownloadData=IMPLICIT:0,SEQUENCE:pdd`, " +
+				"`contactDefaultSmdp=IMPLICIT:1,NULL`, and " +
+				"`eimTransactionId=IMPLICIT:2,FORMAT:HEX,OCTETSTRING:01`. " +
+				"No SGP.33-1/spec byte example was found for this minimal fixture.",
+			value: &ProfileDownloadTriggerRequest{
+				ProfileDownloadData: &ProfileDownloadData{
+					Kind: ProfileDownloadContactDefaultSMDP,
+				},
+				EimTransactionID: []byte{0x01},
+			},
+			wantHex: "bf5407a0028100820101",
+		},
+		{
 			name: "EuiccPackageRequest",
 			source: "Independent DER fixture regenerated outside the OpenIoTRSP encoder. " +
 				"The context-specific and universal TLV skeleton was generated with " +
@@ -318,10 +334,35 @@ func roundTripCases() []roundTripCase {
 			tagHex:  "a2",
 		},
 		{
+			name:    "ProfileDownloadData default SMDP",
+			covers:  []string{"ProfileDownloadData"},
+			value:   &ProfileDownloadData{Kind: ProfileDownloadContactDefaultSMDP},
+			newFunc: func() Unmarshaler { return new(ProfileDownloadData) },
+			tagHex:  "81",
+		},
+		{
 			name:    "ProfileDownloadTriggerRequest",
 			covers:  []string{"ProfileDownloadTriggerRequest"},
 			value:   &ProfileDownloadTriggerRequest{ProfileDownloadData: &ProfileDownloadData{Kind: ProfileDownloadActivationCode, ActivationCode: "ACT"}, EimTransactionID: []byte{1}},
 			newFunc: func() Unmarshaler { return new(ProfileDownloadTriggerRequest) },
+			tagHex:  "bf54",
+		},
+		{
+			name: "ProfileDownloadTriggerResult",
+			covers: []string{
+				"ProfileDownloadTriggerResult",
+			},
+			value: &ProfileDownloadTriggerResult{
+				EimTransactionID: []byte{1},
+				ProfileInstallationRaw: bertlv.NewChildren(tagProfileInstall,
+					bertlv.NewChildren(tagProfileInstallData,
+						bertlv.NewChildren(tagProfileFinalResult,
+							bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)),
+						),
+					),
+				),
+			},
+			newFunc: func() Unmarshaler { return new(ProfileDownloadTriggerResult) },
 			tagHex:  "bf54",
 		},
 		{
