@@ -332,7 +332,7 @@ func recordEimPackageResult(
 	}
 	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
 	for _, operation := range operations {
-		status := storage.OperationDone
+		var status storage.OperationStatus
 		var domain *euiccpkg.Result
 		if allowUnverifiedEUICCPackageResults {
 			status, err = resultStatusForOperation(operation, &result)
