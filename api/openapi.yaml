@@ -1,0 +1,327 @@
+openapi: 3.0.3
+info:
+  title: OpenIoTRSP Northbound API
+  version: 0.1.0
+  description: Stable HTTP API for queueing eSIM profile operations and reading device state.
+  contact:
+    name: OpenIoTRSP
+servers:
+  - url: /v1
+tags:
+  - name: Operations
+    description: Queue and inspect asynchronous profile operations.
+  - name: Devices
+    description: Read device and profile state.
+paths:
+  /profile-downloads:
+    post:
+      tags:
+        - Operations
+      operationId: triggerProfileDownload
+      summary: Trigger a profile download for one EID or a fleet EID list.
+      description: Queues one profile download trigger per target EID and returns the operation ids immediately.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileDownloadRequest"
+      responses:
+        "202":
+          description: Operations queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/{iccid}/enable:
+    post:
+      tags:
+        - Operations
+      operationId: enableProfile
+      summary: Queue a profile enable operation for an EID.
+      description: Builds a signed PSMO enable package and queues it for the target device IPA.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+        - $ref: "#/components/parameters/ICCID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/{iccid}/disable:
+    post:
+      tags:
+        - Operations
+      operationId: disableProfile
+      summary: Queue a profile disable operation for an EID.
+      description: Builds a signed PSMO disable package and queues it for the target device IPA.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+        - $ref: "#/components/parameters/ICCID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/{iccid}:
+    delete:
+      tags:
+        - Operations
+      operationId: deleteProfile
+      summary: Queue a profile delete operation for an EID.
+      description: Builds a signed PSMO delete package and queues it for the target device IPA.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+        - $ref: "#/components/parameters/ICCID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/status:
+    get:
+      tags:
+        - Devices
+      operationId: getDeviceStatus
+      summary: Read profile state for one EID.
+      description: Returns the eIM persisted view of all known profiles for the requested EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "200":
+          description: Device state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceStatus"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /operations/{id}:
+    get:
+      tags:
+        - Operations
+      operationId: getOperationResult
+      summary: Read operation status and completion result by id.
+      description: Returns operation metadata and, once complete, the stored protocol result payload.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: Operation status and optional result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResultResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    EID:
+      name: eid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9A-Fa-f]{32}$"
+    ICCID:
+      name: iccid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9A-Fa-f]+$"
+  responses:
+    Error:
+      description: Error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    ProfileDownloadRequest:
+      type: object
+      description: Provide either eid or eids, and exactly one download source.
+      allOf:
+        - oneOf:
+            - required:
+                - eid
+            - required:
+                - eids
+        - oneOf:
+            - required:
+                - activationCode
+            - required:
+                - smdpAddress
+                - matchingId
+            - required:
+                - defaultSmdp
+              properties:
+                defaultSmdp:
+                  enum:
+                    - true
+            - required:
+                - smdsAddress
+      properties:
+        eid:
+          type: string
+          pattern: "^[0-9A-Fa-f]{32}$"
+        eids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            pattern: "^[0-9A-Fa-f]{32}$"
+        activationCode:
+          type: string
+          maxLength: 255
+          example: 1$smdpp.test.rsp.sysmocom.de$TS48V1-B-UNIQUE
+        smdpAddress:
+          type: string
+        matchingId:
+          type: string
+        defaultSmdp:
+          type: boolean
+          default: false
+        smdsAddress:
+          type: string
+      additionalProperties: false
+    EnqueueResponse:
+      type: object
+      required:
+        - operations
+      properties:
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Operation"
+    Operation:
+      type: object
+      required:
+        - id
+        - eid
+        - sequenceNumber
+        - kind
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: integer
+          format: int64
+        eid:
+          type: string
+        sequenceNumber:
+          type: integer
+          format: int64
+        kind:
+          type: string
+          enum:
+            - euicc-package
+            - profile-download-trigger
+            - ipa-euicc-data
+        status:
+          type: string
+          enum:
+            - pending
+            - in-flight
+            - done
+            - failed
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DeviceStatus:
+      type: object
+      required:
+        - eid
+        - profiles
+      properties:
+        eid:
+          type: string
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Profile"
+    Profile:
+      type: object
+      required:
+        - iccid
+        - isEnabled
+        - smdpAddress
+      properties:
+        iccid:
+          type: string
+        isEnabled:
+          type: boolean
+        smdpAddress:
+          type: string
+    OperationResultResponse:
+      type: object
+      required:
+        - operation
+      properties:
+        operation:
+          $ref: "#/components/schemas/Operation"
+        result:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/OperationResult"
+    OperationResult:
+      type: object
+      required:
+        - status
+        - payloadBase64
+        - createdAt
+      properties:
+        status:
+          type: string
+          enum:
+            - done
+            - failed
+        payloadBase64:
+          type: string
+          format: byte
+        createdAt:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string

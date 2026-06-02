@@ -337,9 +337,16 @@ func postgresTestDSN(t testing.TB) string {
 	t.Helper()
 	dsn := os.Getenv(postgresTestDSNEnv)
 	if dsn == "" {
-		t.Fatalf("%s is required for Postgres integration tests; start Postgres explicitly and set the DSN", postgresTestDSNEnv)
+		if requirePostgresTestDSN() {
+			t.Fatalf("%s is required for Postgres integration tests in CI; start Postgres explicitly and set the DSN", postgresTestDSNEnv)
+		}
+		t.Skipf("%s is not set; skipping Postgres integration tests", postgresTestDSNEnv)
 	}
 	return dsn
+}
+
+func requirePostgresTestDSN() bool {
+	return os.Getenv("CI") != "" || os.Getenv("OPENIOTRSP_REQUIRE_POSTGRES_TEST_DSN") == "1"
 }
 
 func logPostgresTarget(t testing.TB, dsn string) {

@@ -109,6 +109,23 @@ func testRecords(t *testing.T, store storage.Store) {
 	if err != nil {
 		t.Fatalf("EnqueueOperation() error = %v", err)
 	}
+	gotOperation, err := store.GetOperation(ctx, tenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if gotOperation.ID != operation.ID || gotOperation.SequenceNumber != operation.SequenceNumber {
+		t.Fatalf("GetOperation() = %#v, want id %d sequence %d", gotOperation, operation.ID, operation.SequenceNumber)
+	}
+	gotBySequence, err := store.GetOperationBySequence(ctx, tenantID, eid, operation.SequenceNumber)
+	if err != nil {
+		t.Fatalf("GetOperationBySequence() error = %v", err)
+	}
+	if gotBySequence.ID != operation.ID {
+		t.Fatalf("GetOperationBySequence() id = %d, want %d", gotBySequence.ID, operation.ID)
+	}
+	if _, err := store.GetOperationResult(ctx, tenantID, operation.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetOperationResult(missing) error = %v, want %v", err, storage.ErrNotFound)
+	}
 	if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
 		OperationID:    operation.ID,
 		SequenceNumber: operation.SequenceNumber,
@@ -117,6 +134,21 @@ func testRecords(t *testing.T, store storage.Store) {
 	}); err != nil {
 		t.Fatalf("RecordEUICCPackageResult() error = %v", err)
 	}
+	doneOperation, err := store.GetOperation(ctx, tenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation(done) error = %v", err)
+	}
+	if doneOperation.Status != storage.OperationDone {
+		t.Fatalf("operation status = %q, want %q", doneOperation.Status, storage.OperationDone)
+	}
+	result, err := store.GetOperationResult(ctx, tenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperationResult() error = %v", err)
+	}
+	if result.OperationID != operation.ID || result.SequenceNumber != operation.SequenceNumber || result.Status != storage.OperationDone {
+		t.Fatalf("operation result = %#v, want operation %d sequence %d done", result, operation.ID, operation.SequenceNumber)
+	}
+	assertBytes(t, "operation result payload", result.Payload, []byte("result"))
 }
 
 func testTenantIsolation(t *testing.T, store storage.Store) {

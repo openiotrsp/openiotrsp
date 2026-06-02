@@ -4,43 +4,45 @@ package smdp
 
 import (
 	"context"
-	"io"
-	"net/http"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/openiotrsp/openiotrsp/mockipa"
+	"github.com/openiotrsp/openiotrsp/profiledownload"
 )
 
 const (
-	liveSMDPEnv = "OPENIOTRSP_LIVE_SMDP"
-	sysmocomURL = "https://smdpp.test.rsp.sysmocom.de"
+	liveSMDPEnv        = "OPENIOTRSP_LIVE_SMDP"
+	sgp26FixtureZipEnv = "OPENIOTRSP_SGP26_FIXTURE_ZIP"
 )
 
-func TestLiveSysmocomSMDPReachability(t *testing.T) {
+func TestLiveSysmocomSignedES9Flow(t *testing.T) {
 	switch os.Getenv(liveSMDPEnv) {
 	case "1":
 	case "skip":
-		t.Skipf("%s=skip explicitly skipped the live sysmocom SM-DP+ integration canary", liveSMDPEnv)
+		t.Skipf("%s=skip explicitly skipped the live sysmocom SM-DP+ integration", liveSMDPEnv)
 	default:
-		t.Fatalf("%s must be set to 1 to run the live sysmocom SM-DP+ canary, or skip to acknowledge it is not being run", liveSMDPEnv)
+		t.Skipf("%s is not set; live sysmocom SM-DP+ integration not run", liveSMDPEnv)
+	}
+	if err := mockipa.ValidateSGP26SoftwareFixture(os.Getenv(sgp26FixtureZipEnv)); err != nil {
+		t.Fatalf("live sysmocom signed-flow prerequisites not met: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, sysmocomURL, nil)
+	activation, err := profiledownload.ParseActivationCode("1$smdpp.test.rsp.sysmocom.de$TS48V1-B-UNIQUE")
 	if err != nil {
-		t.Fatalf("create sysmocom request: %v", err)
+		t.Fatalf("ParseActivationCode() error = %v", err)
 	}
-	response, err := http.DefaultClient.Do(request)
+	// This drives euicc-go through ES9+ with SGP.26-signed eUICC-side
+	// AuthenticateServer/PrepareDownload responses. The software eUICC does not
+	// decrypt or apply the returned BPP like real silicon; its ES10b load result is
+	// simulated so this test proves the signed SM-DP+ handshake and binding path,
+	// not physical profile installation.
+	result, err := (mockipa.SysmocomDownloader{}).Download(ctx, activation)
 	if err != nil {
-		t.Fatalf("reach live sysmocom SM-DP+ at %s: %v", sysmocomURL, err)
+		t.Fatalf("live sysmocom signed ES9+ flow failed: %v", err)
 	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, response.Body)
-
-	if response.StatusCode >= http.StatusInternalServerError {
-		t.Fatalf("live sysmocom SM-DP+ returned %s", response.Status)
-	}
-	t.Logf("reached live sysmocom SM-DP+ at %s: %s", sysmocomURL, response.Status)
+	t.Logf("validated live sysmocom signed ES9+ flow for profile %s at %s", result.ProfileID, result.SMDP)
 }

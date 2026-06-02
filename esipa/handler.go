@@ -14,6 +14,8 @@ import (
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/euiccpkg"
+	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
 
@@ -283,19 +285,91 @@ func recordEimPackageResult(
 	if err := result.UnmarshalBERTLV(resultTLV); err != nil {
 		return nil, err
 	}
-	sequenceNumbers := resultSequenceNumbers(&result)
 	status := resultStatus(&result)
-	for _, sequence := range sequenceNumbers {
+	operations, err := matchingEUICCPackageOperations(ctx, store, tenantID, eid, &result)
+	if err != nil {
+		return nil, err
+	}
+	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
+	for _, operation := range operations {
 		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
 			EID:            eid,
-			SequenceNumber: int64(sequence),
+			OperationID:    operation.ID,
+			SequenceNumber: operation.SequenceNumber,
 			Status:         status,
 			Payload:        cloneBytes(payload),
 		}); err != nil {
 			return nil, err
 		}
+		if status == storage.OperationDone {
+			if err := applyEUICCPackageOperationState(ctx, store, tenantID, operation); err != nil {
+				return nil, err
+			}
+		}
+		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
 	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+}
+
+func matchingEUICCPackageOperations(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	result *protocolasn1.EuiccPackageResult,
+) ([]storage.Operation, error) {
+	sequenceNumbers := resultSequenceNumbers(result)
+	if len(sequenceNumbers) > 0 {
+		operations := make([]storage.Operation, 0, len(sequenceNumbers))
+		for _, sequence := range sequenceNumbers {
+			operation, err := store.GetOperationBySequence(ctx, tenantID, eid, int64(sequence))
+			if err != nil {
+				return nil, err
+			}
+			operations = append(operations, operation)
+		}
+		return operations, nil
+	}
+	if result == nil || result.Kind != protocolasn1.EuiccPackageResultOK || result.Signed == nil {
+		return nil, storage.ErrNotFound
+	}
+	pending, err := store.FetchPendingOperations(ctx, tenantID, eid, 10000)
+	if err != nil {
+		return nil, err
+	}
+	for _, operation := range pending {
+		if operation.Kind != storage.OperationEuiccPackage {
+			continue
+		}
+		var request protocolasn1.EuiccPackageRequest
+		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+			return nil, err
+		}
+		signed := request.EuiccPackageSigned
+		data := result.Signed.Data
+		if signed.EimID == data.EimID &&
+			signed.CounterValue == data.CounterValue &&
+			bytes.Equal(signed.EimTransactionID, data.EimTransactionID) {
+			return []storage.Operation{operation}, nil
+		}
+	}
+	return nil, storage.ErrNotFound
+}
+
+func applyEUICCPackageOperationState(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	operation storage.Operation,
+) error {
+	if operation.Kind != storage.OperationEuiccPackage {
+		return nil
+	}
+	var request protocolasn1.EuiccPackageRequest
+	if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+		return err
+	}
+	return euiccpkg.ApplyPackageState(ctx, store, tenantID, operation.EID, request.EuiccPackageSigned.EuiccPackage)
 }
 
 func recordProfileDownloadTriggerResult(
@@ -310,7 +384,7 @@ func recordProfileDownloadTriggerResult(
 	if err := result.UnmarshalBERTLV(tlv); err != nil {
 		return nil, err
 	}
-	operation, ok, err := pendingProfileDownloadTrigger(ctx, store, tenantID, eid, result.EimTransactionID)
+	operation, trigger, ok, err := pendingProfileDownloadTrigger(ctx, store, tenantID, eid, result.EimTransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -330,6 +404,11 @@ func recordProfileDownloadTriggerResult(
 	}); err != nil {
 		return nil, err
 	}
+	if status == storage.OperationDone {
+		if err := recordDownloadedProfileState(ctx, store, tenantID, eid, &trigger); err != nil {
+			return nil, err
+		}
+	}
 	return &protocolasn1.EimAcknowledgements{
 		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)},
 	}, nil
@@ -341,10 +420,10 @@ func pendingProfileDownloadTrigger(
 	tenantID storage.TenantID,
 	eid string,
 	transactionID []byte,
-) (storage.Operation, bool, error) {
+) (storage.Operation, protocolasn1.ProfileDownloadTriggerRequest, bool, error) {
 	operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 100)
 	if err != nil {
-		return storage.Operation{}, false, err
+		return storage.Operation{}, protocolasn1.ProfileDownloadTriggerRequest{}, false, err
 	}
 	for _, operation := range operations {
 		if operation.Kind != storage.OperationProfileDownloadTrigger {
@@ -352,13 +431,35 @@ func pendingProfileDownloadTrigger(
 		}
 		var request protocolasn1.ProfileDownloadTriggerRequest
 		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
-			return storage.Operation{}, false, err
+			return storage.Operation{}, protocolasn1.ProfileDownloadTriggerRequest{}, false, err
 		}
 		if bytes.Equal(request.EimTransactionID, transactionID) {
-			return operation, true, nil
+			return operation, request, true, nil
 		}
 	}
-	return storage.Operation{}, false, nil
+	return storage.Operation{}, protocolasn1.ProfileDownloadTriggerRequest{}, false, nil
+}
+
+func recordDownloadedProfileState(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	trigger *protocolasn1.ProfileDownloadTriggerRequest,
+) error {
+	if trigger == nil || trigger.ProfileDownloadData == nil || trigger.ProfileDownloadData.Kind != protocolasn1.ProfileDownloadActivationCode {
+		return nil
+	}
+	activation, err := profiledownload.ParseActivationCode(trigger.ProfileDownloadData.ActivationCode)
+	if err != nil {
+		return nil
+	}
+	return store.SetProfileState(ctx, tenantID, storage.ProfileState{
+		EID:         eid,
+		ICCID:       activation.ProfileID(),
+		IsEnabled:   true,
+		SMDPAddress: activation.SMDPAddress,
+	})
 }
 
 func resultSequenceNumbers(result *protocolasn1.EuiccPackageResult) []protocolasn1.SequenceNumber {

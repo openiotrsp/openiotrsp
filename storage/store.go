@@ -80,6 +80,16 @@ type Operation struct {
 	UpdatedAt      time.Time
 }
 
+// OperationResult is the persisted completion payload for a queued operation.
+type OperationResult struct {
+	OperationID    int64
+	EID            string
+	SequenceNumber int64
+	Status         OperationStatus
+	Payload        []byte
+	CreatedAt      time.Time
+}
+
 // EUICCPackageResult records the IPA-provided eUICC Package Result for a queued
 // operation.
 type EUICCPackageResult struct {
@@ -113,8 +123,11 @@ type Store interface {
 	DeleteProfileState(ctx context.Context, tenantID TenantID, eid string, iccid string) error
 	NextEUICCPackageCounter(ctx context.Context, tenantID TenantID, eid string) (int64, error)
 	EnqueueOperation(ctx context.Context, tenantID TenantID, operation OperationRequest) (Operation, error)
+	GetOperation(ctx context.Context, tenantID TenantID, operationID int64) (Operation, error)
+	GetOperationBySequence(ctx context.Context, tenantID TenantID, eid string, sequenceNumber int64) (Operation, error)
 	FetchPendingOperations(ctx context.Context, tenantID TenantID, eid string, limit int) ([]Operation, error)
 	RecordEUICCPackageResult(ctx context.Context, tenantID TenantID, result EUICCPackageResult) error
+	GetOperationResult(ctx context.Context, tenantID TenantID, operationID int64) (OperationResult, error)
 	StoreEIMConfig(ctx context.Context, tenantID TenantID, config EIMConfig) error
 	ReadEIMConfig(ctx context.Context, tenantID TenantID, eimID string) (EIMConfig, error)
 	StoreNotification(ctx context.Context, tenantID TenantID, notification Notification) error

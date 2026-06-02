@@ -5,8 +5,22 @@ import (
 	"encoding/hex"
 	"errors"
 
+	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
+
+// ApplyPackageState applies successful single-operation PSMO package effects to
+// the persisted profile state.
+func ApplyPackageState(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	pkg protocolasn1.EuiccPackage,
+) error {
+	operation, iccid := packagePSMO(pkg)
+	return applyPSMOState(ctx, store, tenantID, eid, operation, iccid)
+}
 
 func applyPSMOState(
 	ctx context.Context,

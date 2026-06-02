@@ -214,6 +214,39 @@ func (s *Store) EnqueueOperation(ctx context.Context, tenantID storage.TenantID,
 	return cloneOperation(operation), nil
 }
 
+// GetOperation reads one queued operation by id.
+func (s *Store) GetOperation(ctx context.Context, tenantID storage.TenantID, operationID int64) (storage.Operation, error) {
+	if err := ctx.Err(); err != nil {
+		return storage.Operation{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored, ok := s.operations[operationID]
+	if !ok || stored.tenantID != storage.NormalizeTenantID(tenantID) {
+		return storage.Operation{}, storage.ErrNotFound
+	}
+	return cloneOperation(stored.operation), nil
+}
+
+// GetOperationBySequence reads one queued operation by tenant, EID, and sequence.
+func (s *Store) GetOperationBySequence(ctx context.Context, tenantID storage.TenantID, eid string, sequenceNumber int64) (storage.Operation, error) {
+	if err := ctx.Err(); err != nil {
+		return storage.Operation{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tenantID = storage.NormalizeTenantID(tenantID)
+	for _, stored := range s.operations {
+		operation := stored.operation
+		if stored.tenantID == tenantID && operation.EID == eid && operation.SequenceNumber == sequenceNumber {
+			return cloneOperation(operation), nil
+		}
+	}
+	return storage.Operation{}, storage.ErrNotFound
+}
+
 // FetchPendingOperations returns pending operations in sequence order. Operations
 // remain pending until their result is recorded so a dropped IPA exchange can
 // safely fetch the same package again.
@@ -295,6 +328,37 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 		return nil
 	}
 	return nil
+}
+
+// GetOperationResult reads the completion result for an operation by operation id.
+func (s *Store) GetOperationResult(ctx context.Context, tenantID storage.TenantID, operationID int64) (storage.OperationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return storage.OperationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stored, ok := s.operations[operationID]
+	if !ok || stored.tenantID != storage.NormalizeTenantID(tenantID) {
+		return storage.OperationResult{}, storage.ErrNotFound
+	}
+	operation := stored.operation
+	result, ok := s.results[resultKey{
+		tenantID:       stored.tenantID,
+		eid:            operation.EID,
+		sequenceNumber: operation.SequenceNumber,
+	}]
+	if !ok {
+		return storage.OperationResult{}, storage.ErrNotFound
+	}
+	return storage.OperationResult{
+		OperationID:    operation.ID,
+		EID:            result.EID,
+		SequenceNumber: result.SequenceNumber,
+		Status:         result.Status,
+		Payload:        cloneBytes(result.Payload),
+		CreatedAt:      operation.UpdatedAt,
+	}, nil
 }
 
 // StoreEIMConfig stores an encoded eIM configuration.

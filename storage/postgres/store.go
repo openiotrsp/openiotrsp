@@ -207,6 +207,52 @@ func (s *Store) EnqueueOperation(ctx context.Context, tenantID storage.TenantID,
 	return cloneOperation(operation), nil
 }
 
+// GetOperation reads one queued operation by id.
+func (s *Store) GetOperation(ctx context.Context, tenantID storage.TenantID, operationID int64) (storage.Operation, error) {
+	var operation storage.Operation
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, eid, sequence_number, kind, payload, status, created_at, updated_at
+		FROM operations
+		WHERE tenant_id = $1 AND id = $2
+	`, tenantString(tenantID), operationID).Scan(
+		&operation.ID,
+		&operation.EID,
+		&operation.SequenceNumber,
+		&operation.Kind,
+		&operation.Payload,
+		&operation.Status,
+		&operation.CreatedAt,
+		&operation.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.Operation{}, storage.ErrNotFound
+	}
+	return cloneOperation(operation), err
+}
+
+// GetOperationBySequence reads one queued operation by tenant, EID, and sequence.
+func (s *Store) GetOperationBySequence(ctx context.Context, tenantID storage.TenantID, eid string, sequenceNumber int64) (storage.Operation, error) {
+	var operation storage.Operation
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, eid, sequence_number, kind, payload, status, created_at, updated_at
+		FROM operations
+		WHERE tenant_id = $1 AND eid = $2 AND sequence_number = $3
+	`, tenantString(tenantID), eid, sequenceNumber).Scan(
+		&operation.ID,
+		&operation.EID,
+		&operation.SequenceNumber,
+		&operation.Kind,
+		&operation.Payload,
+		&operation.Status,
+		&operation.CreatedAt,
+		&operation.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.Operation{}, storage.ErrNotFound
+	}
+	return cloneOperation(operation), err
+}
+
 // FetchPendingOperations returns pending operations in sequence order. Operations
 // remain pending until their result is recorded so a dropped IPA exchange can
 // safely fetch the same package again.
@@ -306,6 +352,32 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// GetOperationResult reads the completion result for an operation by operation id.
+func (s *Store) GetOperationResult(ctx context.Context, tenantID storage.TenantID, operationID int64) (storage.OperationResult, error) {
+	var result storage.OperationResult
+	err := s.pool.QueryRow(ctx, `
+		SELECT o.id, r.eid, r.sequence_number, r.status, r.payload, r.created_at
+		FROM operations o
+		JOIN operation_results r
+			ON r.tenant_id = o.tenant_id
+			AND r.eid = o.eid
+			AND r.sequence_number = o.sequence_number
+		WHERE o.tenant_id = $1 AND o.id = $2
+	`, tenantString(tenantID), operationID).Scan(
+		&result.OperationID,
+		&result.EID,
+		&result.SequenceNumber,
+		&result.Status,
+		&result.Payload,
+		&result.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.OperationResult{}, storage.ErrNotFound
+	}
+	result.Payload = cloneBytes(result.Payload)
+	return result, err
 }
 
 // StoreEIMConfig stores an encoded eIM configuration.

@@ -26,10 +26,17 @@ func (o OperationKind) resultTag() uint64 {
 }
 
 func requestPSMO(request *SignedRequest) (OperationKind, []byte) {
-	if request == nil || request.Package.Kind != protocolasn1.EuiccPackagePSMO || len(request.Package.PSMOs) != 1 {
+	if request == nil {
 		return OperationNone, nil
 	}
-	psmo := request.Package.PSMOs[0]
+	return packagePSMO(request.Package)
+}
+
+func packagePSMO(pkg protocolasn1.EuiccPackage) (OperationKind, []byte) {
+	if pkg.Kind != protocolasn1.EuiccPackagePSMO || len(pkg.PSMOs) != 1 {
+		return OperationNone, nil
+	}
+	psmo := pkg.PSMOs[0]
 	switch psmo.Operation {
 	case protocolasn1.PsmoEnable:
 		return OperationEnable, cloneBytes(psmo.ICCID)

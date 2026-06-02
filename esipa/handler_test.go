@@ -151,6 +151,85 @@ func TestSGP33ESepPackageResultsThroughESipa(t *testing.T) {
 	}
 }
 
+func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x59)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+
+	transactionID := []byte{0x01, 0x02, 0x03, 0x04}
+	firstRequest := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	firstRequest.EuiccPackageSigned.CounterValue = 1
+	firstRequest.EuiccPackageSigned.EimTransactionID = cloneBytes(transactionID)
+	firstOperation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, firstRequest),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation(first) error = %v", err)
+	}
+
+	secondRequest := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	secondRequest.EuiccPackageSigned.CounterValue = 2
+	secondRequest.EuiccPackageSigned.EimTransactionID = cloneBytes(transactionID)
+	secondOperation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, secondRequest),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation(second) error = %v", err)
+	}
+
+	result := sampleEuiccPackageResultForTag(0, 3, 0)
+	result.Signed.Data.CounterValue = secondRequest.EuiccPackageSigned.CounterValue
+	result.Signed.Data.EimTransactionID = cloneBytes(transactionID)
+	resultResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, result),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(ProvideEimPackageResult) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(secondOperation.SequenceNumber)}) {
+		t.Fatalf("ack = %v, want [%d]", ack.SequenceNumbers, secondOperation.SequenceNumber)
+	}
+
+	results := store.recordedResults()
+	if len(results) != 1 {
+		t.Fatalf("recorded results = %#v, want one result", results)
+	}
+	if results[0].OperationID != secondOperation.ID || results[0].SequenceNumber != secondOperation.SequenceNumber {
+		t.Fatalf("recorded result = %#v, want operation %d sequence %d", results[0], secondOperation.ID, secondOperation.SequenceNumber)
+	}
+
+	firstAfter, err := store.GetOperation(ctx, storage.DefaultTenantID, firstOperation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation(first) error = %v", err)
+	}
+	if firstAfter.Status != storage.OperationPending {
+		t.Fatalf("first operation status = %s, want pending", firstAfter.Status)
+	}
+	secondAfter, err := store.GetOperation(ctx, storage.DefaultTenantID, secondOperation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation(second) error = %v", err)
+	}
+	if secondAfter.Status != storage.OperationDone {
+		t.Fatalf("second operation status = %s, want done", secondAfter.Status)
+	}
+}
+
 func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 	t.Parallel()
 

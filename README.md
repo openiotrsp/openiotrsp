@@ -47,7 +47,13 @@ OpenIoTRSP is under active development. The first release targets the core profi
 docker compose up
 ```
 
-This starts the eIM, its database, and a simulated device, and runs an end-to-end profile download and activation locally so you can see the full flow in one command. Full setup and usage instructions are in [USAGE.md](USAGE.md).
+This starts the eIM, Postgres, and a mock IPA. The eIM queues a direct-download trigger for the public sysmocom test SM-DP+ (`smdpp.test.rsp.sysmocom.de`), and the mock IPA polls ESipa and reports the demo profile as enabled in OpenIoTRSP state. The software eUICC signs the SGP.22 ES9+ authentication/download responses, but it does not apply a Bound Profile Package like real silicon. Watch the mock IPA logs for:
+
+```text
+trigger->download->enable complete
+```
+
+For offline CI plumbing, set `OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE=offline`. That fallback is intentionally labelled as a stub and is not a GSMA signature proof. Full setup and validation instructions are in [USAGE.md](USAGE.md).
 
 ## Standards
 
