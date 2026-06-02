@@ -3,7 +3,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -117,4 +119,13 @@ func cleanLoadDatabase(t testing.TB, ctx context.Context, dsn string) {
 	if err != nil {
 		t.Fatalf("clean load database error = %v", err)
 	}
+}
+
+func jsonBody(t *testing.T, body any) *bytes.Reader {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	return bytes.NewReader(payload)
 }

@@ -117,7 +117,9 @@ func (t statusBodyTransport) RoundTrip(request *http.Request) (*http.Response, e
 	if err != nil || response == nil || response.StatusCode < http.StatusBadRequest {
 		return response, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, 1024))
 	if readErr != nil {
 		return nil, fmt.Errorf("SM-DP+ returned %s and body read failed: %w", response.Status, readErr)

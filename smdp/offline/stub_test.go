@@ -18,7 +18,9 @@ func TestStubLabelsOfflineFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %s", response.Status)
 	}

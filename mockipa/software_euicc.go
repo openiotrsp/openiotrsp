@@ -224,7 +224,11 @@ func generateOTPK() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return elliptic.Marshal(elliptic.P256(), key.X, key.Y), nil
+	ecdhKey, err := key.ECDH()
+	if err != nil {
+		return nil, err
+	}
+	return ecdhKey.PublicKey().Bytes(), nil
 }
 
 func mustParseTLV(data []byte) *bertlv.TLV {

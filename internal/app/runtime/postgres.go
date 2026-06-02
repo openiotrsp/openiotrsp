@@ -57,7 +57,9 @@ func RunMigrations(databaseURL, migrationsDir string) error {
 	if err != nil {
 		return fmt.Errorf("create migration runner: %w", err)
 	}
-	defer migration.Close()
+	defer func() {
+		_, _ = migration.Close()
+	}()
 	if err := migration.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("run migrations: %w", err)
 	}

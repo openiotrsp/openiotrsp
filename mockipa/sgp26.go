@@ -47,7 +47,9 @@ func LoadSGP26SoftwareFixture(path string) (*SGP26Fixture, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mockipa: open SGP.26 fixture zip: %w", err)
 	}
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 	entries := make(map[string]bool, len(reader.File))
 	files := make(map[string]*zip.File, len(reader.File))
 	for _, file := range reader.File {
@@ -105,7 +107,9 @@ func readZipFile(file *zip.File) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mockipa: open %s in SGP.26 fixture: %w", file.Name, err)
 	}
-	defer reader.Close()
+	defer func() {
+		_ = reader.Close()
+	}()
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("mockipa: read %s in SGP.26 fixture: %w", file.Name, err)

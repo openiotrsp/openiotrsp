@@ -235,15 +235,6 @@ func doRequest(t *testing.T, server *httptest.Server, method string, path string
 	return response
 }
 
-func jsonBody(t *testing.T, body any) *bytes.Reader {
-	t.Helper()
-	payload, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	return bytes.NewReader(payload)
-}
-
 type recordingResolver struct {
 	tenantID storage.TenantID
 	calls    atomic.Int32
