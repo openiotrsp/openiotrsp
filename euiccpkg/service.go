@@ -177,18 +177,20 @@ type ResultInput struct {
 
 // Result is the verified domain result.
 type Result struct {
-	OK                     bool
-	Operation              OperationKind
-	ResultCode             ResultCode
-	ECOResultCode          ECOResultCode
-	RawResultCode          int64
-	AddEIMAssociationToken *int64
-	LastEIMDeleted         bool
-	EIMs                   []EIMInfo
-	PackageError           PackageError
-	RawPackageError        int64
-	UnsignedPackageError   UnsignedPackageError
-	RawUnsignedError       int64
+	OK                      bool
+	Operation               OperationKind
+	ResultCode              ResultCode
+	ECOResultCode           ECOResultCode
+	RawResultCode           int64
+	AddEIMAssociationToken  *int64
+	LastEIMDeleted          bool
+	EIMs                    []EIMInfo
+	Profiles                []ProfileInfo
+	RulesAuthorisationTable *protocolasn1.TLV
+	PackageError            PackageError
+	RawPackageError         int64
+	UnsignedPackageError    UnsignedPackageError
+	RawUnsignedError        int64
 }
 
 // EIMInfo is the domain form of SGP.32 EimIdInfo in listEimResult.
@@ -197,10 +199,35 @@ type EIMInfo struct {
 	EIMIDType *protocolasn1.EimIDType
 }
 
+// ProfileInfo is the domain form of the persisted subset of SGP.32 ProfileInfo.
+type ProfileInfo struct {
+	ICCID      string
+	IsEnabled  bool
+	IsFallback bool
+}
+
 // ParseOperationResult maps raw EuiccResultData to the domain result for one
 // single-operation package without verifying the eUICC signature.
 func ParseOperationResult(pkg protocolasn1.EuiccPackage, results []protocolasn1.EuiccResultData) (*Result, error) {
 	return operationResult(&SignedRequest{Package: pkg}, results)
+}
+
+// VerifyPackageResult decodes an eUICC Package Result, verifies any eUICC
+// signature against the supplied public key, and maps it to the domain result.
+// It does not record or apply state.
+func VerifyPackageResult(input ResultInput) (*Result, error) {
+	if input.Request == nil {
+		return nil, errors.New("euiccpkg: missing signed request")
+	}
+	var decoded protocolasn1.EuiccPackageResult
+	if err := protocolasn1.Decode(input.ResultDER, &decoded); err != nil {
+		return nil, err
+	}
+	rawSignedData, err := rawSignedDataFromResultDER(input.ResultDER)
+	if err != nil {
+		return nil, err
+	}
+	return verifyResult(&decoded, input, rawSignedData)
 }
 
 // VerifyAndApplyResult decodes an eUICC Package Result, verifies any eUICC
@@ -217,16 +244,7 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 		return nil, errors.New("euiccpkg: missing signed request")
 	}
 
-	var decoded protocolasn1.EuiccPackageResult
-	if err := protocolasn1.Decode(input.ResultDER, &decoded); err != nil {
-		return nil, err
-	}
-	rawSignedData, err := rawSignedDataFromResultDER(input.ResultDER)
-	if err != nil {
-		return nil, err
-	}
-
-	result, err := s.verifyResult(&decoded, input, rawSignedData)
+	result, err := VerifyPackageResult(input)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +273,7 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 	return result, nil
 }
 
-func (s *Service) verifyResult(decoded *protocolasn1.EuiccPackageResult, input ResultInput, rawSignedData []byte) (*Result, error) {
+func verifyResult(decoded *protocolasn1.EuiccPackageResult, input ResultInput, rawSignedData []byte) (*Result, error) {
 	switch decoded.Kind {
 	case protocolasn1.EuiccPackageResultOK:
 		if decoded.Signed == nil {
@@ -364,6 +382,19 @@ func psmoOperationResult(operation OperationKind, results []protocolasn1.EuiccRe
 		if raw == nil || !raw.Tag.ContextSpecific() || raw.Tag.Value() != wantTag {
 			continue
 		}
+		switch operation {
+		case OperationListProfileInfo:
+			return listProfileInfoResult(raw)
+		case OperationGetRAT:
+			return &Result{
+				OK:                      true,
+				Operation:               operation,
+				ResultCode:              ResultOK,
+				RulesAuthorisationTable: raw.Clone(),
+			}, nil
+		case OperationSetDefaultDPAddress:
+			return setDefaultDPAddressResult(raw)
+		}
 		value, err := integerResult(raw)
 		if err != nil {
 			return nil, err
@@ -377,6 +408,53 @@ func psmoOperationResult(operation OperationKind, results []protocolasn1.EuiccRe
 		}, nil
 	}
 	return nil, fmt.Errorf("euiccpkg: result for operation %s not found", operation)
+}
+
+func listProfileInfoResult(raw *protocolasn1.TLV) (*Result, error) {
+	var decoded protocolasn1.ProfileInfoListResponse
+	if err := decoded.UnmarshalBERTLV(raw); err != nil {
+		return nil, err
+	}
+	result := &Result{Operation: OperationListProfileInfo}
+	if decoded.Error != nil {
+		value := int64(*decoded.Error)
+		result.ResultCode = mapOperationResult(OperationListProfileInfo, value)
+		result.RawResultCode = value
+		return result, nil
+	}
+	result.OK = true
+	result.ResultCode = ResultOK
+	result.Profiles = make([]ProfileInfo, 0, len(decoded.Profiles))
+	for _, profile := range decoded.Profiles {
+		if len(profile.ICCID) == 0 {
+			continue
+		}
+		isEnabled := false
+		if profile.ProfileState != nil {
+			isEnabled = *profile.ProfileState == protocolasn1.ProfileStateEnabled
+		}
+		result.Profiles = append(result.Profiles, ProfileInfo{
+			ICCID:      fmt.Sprintf("%x", profile.ICCID),
+			IsEnabled:  isEnabled,
+			IsFallback: profile.FallbackAttribute,
+		})
+	}
+	return result, nil
+}
+
+func setDefaultDPAddressResult(raw *protocolasn1.TLV) (*Result, error) {
+	var decoded protocolasn1.SetDefaultDPAddressResponse
+	if err := decoded.UnmarshalBERTLV(raw); err != nil {
+		return nil, err
+	}
+	value := decoded.Result
+	code := mapOperationResult(OperationSetDefaultDPAddress, value)
+	return &Result{
+		OK:            code == ResultOK,
+		Operation:     OperationSetDefaultDPAddress,
+		ResultCode:    code,
+		RawResultCode: value,
+	}, nil
 }
 
 func ecoOperationResult(operation OperationKind, results []protocolasn1.EuiccResultData) (*Result, error) {
@@ -550,6 +628,51 @@ func mapOperationResult(operation OperationKind, value int64) ResultCode {
 			return ResultRollbackNotAvailable
 		case 21:
 			return ResultReturnFallbackProfile
+		case 127:
+			return ResultUndefinedError
+		}
+	case OperationListProfileInfo:
+		switch value {
+		case 1:
+			return ResultIncorrectInputValues
+		case 11:
+			return ResultProfileChangeOngoing
+		case 127:
+			return ResultUndefinedError
+		}
+	case OperationConfigureImmediateEnable:
+		switch value {
+		case 1:
+			return ResultInsufficientMemory
+		case 7:
+			return ResultCommandError
+		case 127:
+			return ResultUndefinedError
+		}
+	case OperationSetFallbackAttribute:
+		switch value {
+		case 1:
+			return ResultICCIDOrAIDNotFound
+		case 2:
+			return ResultFallbackNotAllowed
+		case 3:
+			return ResultFallbackProfileEnabled
+		case 127:
+			return ResultUndefinedError
+		}
+	case OperationUnsetFallbackAttribute:
+		switch value {
+		case 2:
+			return ResultNoFallbackAttribute
+		case 3:
+			return ResultFallbackProfileEnabled
+		case 7:
+			return ResultCommandError
+		case 127:
+			return ResultUndefinedError
+		}
+	case OperationSetDefaultDPAddress:
+		switch value {
 		case 127:
 			return ResultUndefinedError
 		}

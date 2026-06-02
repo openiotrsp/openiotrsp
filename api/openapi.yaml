@@ -79,6 +79,46 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/{iccid}/fallback:
+    post:
+      tags:
+        - Operations
+      operationId: setFallbackAttribute
+      summary: Queue a PSMO setFallbackAttribute operation for an EID.
+      description: Marks the requested profile as the fallback profile. Fallback execution itself remains an IPA-to-eUICC ES10b operation.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+        - $ref: "#/components/parameters/ICCID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/fallback:
+    delete:
+      tags:
+        - Operations
+      operationId: unsetFallbackAttribute
+      summary: Queue a PSMO unsetFallbackAttribute operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /devices/{eid}/profiles/{iccid}:
     delete:
       tags:
@@ -89,6 +129,95 @@ paths:
       parameters:
         - $ref: "#/components/parameters/EID"
         - $ref: "#/components/parameters/ICCID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/list:
+    post:
+      tags:
+        - Operations
+      operationId: listProfileInfo
+      summary: Queue a PSMO listProfileInfo operation for an EID.
+      description: Requests the eUICC profile inventory. A successful result refreshes the eIM persisted profile view.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/get-rat:
+    post:
+      tags:
+        - Operations
+      operationId: getRat
+      summary: Queue a PSMO getRAT operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/immediate-enable:
+    post:
+      tags:
+        - Operations
+      operationId: configureImmediateEnable
+      summary: Queue a PSMO configureImmediateEnable operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfigureImmediateEnableRequest"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/profiles/default-dp-address:
+    post:
+      tags:
+        - Operations
+      operationId: setDefaultDpAddress
+      summary: Queue a PSMO setDefaultDpAddress operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetDefaultDpAddressRequest"
       responses:
         "202":
           description: Operation queued.
@@ -447,14 +576,40 @@ components:
       required:
         - iccid
         - isEnabled
+        - isFallback
         - smdpAddress
       properties:
         iccid:
           type: string
         isEnabled:
           type: boolean
+        isFallback:
+          type: boolean
         smdpAddress:
           type: string
+    ConfigureImmediateEnableRequest:
+      type: object
+      properties:
+        immediateEnableFlag:
+          type: boolean
+          default: false
+        defaultSmdpOid:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)+$"
+          description: Dotted decimal OBJECT IDENTIFIER for the default SM-DP+.
+        defaultSmdpAddress:
+          type: string
+      additionalProperties: false
+    SetDefaultDpAddressRequest:
+      type: object
+      required:
+        - defaultDpAddress
+      properties:
+        defaultDpAddress:
+          type: string
+          minLength: 1
+          description: Default SM-DP+ address as an FQDN.
+      additionalProperties: false
     EimConfigurationRequest:
       type: object
       properties:

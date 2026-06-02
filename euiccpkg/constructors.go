@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/x509"
+	stdasn1 "encoding/asn1"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,66 @@ func Delete(iccid []byte) protocolasn1.EuiccPackage {
 		Operation: protocolasn1.PsmoDelete,
 		ICCID:     cloneBytes(iccid),
 	})
+}
+
+// ListProfileInfo builds a EuiccPackage containing one PSMO listProfileInfo operation.
+func ListProfileInfo() protocolasn1.EuiccPackage {
+	return psmoPackage(protocolasn1.Psmo{
+		Operation:              protocolasn1.PsmoListProfileInfo,
+		ProfileInfoListRequest: profileInfoListRequest(),
+	})
+}
+
+// GetRAT builds a EuiccPackage containing one PSMO getRAT operation.
+func GetRAT() protocolasn1.EuiccPackage {
+	return psmoPackage(protocolasn1.Psmo{
+		Operation: protocolasn1.PsmoGetRAT,
+	})
+}
+
+// ConfigureImmediateEnable builds a EuiccPackage containing one PSMO configureImmediateEnable operation.
+func ConfigureImmediateEnable(immediate bool, defaultSMDPOID stdasn1.ObjectIdentifier, defaultSMDPAddress string) protocolasn1.EuiccPackage {
+	config := &protocolasn1.ConfigureImmediateEnable{
+		ImmediateEnableFlag: immediate,
+		DefaultSMDPOID:      cloneObjectIdentifier(defaultSMDPOID),
+	}
+	if defaultSMDPAddress != "" {
+		config.DefaultSMDPAddress = &defaultSMDPAddress
+	}
+	return psmoPackage(protocolasn1.Psmo{
+		Operation:       protocolasn1.PsmoConfigureImmediateEnable,
+		ImmediateEnable: config,
+	})
+}
+
+// SetFallbackAttribute builds a EuiccPackage containing one PSMO setFallbackAttribute operation.
+func SetFallbackAttribute(iccid []byte) protocolasn1.EuiccPackage {
+	return psmoPackage(protocolasn1.Psmo{
+		Operation: protocolasn1.PsmoSetFallbackAttribute,
+		ICCID:     cloneBytes(iccid),
+	})
+}
+
+// UnsetFallbackAttribute builds a EuiccPackage containing one PSMO unsetFallbackAttribute operation.
+func UnsetFallbackAttribute() protocolasn1.EuiccPackage {
+	return psmoPackage(protocolasn1.Psmo{
+		Operation: protocolasn1.PsmoUnsetFallbackAttribute,
+	})
+}
+
+// SetDefaultDPAddress builds a EuiccPackage containing one PSMO setDefaultDpAddress operation.
+func SetDefaultDPAddress(defaultDPAddress string) protocolasn1.EuiccPackage {
+	return psmoPackage(protocolasn1.Psmo{
+		Operation: protocolasn1.PsmoSetDefaultDPAddress,
+		SetDefaultDPAddress: &protocolasn1.SetDefaultDPAddressRequest{
+			DefaultDPAddress: defaultDPAddress,
+		},
+	})
+}
+
+// SetDefaultDpAddress builds a EuiccPackage containing one PSMO setDefaultDpAddress operation.
+func SetDefaultDpAddress(defaultDPAddress string) protocolasn1.EuiccPackage {
+	return SetDefaultDPAddress(defaultDPAddress)
 }
 
 // NewEIMConfigurationData builds the common add/update ECO payload using a raw
@@ -146,6 +207,21 @@ func ecoPackage(eco protocolasn1.Eco) protocolasn1.EuiccPackage {
 		Kind: protocolasn1.EuiccPackageECO,
 		ECOs: []protocolasn1.Eco{eco},
 	}
+}
+
+func profileInfoListRequest() *bertlv.TLV {
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(45),
+		bertlv.NewValue(bertlv.Application.Primitive(28), []byte{0x5a, 0x9f, 0x70, 0x9f, 0x26}),
+	)
+}
+
+func cloneObjectIdentifier(value stdasn1.ObjectIdentifier) stdasn1.ObjectIdentifier {
+	if value == nil {
+		return nil
+	}
+	copied := make(stdasn1.ObjectIdentifier, len(value))
+	copy(copied, value)
+	return copied
 }
 
 func parseSingleTLV(data []byte) (*bertlv.TLV, error) {

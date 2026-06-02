@@ -156,6 +156,21 @@ func bitStringValue(tlv *bertlv.TLV) ([]bool, error) {
 	return unmarshalBitString(tlv.Value)
 }
 
+func booleanTLV(tag bertlv.Tag, value bool) (*bertlv.TLV, error) {
+	return marshalValue(tag, primitive.MarshalBool(value))
+}
+
+func booleanValue(tlv *bertlv.TLV) (bool, error) {
+	var value bool
+	if tlv == nil {
+		return false, errors.New("asn1: missing BOOLEAN")
+	}
+	if err := tlv.UnmarshalValue(primitive.UnmarshalBool(&value)); err != nil {
+		return false, fmt.Errorf("asn1: decode BOOLEAN: %w", err)
+	}
+	return value, nil
+}
+
 func marshalValue(tag bertlv.Tag, value encoding.BinaryMarshaler) (*bertlv.TLV, error) {
 	tlv, err := bertlv.MarshalValue(tag, value)
 	if err != nil {

@@ -93,6 +93,64 @@ func TestProfileLifecycleEndpointsCompleteThroughMockIPA(t *testing.T) {
 	}
 }
 
+func TestPSMOEndpointsCompleteThroughMockIPA(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: testEID}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if err := store.SetProfileState(ctx, storage.DefaultTenantID, storage.ProfileState{
+		EID:       testEID,
+		ICCID:     testICCID,
+		IsEnabled: false,
+	}); err != nil {
+		t.Fatalf("SetProfileState() error = %v", err)
+	}
+	server := newTestServer(t, store, DefaultTenantResolver{})
+
+	list := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/list", nil, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, list.Operations[0].ID)
+	assertProfileFallback(t, server, testICCID, true)
+
+	setFallback := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+testICCID+"/fallback", nil, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, setFallback.Operations[0].ID)
+	assertProfileFallback(t, server, testICCID, true)
+
+	unsetResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/profiles/fallback", nil)
+	if unsetResponse.Code != http.StatusAccepted {
+		t.Fatalf("DELETE fallback status = %d body = %s, want %d", unsetResponse.Code, unsetResponse.Body.String(), http.StatusAccepted)
+	}
+	var unset enqueueResponse
+	if err := json.NewDecoder(unsetResponse.Body).Decode(&unset); err != nil {
+		t.Fatalf("Decode(unset fallback) error = %v", err)
+	}
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, unset.Operations[0].ID)
+	assertProfileFallback(t, server, testICCID, false)
+
+	configure := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/immediate-enable", map[string]any{
+		"immediateEnableFlag": true,
+		"defaultSmdpOid":      "1.2.840.113549",
+		"defaultSmdpAddress":  "smdp.example",
+	}, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, configure.Operations[0].ID)
+
+	getRAT := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/get-rat", nil, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, getRAT.Operations[0].ID)
+
+	setDefault := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/default-dp-address", map[string]any{
+		"defaultDpAddress": "smdp.example",
+	}, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, setDefault.Operations[0].ID)
+}
+
 func TestEIMConfigurationEndpointsCompleteThroughMockIPA(t *testing.T) {
 	t.Parallel()
 
@@ -201,10 +259,19 @@ func TestEveryEndpointResolvesTenant(t *testing.T) {
 	}, http.StatusAccepted)
 	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+testICCID+"/enable", nil, http.StatusAccepted)
 	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+testICCID+"/disable", nil, http.StatusAccepted)
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+testICCID+"/fallback", nil, http.StatusAccepted)
+	fallbackDeleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/profiles/fallback", nil)
+	if fallbackDeleteResponse.Code != http.StatusAccepted {
+		t.Fatalf("DELETE fallback status = %d body = %s, want %d", fallbackDeleteResponse.Code, fallbackDeleteResponse.Body.String(), http.StatusAccepted)
+	}
 	deleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/profiles/"+testICCID, nil)
 	if deleteResponse.Code != http.StatusAccepted {
 		t.Fatalf("DELETE status = %d body = %s, want %d", deleteResponse.Code, deleteResponse.Body.String(), http.StatusAccepted)
 	}
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/list", nil, http.StatusAccepted)
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/get-rat", nil, http.StatusAccepted)
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/immediate-enable", map[string]any{"immediateEnableFlag": true}, http.StatusAccepted)
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/default-dp-address", map[string]any{"defaultDpAddress": "smdp.example"}, http.StatusAccepted)
 	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims", map[string]any{"counterValue": 1}, http.StatusAccepted)
 	putJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/test.eim", map[string]any{"counterValue": 2}, http.StatusAccepted)
 	eimDeleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/eims/test.eim", nil)
@@ -216,8 +283,8 @@ func TestEveryEndpointResolvesTenant(t *testing.T) {
 	getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
 	getJSON[operationResultResponse](t, server, "/v1/operations/"+itoa(queued.Operations[0].ID), http.StatusOK)
 
-	if got := resolver.calls.Load(); got != 11 {
-		t.Fatalf("tenant resolver calls = %d, want 11", got)
+	if got := resolver.calls.Load(); got != 17 {
+		t.Fatalf("tenant resolver calls = %d, want 17", got)
 	}
 }
 
@@ -230,7 +297,9 @@ func newTestServer(t *testing.T, store storage.Store, resolver TenantResolver) *
 	})
 	root := http.NewServeMux()
 	root.Handle("/v1/", apiHandler)
-	root.Handle(esipa.DefaultPath, esipa.NewHandler(store, storage.DefaultTenantID))
+	esipaHandler := esipa.NewHandler(store, storage.DefaultTenantID)
+	esipaHandler.AllowUnverifiedEUICCPackageResults = true
+	root.Handle(esipa.DefaultPath, esipaHandler)
 	server := httptest.NewServer(root)
 	t.Cleanup(server.Close)
 	return server
@@ -257,6 +326,20 @@ func assertProfileState(t *testing.T, server *httptest.Server, iccid string, ena
 		if profile.ICCID == iccid {
 			if profile.IsEnabled != enabled {
 				t.Fatalf("profile %s enabled = %v, want %v", iccid, profile.IsEnabled, enabled)
+			}
+			return
+		}
+	}
+	t.Fatalf("profile %s not found in status %#v", iccid, status)
+}
+
+func assertProfileFallback(t *testing.T, server *httptest.Server, iccid string, fallback bool) {
+	t.Helper()
+	status := getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
+	for _, profile := range status.Profiles {
+		if profile.ICCID == iccid {
+			if profile.IsFallback != fallback {
+				t.Fatalf("profile %s fallback = %v, want %v", iccid, profile.IsFallback, fallback)
 			}
 			return
 		}

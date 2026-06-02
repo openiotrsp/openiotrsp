@@ -29,6 +29,7 @@ type ProfileState struct {
 	EID         string
 	ICCID       string
 	IsEnabled   bool
+	IsFallback  bool
 	SMDPAddress string
 }
 

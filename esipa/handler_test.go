@@ -1,20 +1,24 @@
 package esipa
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
@@ -22,6 +26,7 @@ import (
 
 	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
@@ -42,6 +47,10 @@ type scenarioObservation struct {
 	Acknowledged   []protocolasn1.SequenceNumber
 	EmptyPollError protocolasn1.EimPackageResultErrorCode
 	RecordedStatus storage.OperationStatus
+}
+
+func handleUnverified(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request) (Response, error) {
+	return handle(ctx, store, tenantID, request, nil, true)
 }
 
 func TestSGP33ESipaTransportParity(t *testing.T) {
@@ -107,7 +116,7 @@ func TestSGP33ESepPackageResultsThroughESipa(t *testing.T) {
 				t.Fatalf("EnqueueOperation() error = %v", err)
 			}
 
-			pollResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+			pollResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 			if err != nil {
 				t.Fatalf("Handle(GetEimPackageRequest) error = %v", err)
 			}
@@ -119,7 +128,7 @@ func TestSGP33ESepPackageResultsThroughESipa(t *testing.T) {
 				t.Fatalf("polled PSMO operation = %v, want %v", got, tc.operation)
 			}
 
-			resultResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+			resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
 				&protocolasn1.ProvideEimPackageResult{
 					EID: eid,
 					EimPackageResult: protocolasn1.EimPackageResult{
@@ -139,7 +148,7 @@ func TestSGP33ESepPackageResultsThroughESipa(t *testing.T) {
 				t.Fatalf("recorded results = %#v, want one %s result", results, tc.wantStatus)
 			}
 
-			emptyResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+			emptyResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 			if err != nil {
 				t.Fatalf("Handle(second GetEimPackageRequest) error = %v", err)
 			}
@@ -190,7 +199,7 @@ func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *test
 	result := sampleEuiccPackageResultForTag(0, 3, 0)
 	result.Signed.Data.CounterValue = secondRequest.EuiccPackageSigned.CounterValue
 	result.Signed.Data.EimTransactionID = cloneBytes(transactionID)
-	resultResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
 		&protocolasn1.ProvideEimPackageResult{
 			EID: eid,
 			EimPackageResult: protocolasn1.EimPackageResult{
@@ -230,6 +239,200 @@ func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *test
 	}
 }
 
+func TestDefaultHandlerRequiresEUICCPublicKeyResolver(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x5a)
+	eidKey := hex.EncodeToString(eid)
+	iccid := []byte{0x89, 0x10}
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if err := store.SetProfileState(ctx, storage.DefaultTenantID, storage.ProfileState{
+		EID:       eidKey,
+		ICCID:     hex.EncodeToString(iccid),
+		IsEnabled: false,
+	}); err != nil {
+		t.Fatalf("SetProfileState() error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	request.EuiccPackageSigned.EuiccPackage.PSMOs[0].ICCID = cloneBytes(iccid)
+	operation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	_, err = Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, sampleEuiccPackageResultForTag(1, 3, 0)),
+			},
+		},
+	))
+	if !errors.Is(err, errMissingEUICCPublicKey) {
+		t.Fatalf("Handle(result without resolver) error = %v, want %v", err, errMissingEUICCPublicKey)
+	}
+	after, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if after.Status != storage.OperationPending {
+		t.Fatalf("operation status = %s, want pending", after.Status)
+	}
+	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eidKey, hex.EncodeToString(iccid))
+	if err != nil {
+		t.Fatalf("GetProfileState() error = %v", err)
+	}
+	if profile.IsEnabled {
+		t.Fatalf("profile state = %#v, want still disabled", profile)
+	}
+}
+
+func TestDefaultHandlerVerifiesSGP26SignedEUICCPackageResultBeforeApplyingState(t *testing.T) {
+	t.Parallel()
+
+	fixture := loadSGP26ResultFixture(t)
+	resolver, err := NewStaticEUICCCertificateResolver(
+		fixture.ciDER,
+		fixture.eumDER,
+		fixture.euiccDER,
+		pki.WithCurrentTime(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+	)
+	if err != nil {
+		t.Fatalf("NewStaticEUICCCertificateResolver() error = %v", err)
+	}
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x5b)
+	eidKey := hex.EncodeToString(eid)
+	iccid := []byte{0x89, 0x10}
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if err := store.SetProfileState(ctx, storage.DefaultTenantID, storage.ProfileState{
+		EID:       eidKey,
+		ICCID:     hex.EncodeToString(iccid),
+		IsEnabled: false,
+	}); err != nil {
+		t.Fatalf("SetProfileState() error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	request.EuiccPackageSigned.EuiccPackage.PSMOs[0].ICCID = cloneBytes(iccid)
+	operation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.EUICCPublicKey = resolver
+
+	result := signedEUICCPackageResult(t, fixture.euiccKey, request, operation.SequenceNumber, 3, 0)
+	resultResponse, err := handler.handle(ctx, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLVFromDER(t, result),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("handle(valid signed result) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)}) {
+		t.Fatalf("ack = %v, want [%d]", ack.SequenceNumbers, operation.SequenceNumber)
+	}
+	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eidKey, hex.EncodeToString(iccid))
+	if err != nil {
+		t.Fatalf("GetProfileState() error = %v", err)
+	}
+	if !profile.IsEnabled {
+		t.Fatalf("profile state = %#v, want enabled after verified result", profile)
+	}
+}
+
+func TestDefaultHandlerRejectsTamperedSGP26SignedEUICCPackageResult(t *testing.T) {
+	t.Parallel()
+
+	fixture := loadSGP26ResultFixture(t)
+	resolver, err := NewStaticEUICCCertificateResolver(
+		fixture.ciDER,
+		fixture.eumDER,
+		fixture.euiccDER,
+		pki.WithCurrentTime(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+	)
+	if err != nil {
+		t.Fatalf("NewStaticEUICCCertificateResolver() error = %v", err)
+	}
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x5c)
+	eidKey := hex.EncodeToString(eid)
+	iccid := []byte{0x89, 0x10}
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if err := store.SetProfileState(ctx, storage.DefaultTenantID, storage.ProfileState{
+		EID:       eidKey,
+		ICCID:     hex.EncodeToString(iccid),
+		IsEnabled: false,
+	}); err != nil {
+		t.Fatalf("SetProfileState() error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	request.EuiccPackageSigned.EuiccPackage.PSMOs[0].ICCID = cloneBytes(iccid)
+	operation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.EUICCPublicKey = resolver
+
+	result := signedEUICCPackageResult(t, fixture.euiccKey, request, operation.SequenceNumber, 3, 0)
+	result[len(result)-1] ^= 0x01
+	_, err = handler.handle(ctx, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLVFromDER(t, result),
+			},
+		},
+	))
+	if err == nil {
+		t.Fatal("handle(tampered signed result) error = nil, want rejection")
+	}
+	after, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if after.Status != storage.OperationPending {
+		t.Fatalf("operation status = %s, want pending after tampered result", after.Status)
+	}
+	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eidKey, hex.EncodeToString(iccid))
+	if err != nil {
+		t.Fatalf("GetProfileState() error = %v", err)
+	}
+	if profile.IsEnabled {
+		t.Fatalf("profile state = %#v, want still disabled after tampered result", profile)
+	}
+}
+
 func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 	t.Parallel()
 
@@ -250,7 +453,7 @@ func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 		t.Fatalf("EnqueueOperation() error = %v", err)
 	}
 
-	firstResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	firstResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 	if err != nil {
 		t.Fatalf("Handle(first poll) error = %v", err)
 	}
@@ -262,7 +465,7 @@ func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 		t.Fatalf("first poll package mismatch")
 	}
 
-	secondResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	secondResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 	if err != nil {
 		t.Fatalf("Handle(second poll without result) error = %v", err)
 	}
@@ -274,7 +477,7 @@ func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 		t.Fatalf("redelivered package changed")
 	}
 
-	resultResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
 		&protocolasn1.ProvideEimPackageResult{
 			EID: eid,
 			EimPackageResult: protocolasn1.EimPackageResult{
@@ -290,7 +493,7 @@ func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
 	}
 
-	thirdResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	thirdResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 	if err != nil {
 		t.Fatalf("Handle(third poll after result) error = %v", err)
 	}
@@ -310,7 +513,7 @@ func TestEmptyPollReturnsNoPackageAvailable(t *testing.T) {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
 
-	response, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	response, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
@@ -339,7 +542,7 @@ func TestProfileDownloadTriggerPoll(t *testing.T) {
 		t.Fatalf("EnqueueTrigger() error = %v", err)
 	}
 
-	response, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	response, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
@@ -351,7 +554,7 @@ func TestProfileDownloadTriggerPoll(t *testing.T) {
 		t.Fatalf("trigger response = %#v", decoded.ProfileDownloadTriggerRequest)
 	}
 
-	resultResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
 		&protocolasn1.ProvideEimPackageResult{
 			EID: eid,
 			EimPackageResult: protocolasn1.EimPackageResult{
@@ -376,7 +579,7 @@ func TestProfileDownloadTriggerPoll(t *testing.T) {
 		t.Fatalf("recorded results = %#v, want one done result", results)
 	}
 
-	emptyResponse, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	emptyResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
 	if err != nil {
 		t.Fatalf("Handle(second poll after profile result) error = %v", err)
 	}
@@ -402,7 +605,7 @@ func TestProfileDownloadTriggerFailedInstallRecordsFailed(t *testing.T) {
 		t.Fatalf("EnqueueTrigger() error = %v", err)
 	}
 
-	_, err := Handle(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+	_, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
 		&protocolasn1.ProvideEimPackageResult{
 			EID: eid,
 			EimPackageResult: protocolasn1.EimPackageResult{
@@ -442,7 +645,7 @@ func TestUnknownEimPackageResultFailsClosed(t *testing.T) {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
 
-	_, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)))
+	_, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)), nil, true)
 	if err == nil {
 		t.Fatal("recordEimPackageResult() succeeded for unknown result tag, want rejection")
 	}
@@ -498,7 +701,9 @@ func runPollAndResultScenario(t *testing.T, transport func(*testing.T, *Handler)
 		t.Fatalf("EnqueueOperation() error = %v", err)
 	}
 
-	client := transport(t, NewHandler(store, storage.DefaultTenantID))
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.AllowUnverifiedEUICCPackageResults = true
+	client := transport(t, handler)
 	pollPayload := client(t, encodeEnvelope(t, &protocolasn1.GetEimPackageRequest{EID: eid, NotifyStateChange: true}))
 	poll := decodeGetResponse(t, pollPayload)
 	if poll.Kind != protocolasn1.GetEimPackageEuiccPackageRequest {
@@ -766,6 +971,122 @@ func sampleEuiccPackageResultForTag(sequence int64, resultTag uint64, resultCode
 	}
 }
 
+type sgp26ResultFixture struct {
+	ciDER    []byte
+	eumDER   []byte
+	euiccDER []byte
+	euiccKey *ecdsa.PrivateKey
+}
+
+func loadSGP26ResultFixture(t *testing.T) sgp26ResultFixture {
+	t.Helper()
+	const fixturePath = "../spec/SGP.26_v3.0.2-17-July-2025.zip"
+	entries := map[string]string{
+		"ci":      "SGP.26_v3.0.2-20240828_Files_draft3_2025/Valid Test Cases/Variant O/CI/CERT_CI_SIG_NIST.der",
+		"euicc":   "SGP.26_v3.0.2-20240828_Files_draft3_2025/Valid Test Cases/Variant O/eUICC/CERT_EUICC_SIG_NIST.der",
+		"eum":     "SGP.26_v3.0.2-20240828_Files_draft3_2025/Valid Test Cases/Variant O/EUM/CERT_EUM_SIG_NIST.der",
+		"euiccSK": "SGP.26_v3.0.2-20240828_Files_draft3_2025/Valid Test Cases/Variant O/eUICC/SK_EUICC_SIG_NIST.pem",
+	}
+	if _, err := os.Stat(fixturePath); err != nil {
+		if os.IsNotExist(err) {
+			t.Skipf("SGP.26 ZIP not present at %s", fixturePath)
+		}
+		t.Fatalf("stat SGP.26 ZIP: %v", err)
+	}
+	reader, err := zip.OpenReader(fixturePath)
+	if err != nil {
+		t.Fatalf("open SGP.26 ZIP: %v", err)
+	}
+	defer func() {
+		if err := reader.Close(); err != nil {
+			t.Fatalf("close SGP.26 ZIP: %v", err)
+		}
+	}()
+	files := make(map[string]*zip.File, len(reader.File))
+	for _, file := range reader.File {
+		files[file.Name] = file
+	}
+	readEntry := func(name string) []byte {
+		t.Helper()
+		file := files[entries[name]]
+		if file == nil {
+			t.Fatalf("SGP.26 ZIP missing %s", entries[name])
+		}
+		opened, err := file.Open()
+		if err != nil {
+			t.Fatalf("open %s: %v", file.Name, err)
+		}
+		defer func() {
+			if err := opened.Close(); err != nil {
+				t.Fatalf("close %s: %v", file.Name, err)
+			}
+		}()
+		data, err := io.ReadAll(opened)
+		if err != nil {
+			t.Fatalf("read %s: %v", file.Name, err)
+		}
+		return data
+	}
+	return sgp26ResultFixture{
+		ciDER:    readEntry("ci"),
+		eumDER:   readEntry("eum"),
+		euiccDER: readEntry("euicc"),
+		euiccKey: parseECDSAPrivateKey(t, readEntry("euiccSK")),
+	}
+}
+
+func parseECDSAPrivateKey(t *testing.T, pemBytes []byte) *ecdsa.PrivateKey {
+	t.Helper()
+	for len(pemBytes) > 0 {
+		block, rest := pem.Decode(pemBytes)
+		if block == nil {
+			break
+		}
+		pemBytes = rest
+		if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+			return key
+		}
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			continue
+		}
+		ecdsaKey, ok := key.(*ecdsa.PrivateKey)
+		if ok {
+			return ecdsaKey
+		}
+	}
+	t.Fatal("parse SGP.26 eUICC private key")
+	return nil
+}
+
+func signedEUICCPackageResult(t *testing.T, key *ecdsa.PrivateKey, request *protocolasn1.EuiccPackageRequest, sequenceNumber int64, resultTag uint64, resultCode int64) []byte {
+	t.Helper()
+	result, err := protocolasn1.IntegerEuiccResult(resultTag, resultCode)
+	if err != nil {
+		t.Fatalf("IntegerEuiccResult() error = %v", err)
+	}
+	data := protocolasn1.EuiccPackageResultDataSigned{
+		EimID:            request.EuiccPackageSigned.EimID,
+		CounterValue:     request.EuiccPackageSigned.CounterValue,
+		EimTransactionID: cloneBytes(request.EuiccPackageSigned.EimTransactionID),
+		SeqNumber:        sequenceNumber,
+		Results:          []protocolasn1.EuiccResultData{result},
+	}
+	dataDER := encode(t, &data)
+	digest := sha256.Sum256(dataDER)
+	signature, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatalf("SignASN1() error = %v", err)
+	}
+	return encode(t, &protocolasn1.EuiccPackageResult{
+		Kind: protocolasn1.EuiccPackageResultOK,
+		Signed: &protocolasn1.EuiccPackageResultSigned{
+			Data:         data,
+			EuiccSignEPR: signature,
+		},
+	})
+}
+
 func profileInstallationResultTLV(finalResultChild *bertlv.TLV) *bertlv.TLV {
 	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(55),
 		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(39),
@@ -779,6 +1100,15 @@ func mustTLV(t *testing.T, value protocolasn1.Marshaler) *protocolasn1.TLV {
 	tlv, err := value.MarshalBERTLV()
 	if err != nil {
 		t.Fatalf("MarshalBERTLV() error = %v", err)
+	}
+	return tlv
+}
+
+func mustTLVFromDER(t *testing.T, der []byte) *protocolasn1.TLV {
+	t.Helper()
+	tlv := new(protocolasn1.TLV)
+	if err := tlv.UnmarshalBinary(der); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
 	}
 	return tlv
 }

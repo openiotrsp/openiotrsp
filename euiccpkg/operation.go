@@ -6,14 +6,20 @@ import protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 type OperationKind string
 
 const (
-	OperationNone      OperationKind = ""
-	OperationEnable    OperationKind = "enable"
-	OperationDisable   OperationKind = "disable"
-	OperationDelete    OperationKind = "delete"
-	OperationAddEIM    OperationKind = "add-eim"
-	OperationDeleteEIM OperationKind = "delete-eim"
-	OperationUpdateEIM OperationKind = "update-eim"
-	OperationListEIM   OperationKind = "list-eim"
+	OperationNone                     OperationKind = ""
+	OperationEnable                   OperationKind = "enable"
+	OperationDisable                  OperationKind = "disable"
+	OperationDelete                   OperationKind = "delete"
+	OperationListProfileInfo          OperationKind = "list-profile-info"
+	OperationGetRAT                   OperationKind = "get-rat"
+	OperationConfigureImmediateEnable OperationKind = "configure-immediate-enable"
+	OperationSetFallbackAttribute     OperationKind = "set-fallback-attribute"
+	OperationUnsetFallbackAttribute   OperationKind = "unset-fallback-attribute"
+	OperationSetDefaultDPAddress      OperationKind = "set-default-dp-address"
+	OperationAddEIM                   OperationKind = "add-eim"
+	OperationDeleteEIM                OperationKind = "delete-eim"
+	OperationUpdateEIM                OperationKind = "update-eim"
+	OperationListEIM                  OperationKind = "list-eim"
 )
 
 func (o OperationKind) resultTag() uint64 {
@@ -24,6 +30,18 @@ func (o OperationKind) resultTag() uint64 {
 		return 4
 	case OperationDelete:
 		return 5
+	case OperationListProfileInfo:
+		return 45
+	case OperationGetRAT:
+		return 6
+	case OperationConfigureImmediateEnable:
+		return 7
+	case OperationSetFallbackAttribute:
+		return 13
+	case OperationUnsetFallbackAttribute:
+		return 14
+	case OperationSetDefaultDPAddress:
+		return 101
 	case OperationAddEIM:
 		return 8
 	case OperationDeleteEIM:
@@ -56,6 +74,18 @@ func packagePSMO(pkg protocolasn1.EuiccPackage) (OperationKind, []byte) {
 		return OperationDisable, cloneBytes(psmo.ICCID)
 	case protocolasn1.PsmoDelete:
 		return OperationDelete, cloneBytes(psmo.ICCID)
+	case protocolasn1.PsmoListProfileInfo:
+		return OperationListProfileInfo, nil
+	case protocolasn1.PsmoGetRAT:
+		return OperationGetRAT, nil
+	case protocolasn1.PsmoConfigureImmediateEnable:
+		return OperationConfigureImmediateEnable, nil
+	case protocolasn1.PsmoSetFallbackAttribute:
+		return OperationSetFallbackAttribute, cloneBytes(psmo.ICCID)
+	case protocolasn1.PsmoUnsetFallbackAttribute:
+		return OperationUnsetFallbackAttribute, nil
+	case protocolasn1.PsmoSetDefaultDPAddress:
+		return OperationSetDefaultDPAddress, nil
 	default:
 		return OperationNone, nil
 	}

@@ -5,6 +5,7 @@ package esipa
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -41,7 +42,8 @@ const (
 )
 
 var (
-	errUnsupportedMessage = errors.New("esipa: unsupported IPA-to-eIM message")
+	errUnsupportedMessage    = errors.New("esipa: unsupported IPA-to-eIM message")
+	errMissingEUICCPublicKey = errors.New("esipa: eUICC public key resolver is required")
 
 	tagInteger          = bertlv.Universal.Primitive(2)
 	tagSequence         = bertlv.Universal.Constructed(16)
@@ -66,12 +68,21 @@ type Response struct {
 	Message protocolasn1.ESipaMessageFromEimToIpa
 }
 
+// EUICCPublicKeyResolver returns the trusted public key for verifying signed
+// eUICC Package Results for one tenant-scoped eUICC.
+type EUICCPublicKeyResolver func(ctx context.Context, tenantID storage.TenantID, eid string) (crypto.PublicKey, error)
+
 // Handler owns the shared ESipa request handling configuration.
 type Handler struct {
 	Store          storage.Store
 	TenantID       storage.TenantID
 	Path           string
 	MaxMessageSize int64
+	EUICCPublicKey EUICCPublicKeyResolver
+	// AllowUnverifiedEUICCPackageResults is a test/demo escape hatch for mock
+	// eUICCs that cannot produce verifiable result signatures. Production
+	// handlers must leave this false so state is not updated from unverified EPRs.
+	AllowUnverifiedEUICCPackageResults bool
 
 	blockwiseMu        sync.Mutex
 	blockwiseResponses map[string]coapBlockwiseResponse
@@ -104,6 +115,17 @@ func EncodeResponse(response Response) ([]byte, error) {
 // Handle applies one decoded ESipa request to the Store and returns the decoded
 // response. HTTP and CoAP/DTLS transports call this same function.
 func Handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request) (Response, error) {
+	return handle(ctx, store, tenantID, request, nil, false)
+}
+
+func (h *Handler) handle(ctx context.Context, request Request) (Response, error) {
+	if h == nil {
+		return Response{}, errors.New("esipa: nil Handler")
+	}
+	return handle(ctx, h.Store, h.TenantID, request, h.EUICCPublicKey, h.AllowUnverifiedEUICCPackageResults)
+}
+
+func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
 	if store == nil {
 		return Response{}, errors.New("esipa: nil Store")
 	}
@@ -116,11 +138,11 @@ func Handle(ctx context.Context, store storage.Store, tenantID storage.TenantID,
 	case request.Message.Raw.Tag.Equal(tagGetEimPackage):
 		return handleGetEimPackage(ctx, store, tenantID, request.Message.Raw)
 	case request.Message.Raw.Tag.Equal(tagProvideResult):
-		return handleProvideEimPackageResult(ctx, store, tenantID, request.Message.Raw)
+		return handleProvideEimPackageResult(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	case request.Message.Raw.Tag.Equal(tagTransferPackage):
-		return handleTransferEimPackageResponse(ctx, store, tenantID, request.Message.Raw)
+		return handleTransferEimPackageResponse(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	case request.Message.Raw.Tag.Equal(tagHandleNotify):
-		return handleNotification(ctx, store, tenantID, request.Message.Raw)
+		return handleNotification(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	default:
 		return Response{}, fmt.Errorf("%w: %s", errUnsupportedMessage, request.Message.Raw.Tag.String())
 	}
@@ -164,7 +186,7 @@ func handleGetEimPackage(ctx context.Context, store storage.Store, tenantID stor
 	return responseFromMarshaler(response)
 }
 
-func handleProvideEimPackageResult(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV) (Response, error) {
+func handleProvideEimPackageResult(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
 	var request protocolasn1.ProvideEimPackageResult
 	if err := request.UnmarshalBERTLV(tlv); err != nil {
 		return Response{}, err
@@ -173,7 +195,7 @@ func handleProvideEimPackageResult(ctx context.Context, store storage.Store, ten
 	if code != nil {
 		return provideResultErrorResponse(*code)
 	}
-	ack, err := recordEimPackageResult(ctx, store, tenantID, eid, request.EimPackageResult.Raw)
+	ack, err := recordEimPackageResult(ctx, store, tenantID, eid, request.EimPackageResult.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	if errors.Is(err, storage.ErrNotFound) {
 		return provideResultErrorResponse(provideResultErrorEIDNotFound)
 	}
@@ -183,7 +205,7 @@ func handleProvideEimPackageResult(ctx context.Context, store storage.Store, ten
 	return provideResultAckResponse(ack)
 }
 
-func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV) (Response, error) {
+func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
 	var request protocolasn1.TransferEimPackageResponse
 	if err := request.UnmarshalBERTLV(tlv); err != nil {
 		return Response{}, err
@@ -197,16 +219,16 @@ func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, 
 	if code != nil {
 		return transferAckResponse(nil)
 	}
-	ack, err := recordEimPackageResult(ctx, store, tenantID, eid, request.Raw)
+	ack, err := recordEimPackageResult(ctx, store, tenantID, eid, request.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	if err != nil {
 		return Response{}, err
 	}
 	return transferAckResponse(ack)
 }
 
-func handleNotification(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV) (Response, error) {
+func handleNotification(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
 	if len(tlv.Children) == 1 && tlv.Children[0].Tag.Equal(tagProvideResult) {
-		return handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0])
+		return handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0], euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	}
 	if err := storeNotification(ctx, store, tenantID, "", "handle-notification", tlv); err != nil {
 		return Response{}, err
@@ -257,6 +279,8 @@ func recordEimPackageResult(
 	tenantID storage.TenantID,
 	eid string,
 	tlv *bertlv.TLV,
+	euiccPublicKey EUICCPublicKeyResolver,
+	allowUnverifiedEUICCPackageResults bool,
 ) (*protocolasn1.EimAcknowledgements, error) {
 	if tlv == nil {
 		return nil, errors.New("esipa: missing EimPackageResult")
@@ -285,15 +309,41 @@ func recordEimPackageResult(
 	if err := result.UnmarshalBERTLV(resultTLV); err != nil {
 		return nil, err
 	}
+	resultDER, err := resultTLV.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	var publicKey crypto.PublicKey
+	if !allowUnverifiedEUICCPackageResults {
+		if euiccPublicKey == nil {
+			return nil, errMissingEUICCPublicKey
+		}
+		publicKey, err = euiccPublicKey(ctx, tenantID, eid)
+		if err != nil {
+			return nil, err
+		}
+		if publicKey == nil {
+			return nil, errMissingEUICCPublicKey
+		}
+	}
 	operations, err := matchingEUICCPackageOperations(ctx, store, tenantID, eid, &result)
 	if err != nil {
 		return nil, err
 	}
 	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
 	for _, operation := range operations {
-		status, err := resultStatusForOperation(operation, &result)
-		if err != nil {
-			return nil, err
+		status := storage.OperationDone
+		var domain *euiccpkg.Result
+		if allowUnverifiedEUICCPackageResults {
+			status, err = resultStatusForOperation(operation, &result)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			domain, status, err = verifiedOperationResult(operation, tenantID, eid, resultDER, publicKey, &result)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
 			EID:            eid,
@@ -305,13 +355,75 @@ func recordEimPackageResult(
 			return nil, err
 		}
 		if status == storage.OperationDone {
-			if err := applyEUICCPackageOperationState(ctx, store, tenantID, operation, &result); err != nil {
+			if allowUnverifiedEUICCPackageResults {
+				err = applyEUICCPackageOperationState(ctx, store, tenantID, operation, &result)
+			} else {
+				request, requestErr := signedRequestFromOperation(tenantID, eid, operation)
+				if requestErr != nil {
+					return nil, requestErr
+				}
+				err = euiccpkg.ApplyPackageResultState(ctx, store, tenantID, eid, request.Package, domain)
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
 		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
 	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+}
+
+func verifiedOperationResult(
+	operation storage.Operation,
+	tenantID storage.TenantID,
+	eid string,
+	resultDER []byte,
+	publicKey crypto.PublicKey,
+	result *protocolasn1.EuiccPackageResult,
+) (*euiccpkg.Result, storage.OperationStatus, error) {
+	request, err := signedRequestFromOperation(tenantID, eid, operation)
+	if err != nil {
+		return nil, storage.OperationFailed, err
+	}
+	sequenceNumber := int64(0)
+	if result != nil && result.Kind == protocolasn1.EuiccPackageResultOK && result.Signed != nil && result.Signed.Data.SeqNumber != 0 {
+		sequenceNumber = operation.SequenceNumber
+	}
+	domain, err := euiccpkg.VerifyPackageResult(euiccpkg.ResultInput{
+		Request:        request,
+		ResultDER:      resultDER,
+		EUICCPublicKey: publicKey,
+		SequenceNumber: sequenceNumber,
+	})
+	if err != nil {
+		return nil, storage.OperationFailed, err
+	}
+	if !domain.OK {
+		return domain, storage.OperationFailed, nil
+	}
+	return domain, storage.OperationDone, nil
+}
+
+func signedRequestFromOperation(tenantID storage.TenantID, eid string, operation storage.Operation) (*euiccpkg.SignedRequest, error) {
+	if operation.Kind != storage.OperationEuiccPackage {
+		return nil, fmt.Errorf("esipa: operation %d is %q, want eUICC package", operation.ID, operation.Kind)
+	}
+	var request protocolasn1.EuiccPackageRequest
+	if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+		return nil, err
+	}
+	signed := request.EuiccPackageSigned
+	return &euiccpkg.SignedRequest{
+		Request:          request,
+		DER:              cloneBytes(operation.Payload),
+		TenantID:         tenantID,
+		EID:              eid,
+		EIDValue:         cloneBytes(signed.EID),
+		EimID:            signed.EimID,
+		CounterValue:     signed.CounterValue,
+		EimTransactionID: cloneBytes(signed.EimTransactionID),
+		Package:          signed.EuiccPackage,
+	}, nil
 }
 
 func matchingEUICCPackageOperations(

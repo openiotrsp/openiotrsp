@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	stdasn1 "encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -49,7 +50,13 @@ func (h *Handler) HTTPHandler() http.Handler {
 	mux.HandleFunc("POST /v1/profile-downloads", h.triggerProfileDownload)
 	mux.HandleFunc("POST /v1/devices/{eid}/profiles/{iccid}/enable", h.enableProfile)
 	mux.HandleFunc("POST /v1/devices/{eid}/profiles/{iccid}/disable", h.disableProfile)
+	mux.HandleFunc("POST /v1/devices/{eid}/profiles/{iccid}/fallback", h.setFallbackAttribute)
+	mux.HandleFunc("DELETE /v1/devices/{eid}/profiles/fallback", h.unsetFallbackAttribute)
 	mux.HandleFunc("DELETE /v1/devices/{eid}/profiles/{iccid}", h.deleteProfile)
+	mux.HandleFunc("POST /v1/devices/{eid}/profiles/list", h.listProfileInfo)
+	mux.HandleFunc("POST /v1/devices/{eid}/profiles/get-rat", h.getRAT)
+	mux.HandleFunc("POST /v1/devices/{eid}/profiles/immediate-enable", h.configureImmediateEnable)
+	mux.HandleFunc("POST /v1/devices/{eid}/profiles/default-dp-address", h.setDefaultDPAddress)
 	mux.HandleFunc("POST /v1/eims/initial-configuration", h.initialEIMConfiguration)
 	mux.HandleFunc("POST /v1/devices/{eid}/eims", h.addEIM)
 	mux.HandleFunc("GET /v1/devices/{eid}/eims", h.eimStatus)
@@ -94,6 +101,7 @@ type enqueueResponse struct {
 type profileResponse struct {
 	ICCID       string `json:"iccid"`
 	IsEnabled   bool   `json:"isEnabled"`
+	IsFallback  bool   `json:"isFallback"`
 	SMDPAddress string `json:"smdpAddress"`
 }
 
@@ -111,6 +119,16 @@ type eimConfigRequest struct {
 	EIMPublicKeyDataBase64 string `json:"eimPublicKeyDataBase64,omitempty"`
 	EIMCertificateBase64   string `json:"eimCertificateBase64,omitempty"`
 	EUICCCIPKIDBase64      string `json:"euiccCiPKIdBase64,omitempty"`
+}
+
+type configureImmediateEnableRequest struct {
+	ImmediateEnableFlag bool   `json:"immediateEnableFlag,omitempty"`
+	DefaultSMDPOID      string `json:"defaultSmdpOid,omitempty"`
+	DefaultSMDPAddress  string `json:"defaultSmdpAddress,omitempty"`
+}
+
+type setDefaultDPAddressRequest struct {
+	DefaultDPAddress string `json:"defaultDpAddress"`
 }
 
 type associatedEIMResponse struct {
@@ -210,6 +228,58 @@ func (h *Handler) disableProfile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	h.enqueueProfileOperation(w, r, func(iccid []byte) protocolasn1.EuiccPackage {
 		return euiccpkg.Delete(iccid)
+	})
+}
+
+func (h *Handler) listProfileInfo(w http.ResponseWriter, r *http.Request) {
+	h.enqueueDeviceOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
+		return euiccpkg.ListProfileInfo(), nil
+	})
+}
+
+func (h *Handler) getRAT(w http.ResponseWriter, r *http.Request) {
+	h.enqueueDeviceOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
+		return euiccpkg.GetRAT(), nil
+	})
+}
+
+func (h *Handler) configureImmediateEnable(w http.ResponseWriter, r *http.Request) {
+	var request configureImmediateEnableRequest
+	if !decodeJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
+	h.enqueueDeviceOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
+		oid, err := parseOID(request.DefaultSMDPOID)
+		if err != nil {
+			return protocolasn1.EuiccPackage{}, err
+		}
+		return euiccpkg.ConfigureImmediateEnable(request.ImmediateEnableFlag, oid, strings.TrimSpace(request.DefaultSMDPAddress)), nil
+	})
+}
+
+func (h *Handler) setFallbackAttribute(w http.ResponseWriter, r *http.Request) {
+	h.enqueueProfileOperation(w, r, func(iccid []byte) protocolasn1.EuiccPackage {
+		return euiccpkg.SetFallbackAttribute(iccid)
+	})
+}
+
+func (h *Handler) unsetFallbackAttribute(w http.ResponseWriter, r *http.Request) {
+	h.enqueueDeviceOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
+		return euiccpkg.UnsetFallbackAttribute(), nil
+	})
+}
+
+func (h *Handler) setDefaultDPAddress(w http.ResponseWriter, r *http.Request) {
+	var request setDefaultDPAddressRequest
+	if !decodeJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
+	h.enqueueDeviceOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
+		address := strings.TrimSpace(request.DefaultDPAddress)
+		if address == "" {
+			return protocolasn1.EuiccPackage{}, errors.New("api: defaultDpAddress is required")
+		}
+		return euiccpkg.SetDefaultDPAddress(address), nil
 	})
 }
 
@@ -406,6 +476,10 @@ func (h *Handler) enqueueProfileOperation(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) enqueueEIMOperation(w http.ResponseWriter, r *http.Request, build func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error)) {
+	h.enqueueDeviceOperation(w, r, build)
+}
+
+func (h *Handler) enqueueDeviceOperation(w http.ResponseWriter, r *http.Request, build func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error)) {
 	tenantID, ok := h.resolveTenant(w, r)
 	if !ok {
 		return
@@ -477,6 +551,7 @@ func (h *Handler) deviceStatus(w http.ResponseWriter, r *http.Request) {
 		profiles = append(profiles, profileResponse{
 			ICCID:       state.ICCID,
 			IsEnabled:   state.IsEnabled,
+			IsFallback:  state.IsFallback,
 			SMDPAddress: state.SMDPAddress,
 		})
 	}
@@ -783,6 +858,35 @@ func parseEIMID(value string) (string, error) {
 		return "", errors.New("api: eimId must be at most 128 characters")
 	}
 	return normalized, nil
+}
+
+func parseOID(value string) (stdasn1.ObjectIdentifier, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) < 2 {
+		return nil, errors.New("api: defaultSmdpOid must have at least two arcs")
+	}
+	oid := make(stdasn1.ObjectIdentifier, len(parts))
+	for index, part := range parts {
+		if part == "" {
+			return nil, errors.New("api: defaultSmdpOid contains an empty arc")
+		}
+		arc, err := strconv.Atoi(part)
+		if err != nil || arc < 0 {
+			return nil, errors.New("api: defaultSmdpOid arcs must be non-negative integers")
+		}
+		oid[index] = arc
+	}
+	if oid[0] > 2 {
+		return nil, errors.New("api: defaultSmdpOid first arc must be 0, 1, or 2")
+	}
+	if oid[0] < 2 && oid[1] > 39 {
+		return nil, errors.New("api: defaultSmdpOid second arc must be <= 39 when first arc is 0 or 1")
+	}
+	return oid, nil
 }
 
 func parseICCID(value string) ([]byte, error) {

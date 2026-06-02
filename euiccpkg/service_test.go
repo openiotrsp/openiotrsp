@@ -8,12 +8,14 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	stdasn1 "encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
+	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
@@ -441,6 +443,47 @@ func TestECOConstructorsEncode(t *testing.T) {
 	}
 }
 
+func TestPSMOConstructorsEncode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		pkg  protocolasn1.EuiccPackage
+	}{
+		{name: "list profile info", pkg: ListProfileInfo()},
+		{name: "get rat", pkg: GetRAT()},
+		{name: "configure immediate enable", pkg: ConfigureImmediateEnable(true, stdasn1.ObjectIdentifier{1, 2, 840, 113549}, "smdp.example")},
+		{name: "set fallback", pkg: SetFallbackAttribute([]byte{0x89, 0x10})},
+		{name: "unset fallback", pkg: UnsetFallbackAttribute()},
+		{name: "set default dp address", pkg: SetDefaultDPAddress("smdp.example")},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			encoded, err := protocolasn1.Encode(&tc.pkg)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			var decoded protocolasn1.EuiccPackage
+			if err := protocolasn1.Decode(encoded, &decoded); err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			reencoded, err := protocolasn1.Encode(&decoded)
+			if err != nil {
+				t.Fatalf("re-Encode() error = %v", err)
+			}
+			if !bytes.Equal(reencoded, encoded) {
+				t.Fatalf("PSMO re-encode mismatch\n got %x\nwant %x", reencoded, encoded)
+			}
+			operation, _ := packagePSMO(decoded)
+			if operation == OperationNone {
+				t.Fatalf("packagePSMO() = none for %s", tc.name)
+			}
+		})
+	}
+}
+
 func TestSignatureInputIncludesAssociationToken(t *testing.T) {
 	t.Parallel()
 
@@ -526,6 +569,12 @@ func TestSignAppendsAssociationTokenForAllPackageOperations(t *testing.T) {
 		{name: "enable", pkg: Enable([]byte{0x89, 0x10}, false)},
 		{name: "disable", pkg: Disable([]byte{0x89, 0x10})},
 		{name: "delete profile", pkg: Delete([]byte{0x89, 0x10})},
+		{name: "list profile info", pkg: ListProfileInfo()},
+		{name: "get rat", pkg: GetRAT()},
+		{name: "configure immediate enable", pkg: ConfigureImmediateEnable(true, stdasn1.ObjectIdentifier{1, 2, 840, 113549}, "smdp.example")},
+		{name: "set fallback", pkg: SetFallbackAttribute([]byte{0x89, 0x10})},
+		{name: "unset fallback", pkg: UnsetFallbackAttribute()},
+		{name: "set default dp address", pkg: SetDefaultDPAddress("smdp.example")},
 		{name: "add eim", pkg: AddEim(config)},
 		{name: "update eim", pkg: UpdateEim(config)},
 		{name: "delete eim", pkg: DeleteEim("other.eim")},
@@ -666,6 +715,161 @@ func TestECOResultsMapAndApplyState(t *testing.T) {
 	}
 	if _, err := store.GetAssociatedEIM(ctx, storage.DefaultTenantID, eid, "other.eim"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetAssociatedEIM(deleted) error = %v, want %v", err, storage.ErrNotFound)
+	}
+}
+
+func TestPSMOResultsMapAndApplyState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eimSigner := newTestSigner(t)
+	euiccSigner := newTestSigner(t)
+	service := &Service{Store: store, Signer: eimSigner, EimID: "eim.example"}
+	eid := "eid-psmo-results"
+	iccidA := []byte{0x89, 0x10, 0xaa}
+	iccidB := []byte{0x89, 0x10, 0xbb}
+	registerWithState(t, store, eid,
+		storage.ProfileState{EID: eid, ICCID: hex.EncodeToString(iccidA), IsEnabled: false, SMDPAddress: "smdp-a.example"},
+		storage.ProfileState{EID: eid, ICCID: "stale", IsEnabled: true},
+	)
+
+	listRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x10}, ListProfileInfo())
+	enabled := protocolasn1.ProfileStateEnabled
+	disabled := protocolasn1.ProfileStateDisabled
+	listResultData, err := protocolasn1.ProfileInfoListEuiccResult(&protocolasn1.ProfileInfoListResponse{
+		Profiles: []protocolasn1.ProfileInfo{
+			{ICCID: iccidA, ProfileState: &enabled, FallbackAttribute: true},
+			{ICCID: iccidB, ProfileState: &disabled},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProfileInfoListEuiccResult() error = %v", err)
+	}
+	listResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        listRequest,
+		ResultDER:      signedResultDataDER(t, euiccSigner, listRequest, 1, []protocolasn1.EuiccResultData{listResultData}, listRequest.CounterValue),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 1,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(list) error = %v", err)
+	}
+	if !listResult.OK || listResult.Operation != OperationListProfileInfo || len(listResult.Profiles) != 2 {
+		t.Fatalf("list result = %#v, want two profiles", listResult)
+	}
+	assertProfileStateFull(t, store, eid, iccidA, true, true, "smdp-a.example")
+	assertProfileStateFull(t, store, eid, iccidB, false, false, "")
+	if _, err := store.GetProfileState(ctx, storage.DefaultTenantID, eid, "stale"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("stale profile error = %v, want %v", err, storage.ErrNotFound)
+	}
+
+	setFallbackRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x11}, SetFallbackAttribute(iccidB))
+	setFallbackResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        setFallbackRequest,
+		ResultDER:      signedResultDER(t, euiccSigner, setFallbackRequest, 2, 13, 0),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 2,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(set fallback) error = %v", err)
+	}
+	if !setFallbackResult.OK || setFallbackResult.Operation != OperationSetFallbackAttribute {
+		t.Fatalf("set fallback result = %#v, want ok", setFallbackResult)
+	}
+	assertProfileStateFull(t, store, eid, iccidA, true, false, "smdp-a.example")
+	assertProfileStateFull(t, store, eid, iccidB, false, true, "")
+
+	unsetFallbackRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x12}, UnsetFallbackAttribute())
+	unsetFallbackResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        unsetFallbackRequest,
+		ResultDER:      signedResultDER(t, euiccSigner, unsetFallbackRequest, 3, 14, 0),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 3,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(unset fallback) error = %v", err)
+	}
+	if !unsetFallbackResult.OK || unsetFallbackResult.Operation != OperationUnsetFallbackAttribute {
+		t.Fatalf("unset fallback result = %#v, want ok", unsetFallbackResult)
+	}
+	assertProfileStateFull(t, store, eid, iccidB, false, false, "")
+
+	configureRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x13}, ConfigureImmediateEnable(true, nil, "smdp.example"))
+	configureResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        configureRequest,
+		ResultDER:      signedResultDER(t, euiccSigner, configureRequest, 4, 7, 0),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 4,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(configure) error = %v", err)
+	}
+	if !configureResult.OK || configureResult.Operation != OperationConfigureImmediateEnable {
+		t.Fatalf("configure result = %#v, want ok", configureResult)
+	}
+
+	ratRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x14}, GetRAT())
+	ratResultData := protocolasn1.EuiccResultData{Raw: mustTLV(t, []byte{0xa6, 0x00})}
+	ratResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        ratRequest,
+		ResultDER:      signedResultDataDER(t, euiccSigner, ratRequest, 5, []protocolasn1.EuiccResultData{ratResultData}, ratRequest.CounterValue),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 5,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(get RAT) error = %v", err)
+	}
+	if !ratResult.OK || ratResult.Operation != OperationGetRAT || ratResult.RulesAuthorisationTable == nil {
+		t.Fatalf("RAT result = %#v, want raw RAT", ratResult)
+	}
+
+	defaultDPRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x15}, SetDefaultDPAddress("smdp.example"))
+	defaultDPResultData, err := protocolasn1.SetDefaultDPAddressEuiccResult(&protocolasn1.SetDefaultDPAddressResponse{Result: 0})
+	if err != nil {
+		t.Fatalf("SetDefaultDPAddressEuiccResult() error = %v", err)
+	}
+	defaultDPResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        defaultDPRequest,
+		ResultDER:      signedResultDataDER(t, euiccSigner, defaultDPRequest, 6, []protocolasn1.EuiccResultData{defaultDPResultData}, defaultDPRequest.CounterValue),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 6,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(default DP) error = %v", err)
+	}
+	if !defaultDPResult.OK || defaultDPResult.Operation != OperationSetDefaultDPAddress {
+		t.Fatalf("default DP result = %#v, want ok", defaultDPResult)
+	}
+}
+
+func TestNewPSMOErrorResultsMap(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		pkg      protocolasn1.EuiccPackage
+		result   protocolasn1.EuiccResultData
+		wantCode ResultCode
+	}{
+		{name: "list profile info", pkg: ListProfileInfo(), result: profileListErrorResult(t, 11), wantCode: ResultProfileChangeOngoing},
+		{name: "configure immediate enable", pkg: ConfigureImmediateEnable(false, nil, ""), result: integerResultData(t, 7, 1), wantCode: ResultInsufficientMemory},
+		{name: "set fallback", pkg: SetFallbackAttribute([]byte{0x89, 0x10}), result: integerResultData(t, 13, 2), wantCode: ResultFallbackNotAllowed},
+		{name: "unset fallback", pkg: UnsetFallbackAttribute(), result: integerResultData(t, 14, 2), wantCode: ResultNoFallbackAttribute},
+		{name: "set default dp", pkg: SetDefaultDPAddress("smdp.example"), result: setDefaultDPResultData(t, 127), wantCode: ResultUndefinedError},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			result, err := ParseOperationResult(tc.pkg, []protocolasn1.EuiccResultData{tc.result})
+			if err != nil {
+				t.Fatalf("ParseOperationResult() error = %v", err)
+			}
+			if result.OK || result.ResultCode != tc.wantCode {
+				t.Fatalf("result = %#v, want code %s", result, tc.wantCode)
+			}
+		})
 	}
 }
 
@@ -948,6 +1152,54 @@ func assertProfileEnabled(t *testing.T, store storage.Store, eid string, iccid [
 	if want != nil {
 		t.Fatalf("profile %s missing, want enabled=%v", iccidHex, *want)
 	}
+}
+
+func assertProfileStateFull(t *testing.T, store storage.Store, eid string, iccid []byte, enabled bool, fallback bool, smdpAddress string) {
+	t.Helper()
+	iccidHex := hex.EncodeToString(iccid)
+	profile, err := store.GetProfileState(context.Background(), storage.DefaultTenantID, eid, iccidHex)
+	if err != nil {
+		t.Fatalf("GetProfileState(%s) error = %v", iccidHex, err)
+	}
+	if profile.IsEnabled != enabled || profile.IsFallback != fallback || profile.SMDPAddress != smdpAddress {
+		t.Fatalf("profile %s = %#v, want enabled=%v fallback=%v smdp=%q", iccidHex, profile, enabled, fallback, smdpAddress)
+	}
+}
+
+func integerResultData(t *testing.T, tag uint64, value int64) protocolasn1.EuiccResultData {
+	t.Helper()
+	result, err := protocolasn1.IntegerEuiccResult(tag, value)
+	if err != nil {
+		t.Fatalf("IntegerEuiccResult() error = %v", err)
+	}
+	return result
+}
+
+func profileListErrorResult(t *testing.T, value protocolasn1.ProfileInfoListError) protocolasn1.EuiccResultData {
+	t.Helper()
+	result, err := protocolasn1.ProfileInfoListEuiccResult(&protocolasn1.ProfileInfoListResponse{Error: &value})
+	if err != nil {
+		t.Fatalf("ProfileInfoListEuiccResult() error = %v", err)
+	}
+	return result
+}
+
+func setDefaultDPResultData(t *testing.T, value int64) protocolasn1.EuiccResultData {
+	t.Helper()
+	result, err := protocolasn1.SetDefaultDPAddressEuiccResult(&protocolasn1.SetDefaultDPAddressResponse{Result: value})
+	if err != nil {
+		t.Fatalf("SetDefaultDPAddressEuiccResult() error = %v", err)
+	}
+	return result
+}
+
+func mustTLV(t *testing.T, data []byte) *bertlv.TLV {
+	t.Helper()
+	tlv := new(bertlv.TLV)
+	if err := tlv.UnmarshalBinary(data); err != nil {
+		t.Fatalf("UnmarshalBinary(%x) error = %v", data, err)
+	}
+	return tlv
 }
 
 func testEID(last byte) []byte {

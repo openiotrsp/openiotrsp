@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 )
@@ -156,12 +157,7 @@ func successfulResultData(pkg protocolasn1.EuiccPackage, eimID string) (protocol
 		if len(pkg.PSMOs) != 1 {
 			return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: only single PSMO eUICC packages are supported")
 		}
-		resultTag, operation, err := psmoResultTag(pkg.PSMOs[0].Operation)
-		if err != nil {
-			return protocolasn1.EuiccResultData{}, "", err
-		}
-		resultData, err := protocolasn1.IntegerEuiccResult(resultTag, 0)
-		return resultData, operation, err
+		return psmoResultData(pkg.PSMOs[0])
 	case protocolasn1.EuiccPackageECO:
 		if len(pkg.ECOs) != 1 {
 			return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: only single ECO eUICC packages are supported")
@@ -172,16 +168,43 @@ func successfulResultData(pkg protocolasn1.EuiccPackage, eimID string) (protocol
 	}
 }
 
-func psmoResultTag(operation protocolasn1.PsmoOperation) (uint64, string, error) {
-	switch operation {
+func psmoResultData(psmo protocolasn1.Psmo) (protocolasn1.EuiccResultData, string, error) {
+	switch psmo.Operation {
 	case protocolasn1.PsmoEnable:
-		return 3, "enable", nil
+		resultData, err := protocolasn1.IntegerEuiccResult(3, 0)
+		return resultData, "enable", err
 	case protocolasn1.PsmoDisable:
-		return 4, "disable", nil
+		resultData, err := protocolasn1.IntegerEuiccResult(4, 0)
+		return resultData, "disable", err
 	case protocolasn1.PsmoDelete:
-		return 5, "delete", nil
+		resultData, err := protocolasn1.IntegerEuiccResult(5, 0)
+		return resultData, "delete", err
+	case protocolasn1.PsmoListProfileInfo:
+		state := protocolasn1.ProfileStateDisabled
+		resultData, err := protocolasn1.ProfileInfoListEuiccResult(&protocolasn1.ProfileInfoListResponse{
+			Profiles: []protocolasn1.ProfileInfo{{
+				ICCID:             []byte{0x89, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55},
+				ProfileState:      &state,
+				FallbackAttribute: true,
+			}},
+		})
+		return resultData, "list-profile-info", err
+	case protocolasn1.PsmoGetRAT:
+		return protocolasn1.EuiccResultData{Raw: bertlv.NewChildren(bertlv.ContextSpecific.Constructed(6))}, "get-rat", nil
+	case protocolasn1.PsmoConfigureImmediateEnable:
+		resultData, err := protocolasn1.IntegerEuiccResult(7, 0)
+		return resultData, "configure-immediate-enable", err
+	case protocolasn1.PsmoSetFallbackAttribute:
+		resultData, err := protocolasn1.IntegerEuiccResult(13, 0)
+		return resultData, "set-fallback-attribute", err
+	case protocolasn1.PsmoUnsetFallbackAttribute:
+		resultData, err := protocolasn1.IntegerEuiccResult(14, 0)
+		return resultData, "unset-fallback-attribute", err
+	case protocolasn1.PsmoSetDefaultDPAddress:
+		resultData, err := protocolasn1.SetDefaultDPAddressEuiccResult(&protocolasn1.SetDefaultDPAddressResponse{Result: 0})
+		return resultData, "set-default-dp-address", err
 	default:
-		return 0, "", errors.New("mockipa: unsupported PSMO operation")
+		return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: unsupported PSMO operation")
 	}
 }
 

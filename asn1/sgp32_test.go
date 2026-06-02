@@ -264,6 +264,7 @@ func roundTripCases() []roundTripCase {
 	addCode := AddEimResultCode(0)
 	listErr := ListEimError(127)
 	stateCause := StateChangeCause(0)
+	profileState := ProfileStateEnabled
 	getError := EimPackageResultErrorCode(1)
 	eimType := EimIDTypeFQDN
 
@@ -427,6 +428,13 @@ func roundTripCases() []roundTripCase {
 			value:   &ProfileInfoListResponse{Error: &profileErr},
 			newFunc: func() Unmarshaler { return new(ProfileInfoListResponse) },
 			tagHex:  "bf2d",
+		},
+		{
+			name:    "ProfileInfo",
+			covers:  []string{"ProfileInfo"},
+			value:   &ProfileInfo{ICCID: []byte{0x89, 0x10}, ProfileState: &profileState, FallbackAttribute: true},
+			newFunc: func() Unmarshaler { return new(ProfileInfo) },
+			tagHex:  "e3",
 		},
 		{
 			name:    "AddEimResult",

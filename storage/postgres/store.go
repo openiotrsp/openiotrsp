@@ -56,10 +56,10 @@ func (s *Store) RegisterDevice(ctx context.Context, tenantID storage.TenantID, d
 func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, eid string, iccid string) (storage.ProfileState, error) {
 	var state storage.ProfileState
 	err := s.pool.QueryRow(ctx, `
-		SELECT eid, iccid, is_enabled, smdp_address
+		SELECT eid, iccid, is_enabled, is_fallback, smdp_address
 		FROM profile_state
 		WHERE tenant_id = $1 AND eid = $2 AND iccid = $3
-	`, tenantString(tenantID), eid, iccid).Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.SMDPAddress)
+	`, tenantString(tenantID), eid, iccid).Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.IsFallback, &state.SMDPAddress)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ProfileState{}, storage.ErrNotFound
 	}
@@ -69,7 +69,7 @@ func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, 
 // ListProfileStates reads all known profile states for one eUICC.
 func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.ProfileState, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT eid, iccid, is_enabled, smdp_address
+		SELECT eid, iccid, is_enabled, is_fallback, smdp_address
 		FROM profile_state
 		WHERE tenant_id = $1 AND eid = $2
 		ORDER BY iccid
@@ -82,7 +82,7 @@ func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID
 	states := make([]storage.ProfileState, 0)
 	for rows.Next() {
 		var state storage.ProfileState
-		if err := rows.Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.SMDPAddress); err != nil {
+		if err := rows.Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.IsFallback, &state.SMDPAddress); err != nil {
 			return nil, err
 		}
 		states = append(states, cloneProfileState(state))
@@ -110,13 +110,14 @@ func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID
 // SetProfileState stores one profile state.
 func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, state storage.ProfileState) error {
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, smdp_address)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, is_fallback, smdp_address)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (tenant_id, eid, iccid)
 		DO UPDATE SET is_enabled = EXCLUDED.is_enabled,
+			is_fallback = EXCLUDED.is_fallback,
 			smdp_address = EXCLUDED.smdp_address,
 			updated_at = now()
-	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.SMDPAddress)
+	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.IsFallback, state.SMDPAddress)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return storage.ErrNotFound

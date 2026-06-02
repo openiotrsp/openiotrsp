@@ -28,15 +28,19 @@ const (
 )
 
 type config struct {
-	databaseURL    string
-	migrationsDir  string
-	listenAddr     string
-	eid            string
-	eimID          string
-	eimKeyPath     string
-	eimCertPath    string
-	activationCode string
-	enqueueOnStart bool
+	databaseURL                 string
+	migrationsDir               string
+	listenAddr                  string
+	eid                         string
+	eimID                       string
+	eimKeyPath                  string
+	eimCertPath                 string
+	euiccCertPath               string
+	eumCertPath                 string
+	ciCertPath                  string
+	activationCode              string
+	enqueueOnStart              bool
+	allowUnverifiedEUICCResults bool
 }
 
 func main() {
@@ -68,10 +72,16 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	euiccPublicKey, err := loadEUICCPublicKeyResolver(cfg)
+	if err != nil {
+		return err
+	}
 
 	started := time.Now()
 	mux := http.NewServeMux()
 	handler := esipa.NewHandler(store, storage.DefaultTenantID)
+	handler.EUICCPublicKey = euiccPublicKey
+	handler.AllowUnverifiedEUICCPackageResults = cfg.allowUnverifiedEUICCResults
 	mux.HandleFunc(esipa.DefaultPath, handler.ServeHTTP)
 	mux.Handle("/v1/", api.NewHTTPHandler(store, api.DefaultTenantResolver{}, packageService))
 	mux.Handle("/healthz", appruntime.HealthHandler("eim-server", started))
@@ -109,15 +119,19 @@ func loadConfig() config {
 		activationCode = "1$" + smdpAddress + "$" + matchingID
 	}
 	return config{
-		databaseURL:    appruntime.Env("OPENIOTRSP_DATABASE_URL", defaultDatabaseURL),
-		migrationsDir:  appruntime.Env("OPENIOTRSP_MIGRATIONS_DIR", "migrations"),
-		listenAddr:     appruntime.Env("OPENIOTRSP_EIM_LISTEN_ADDR", ":8080"),
-		eid:            appruntime.Env("OPENIOTRSP_DEMO_EID", defaultEID),
-		eimID:          appruntime.Env("OPENIOTRSP_EIM_ID", "openiotrsp.eim"),
-		eimKeyPath:     appruntime.Env("OPENIOTRSP_EIM_KEY_PATH", ""),
-		eimCertPath:    appruntime.Env("OPENIOTRSP_EIM_CERT_PATH", ""),
-		activationCode: activationCode,
-		enqueueOnStart: appruntime.EnvBool("OPENIOTRSP_DEMO_ENQUEUE_ON_START", true),
+		databaseURL:                 appruntime.Env("OPENIOTRSP_DATABASE_URL", defaultDatabaseURL),
+		migrationsDir:               appruntime.Env("OPENIOTRSP_MIGRATIONS_DIR", "migrations"),
+		listenAddr:                  appruntime.Env("OPENIOTRSP_EIM_LISTEN_ADDR", ":8080"),
+		eid:                         appruntime.Env("OPENIOTRSP_DEMO_EID", defaultEID),
+		eimID:                       appruntime.Env("OPENIOTRSP_EIM_ID", "openiotrsp.eim"),
+		eimKeyPath:                  appruntime.Env("OPENIOTRSP_EIM_KEY_PATH", ""),
+		eimCertPath:                 appruntime.Env("OPENIOTRSP_EIM_CERT_PATH", ""),
+		euiccCertPath:               appruntime.Env("OPENIOTRSP_EUICC_CERT_PATH", ""),
+		eumCertPath:                 appruntime.Env("OPENIOTRSP_EUM_CERT_PATH", ""),
+		ciCertPath:                  appruntime.Env("OPENIOTRSP_CI_CERT_PATH", ""),
+		activationCode:              activationCode,
+		enqueueOnStart:              appruntime.EnvBool("OPENIOTRSP_DEMO_ENQUEUE_ON_START", true),
+		allowUnverifiedEUICCResults: appruntime.EnvBool("OPENIOTRSP_ALLOW_UNVERIFIED_EUICC_RESULTS", false),
 	}
 }
 
@@ -136,6 +150,28 @@ func loadPackageService(cfg config) (*euiccpkg.Service, error) {
 		Signer: signer,
 		EimID:  cfg.eimID,
 	}, nil
+}
+
+func loadEUICCPublicKeyResolver(cfg config) (esipa.EUICCPublicKeyResolver, error) {
+	if cfg.euiccCertPath == "" && cfg.eumCertPath == "" && cfg.ciCertPath == "" {
+		return nil, nil
+	}
+	if cfg.euiccCertPath == "" || cfg.eumCertPath == "" || cfg.ciCertPath == "" {
+		return nil, errors.New("OPENIOTRSP_EUICC_CERT_PATH, OPENIOTRSP_EUM_CERT_PATH, and OPENIOTRSP_CI_CERT_PATH are required together for ESipa eUICC result verification")
+	}
+	euiccDER, err := os.ReadFile(cfg.euiccCertPath)
+	if err != nil {
+		return nil, err
+	}
+	eumDER, err := os.ReadFile(cfg.eumCertPath)
+	if err != nil {
+		return nil, err
+	}
+	ciDER, err := os.ReadFile(cfg.ciCertPath)
+	if err != nil {
+		return nil, err
+	}
+	return esipa.NewStaticEUICCCertificateResolver(ciDER, eumDER, euiccDER)
 }
 
 func seedDemo(ctx context.Context, store storage.Store, cfg config, logger *slog.Logger) error {

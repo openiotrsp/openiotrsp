@@ -102,3 +102,21 @@ Each entry must include:
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms
   interoperability behavior around eIM configuration operations, but the ES10b
   bootstrap orchestration remains outside the eIM's ESipa surface.
+
+## SGP.32 Fallback Attribute Boundary
+
+- Spec section: SGP.32 `setFallbackAttribute` and `unsetFallbackAttribute`;
+  ES10b `ExecuteFallbackMechanism` and `ReturnFromFallback`.
+- Ambiguity: The eIM owns signed PSMO commands that mark which profile is the
+  fallback profile, while the actual fallback switch is an IPA-to-eUICC ES10b
+  procedure.
+- Chosen reading: OpenIoTRSP exposes and persists eIM fallback attribute
+  management only. It does not expose eIM commands for executing or returning
+  from fallback; those events are observed through results, profile inventory,
+  and notifications.
+- Rationale: This keeps the eIM surface aligned with the signed SGP.32 PSMO
+  CHOICE and avoids inventing an eIM command for an ES10b function performed by
+  the device IPA.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms the
+  operation boundary, but fallback execution remains outside the eIM's direct
+  ESipa command surface.

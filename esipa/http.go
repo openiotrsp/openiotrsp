@@ -57,7 +57,7 @@ func (h *Handler) handleEncoded(ctx context.Context, payload []byte) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	response, err := Handle(ctx, h.Store, h.TenantID, request)
+	response, err := h.handle(ctx, request)
 	if err != nil {
 		return nil, err
 	}

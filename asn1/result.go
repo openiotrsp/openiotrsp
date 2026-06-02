@@ -591,6 +591,18 @@ func ListEimEuiccResult(result *ListEimResult) (EuiccResultData, error) {
 	return explicitEuiccResult(bertlv.ContextSpecific.Constructed(11), result)
 }
 
+// SetDefaultDPAddressEuiccResult builds the setDefaultDpAddressResult EuiccResultData value.
+func SetDefaultDPAddressEuiccResult(result *SetDefaultDPAddressResponse) (EuiccResultData, error) {
+	if result == nil {
+		return EuiccResultData{}, errors.New("asn1: nil SetDefaultDPAddressResponse")
+	}
+	raw, err := result.MarshalBERTLV()
+	if err != nil {
+		return EuiccResultData{}, err
+	}
+	return EuiccResultData{Raw: raw}, nil
+}
+
 func explicitEuiccResult(tag bertlv.Tag, value Marshaler) (EuiccResultData, error) {
 	child, err := value.MarshalBERTLV()
 	if err != nil {
@@ -773,9 +785,82 @@ func (e *EuiccPackageErrorUnsigned) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	return nil
 }
 
+// ProfileState is the imported SGP.22 ProfileState INTEGER used in ProfileInfo.
+type ProfileState int64
+
+const (
+	// ProfileStateDisabled means the profile is installed but disabled.
+	ProfileStateDisabled ProfileState = 0
+	// ProfileStateEnabled means the profile is installed and enabled.
+	ProfileStateEnabled ProfileState = 1
+)
+
+// ProfileInfo is the subset of SGP.32/SGP.22 ProfileInfo that the eIM persists.
+type ProfileInfo struct {
+	ICCID             []byte
+	ProfileState      *ProfileState
+	FallbackAttribute bool
+}
+
+// MarshalBERTLV encodes ProfileInfo as tag E3.
+func (p *ProfileInfo) MarshalBERTLV() (*bertlv.TLV, error) {
+	if p == nil {
+		return nil, errors.New("asn1: nil ProfileInfo")
+	}
+	var children []*bertlv.TLV
+	if p.ICCID != nil {
+		children = append(children, octetTLV(tagEID, p.ICCID))
+	}
+	if p.ProfileState != nil {
+		child, err := integerTLV(tagProfileState, *p.ProfileState)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, child)
+	}
+	if p.FallbackAttribute {
+		child, err := booleanTLV(tagFallbackAttribute, true)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, child)
+	}
+	return constructed(tagProfileInfo, children...), nil
+}
+
+// UnmarshalBERTLV decodes the persisted subset of ProfileInfo from tag E3.
+func (p *ProfileInfo) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if err := expectTag(tlv, tagProfileInfo); err != nil {
+		return err
+	}
+	var out ProfileInfo
+	var err error
+	if child := tlv.First(tagEID); child != nil {
+		out.ICCID, err = octetValue(child)
+		if err != nil {
+			return err
+		}
+	}
+	if child := tlv.First(tagProfileState); child != nil {
+		value, err := integerValue[ProfileState](child)
+		if err != nil {
+			return err
+		}
+		out.ProfileState = &value
+	}
+	if child := tlv.First(tagFallbackAttribute); child != nil {
+		out.FallbackAttribute, err = booleanValue(child)
+		if err != nil {
+			return err
+		}
+	}
+	*p = out
+	return nil
+}
+
 // ProfileInfoListResponse is SGP.32 ProfileInfoListResponse, tag BF2D.
 type ProfileInfoListResponse struct {
-	Profiles []*bertlv.TLV
+	Profiles []ProfileInfo
 	Error    *ProfileInfoListError
 }
 
@@ -792,8 +877,12 @@ func (r *ProfileInfoListResponse) MarshalBERTLV() (*bertlv.TLV, error) {
 		return constructed(tagProfileInfoList, child), nil
 	}
 	profiles := make([]*bertlv.TLV, 0, len(r.Profiles))
-	for _, profile := range r.Profiles {
-		profiles = append(profiles, cloneTLV(profile))
+	for index := range r.Profiles {
+		profile, err := r.Profiles[index].MarshalBERTLV()
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, profile)
 	}
 	return constructed(tagProfileInfoList, constructed(tagSequence, profiles...)), nil
 }
@@ -818,13 +907,29 @@ func (r *ProfileInfoListResponse) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 		if err := expectTag(child, tagSequence); err != nil {
 			return err
 		}
-		out.Profiles = make([]*bertlv.TLV, 0, len(child.Children))
+		out.Profiles = make([]ProfileInfo, 0, len(child.Children))
 		for _, profile := range child.Children {
-			out.Profiles = append(out.Profiles, cloneTLV(profile))
+			var decoded ProfileInfo
+			if err := decoded.UnmarshalBERTLV(profile); err != nil {
+				return err
+			}
+			out.Profiles = append(out.Profiles, decoded)
 		}
 	}
 	*r = out
 	return nil
+}
+
+// ProfileInfoListEuiccResult builds the listProfileInfoResult EuiccResultData value.
+func ProfileInfoListEuiccResult(result *ProfileInfoListResponse) (EuiccResultData, error) {
+	if result == nil {
+		return EuiccResultData{}, errors.New("asn1: nil ProfileInfoListResponse")
+	}
+	raw, err := result.MarshalBERTLV()
+	if err != nil {
+		return EuiccResultData{}, err
+	}
+	return EuiccResultData{Raw: raw}, nil
 }
 
 // AddEimResult is SGP.32 AddEimResult.

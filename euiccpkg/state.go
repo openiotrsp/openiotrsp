@@ -20,7 +20,7 @@ func ApplyPackageState(
 	pkg protocolasn1.EuiccPackage,
 ) error {
 	operation, iccid := packagePSMO(pkg)
-	if err := applyPSMOState(ctx, store, tenantID, eid, operation, iccid); err != nil {
+	if err := applyPSMOState(ctx, store, tenantID, eid, operation, iccid, nil); err != nil {
 		return err
 	}
 	return applyECOState(ctx, store, tenantID, eid, pkg, nil)
@@ -37,7 +37,7 @@ func ApplyPackageResultState(
 	result *Result,
 ) error {
 	operation, iccid := packagePSMO(pkg)
-	if err := applyPSMOState(ctx, store, tenantID, eid, operation, iccid); err != nil {
+	if err := applyPSMOState(ctx, store, tenantID, eid, operation, iccid, result); err != nil {
 		return err
 	}
 	return applyECOState(ctx, store, tenantID, eid, pkg, result)
@@ -70,6 +70,7 @@ func applyPSMOState(
 	eid string,
 	operation OperationKind,
 	iccid []byte,
+	result *Result,
 ) error {
 	if operation == OperationNone {
 		return nil
@@ -87,6 +88,15 @@ func applyPSMOState(
 			return nil
 		}
 		return err
+	case OperationListProfileInfo:
+		if result == nil {
+			return nil
+		}
+		return syncProfileInventory(ctx, store, tenantID, eid, result.Profiles)
+	case OperationSetFallbackAttribute:
+		return setProfileFallback(ctx, store, tenantID, eid, iccidHex)
+	case OperationUnsetFallbackAttribute:
+		return clearProfileFallback(ctx, store, tenantID, eid)
 	default:
 		return nil
 	}
@@ -104,6 +114,92 @@ func setProfileEnabled(ctx context.Context, store storage.Store, tenantID storag
 	state.ICCID = iccid
 	state.IsEnabled = enabled
 	return store.SetProfileState(ctx, tenantID, state)
+}
+
+func syncProfileInventory(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, profiles []ProfileInfo) error {
+	existing, err := store.ListProfileStates(ctx, tenantID, eid)
+	if err != nil {
+		return err
+	}
+	existingByICCID := make(map[string]storage.ProfileState, len(existing))
+	for _, state := range existing {
+		existingByICCID[state.ICCID] = state
+	}
+
+	seen := make(map[string]bool, len(profiles))
+	for _, profile := range profiles {
+		if profile.ICCID == "" {
+			continue
+		}
+		seen[profile.ICCID] = true
+		state := existingByICCID[profile.ICCID]
+		state.EID = eid
+		state.ICCID = profile.ICCID
+		state.IsEnabled = profile.IsEnabled
+		state.IsFallback = profile.IsFallback
+		if err := store.SetProfileState(ctx, tenantID, storage.ProfileState{
+			EID:         state.EID,
+			ICCID:       state.ICCID,
+			IsEnabled:   state.IsEnabled,
+			IsFallback:  state.IsFallback,
+			SMDPAddress: state.SMDPAddress,
+		}); err != nil {
+			return err
+		}
+	}
+	for _, state := range existing {
+		if !seen[state.ICCID] {
+			if err := store.DeleteProfileState(ctx, tenantID, eid, state.ICCID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func setProfileFallback(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, iccid string) error {
+	states, err := store.ListProfileStates(ctx, tenantID, eid)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, state := range states {
+		wantFallback := state.ICCID == iccid
+		if state.IsFallback == wantFallback {
+			if wantFallback {
+				found = true
+			}
+			continue
+		}
+		state.IsFallback = wantFallback
+		if err := store.SetProfileState(ctx, tenantID, state); err != nil {
+			return err
+		}
+		if wantFallback {
+			found = true
+		}
+	}
+	if found {
+		return nil
+	}
+	return store.SetProfileState(ctx, tenantID, storage.ProfileState{EID: eid, ICCID: iccid, IsFallback: true})
+}
+
+func clearProfileFallback(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string) error {
+	states, err := store.ListProfileStates(ctx, tenantID, eid)
+	if err != nil {
+		return err
+	}
+	for _, state := range states {
+		if !state.IsFallback {
+			continue
+		}
+		state.IsFallback = false
+		if err := store.SetProfileState(ctx, tenantID, state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func applyECOState(

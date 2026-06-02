@@ -1,6 +1,7 @@
 package asn1
 
 import (
+	stdasn1 "encoding/asn1"
 	"errors"
 	"fmt"
 
@@ -329,7 +330,7 @@ const (
 // ConfigureImmediateEnable carries the configureImmediateEnable PSMO payload.
 type ConfigureImmediateEnable struct {
 	ImmediateEnableFlag bool
-	DefaultSMDPOID      []byte
+	DefaultSMDPOID      stdasn1.ObjectIdentifier
 	DefaultSMDPAddress  *string
 }
 
@@ -438,8 +439,12 @@ func marshalConfigureImmediateEnable(value *ConfigureImmediateEnable) (*bertlv.T
 	if value.ImmediateEnableFlag {
 		children = append(children, nullTLV(bertlv.ContextSpecific.Primitive(0)))
 	}
-	if value.DefaultSMDPOID != nil {
-		children = append(children, octetTLV(bertlv.ContextSpecific.Primitive(1), value.DefaultSMDPOID))
+	if len(value.DefaultSMDPOID) > 0 {
+		child, err := oidTLV(bertlv.ContextSpecific.Primitive(1), value.DefaultSMDPOID)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, child)
 	}
 	if value.DefaultSMDPAddress != nil {
 		children = append(children, utf8TLV(bertlv.ContextSpecific.Primitive(2), *value.DefaultSMDPAddress))
@@ -452,7 +457,11 @@ func unmarshalConfigureImmediateEnable(tlv *bertlv.TLV) (*ConfigureImmediateEnab
 		ImmediateEnableFlag: tlv.First(bertlv.ContextSpecific.Primitive(0)) != nil,
 	}
 	if child := tlv.First(bertlv.ContextSpecific.Primitive(1)); child != nil {
-		out.DefaultSMDPOID = copyBytes(child.Value)
+		oid, err := oidValue(child)
+		if err != nil {
+			return nil, err
+		}
+		out.DefaultSMDPOID = oid
 	}
 	if child := tlv.First(bertlv.ContextSpecific.Primitive(2)); child != nil {
 		value, err := utf8Value(child)
@@ -462,6 +471,48 @@ func unmarshalConfigureImmediateEnable(tlv *bertlv.TLV) (*ConfigureImmediateEnab
 		out.DefaultSMDPAddress = &value
 	}
 	return out, nil
+}
+
+func oidTLV(tag bertlv.Tag, oid stdasn1.ObjectIdentifier) (*bertlv.TLV, error) {
+	encoded, err := stdasn1.Marshal(oid)
+	if err != nil {
+		return nil, err
+	}
+	tlv, err := parseTLV(encoded)
+	if err != nil {
+		return nil, err
+	}
+	if err := expectTag(tlv, bertlv.Universal.Primitive(6)); err != nil {
+		return nil, err
+	}
+	return bertlv.NewValue(tag, copyBytes(tlv.Value)), nil
+}
+
+func oidValue(tlv *bertlv.TLV) (stdasn1.ObjectIdentifier, error) {
+	if tlv == nil {
+		return nil, errors.New("asn1: missing OBJECT IDENTIFIER")
+	}
+	encoded := make([]byte, 0, 2+len(tlv.Value))
+	encoded = append(encoded, 0x06)
+	encoded = append(encoded, lengthBytes(len(tlv.Value))...)
+	encoded = append(encoded, tlv.Value...)
+	var oid stdasn1.ObjectIdentifier
+	if rest, err := stdasn1.Unmarshal(encoded, &oid); err != nil {
+		return nil, err
+	} else if len(rest) != 0 {
+		return nil, errors.New("asn1: trailing OBJECT IDENTIFIER data")
+	}
+	return oid, nil
+}
+
+func lengthBytes(length int) []byte {
+	if length < 0x80 {
+		return []byte{byte(length)}
+	}
+	if length <= 0xff {
+		return []byte{0x81, byte(length)}
+	}
+	return []byte{0x82, byte(length >> 8), byte(length)}
 }
 
 // EuiccPackageKind identifies the selected EuiccPackage list.

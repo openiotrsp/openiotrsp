@@ -57,6 +57,7 @@ func testRecords(t *testing.T, store storage.Store) {
 		EID:         eid,
 		ICCID:       "891",
 		IsEnabled:   true,
+		IsFallback:  true,
 		SMDPAddress: "smdp.example",
 	}); err != nil {
 		t.Fatalf("SetProfileState() error = %v", err)
@@ -65,8 +66,8 @@ func testRecords(t *testing.T, store storage.Store) {
 	if err != nil {
 		t.Fatalf("GetProfileState() error = %v", err)
 	}
-	if gotState.ICCID != "891" || !gotState.IsEnabled || gotState.SMDPAddress != "smdp.example" {
-		t.Fatalf("profile state = %#v, want enabled 891 with smdp.example", gotState)
+	if gotState.ICCID != "891" || !gotState.IsEnabled || !gotState.IsFallback || gotState.SMDPAddress != "smdp.example" {
+		t.Fatalf("profile state = %#v, want enabled fallback 891 with smdp.example", gotState)
 	}
 	gotStates, err := store.ListProfileStates(ctx, tenantID, eid)
 	if err != nil {
