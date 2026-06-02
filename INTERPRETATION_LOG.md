@@ -81,3 +81,22 @@ Each entry must include:
   prove that the asserted tree is the correct SGP.32 semantic structure.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It settles the
   ASN.1 structure and result behavior, not complete byte vectors.
+
+## SGP.32 Initial eIM Association Bootstrap
+
+- Spec section: SGP.32 `AddInitialEimRequest` and `AddInitialEimResponse`.
+- Ambiguity: The eIM must participate in initial trust establishment, but
+  `AddInitialEim` is an ES10b IPA-to-eUICC function and is unsigned because it
+  is only valid when the eUICC has no Associated eIM.
+- Chosen reading: OpenIoTRSP emits provisioning-ready `EimConfigurationData`
+  and records the association token/state returned by vendor or IPA
+  provisioning. It does not orchestrate ES10b `AddInitialEim` over the eIM
+  ESipa surface.
+- Rationale: Once any eIM is associated, SGP.32 ECOs are signed eUICC Packages
+  and the signature input includes the association token. Keeping bootstrap as a
+  recorded vendor/IPA result avoids creating an unsigned eIM command path that
+  the eIM interface does not own. When the last Associated eIM is deleted, the
+  local eIM state reports the eUICC as bootstrappable again.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms
+  interoperability behavior around eIM configuration operations, but the ES10b
+  bootstrap orchestration remains outside the eIM's ESipa surface.

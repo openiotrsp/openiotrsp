@@ -133,6 +133,32 @@ func TestEIMConfigurationEndpointsCompleteThroughMockIPA(t *testing.T) {
 	if len(status.EIMs) != 0 {
 		t.Fatalf("associated eIMs after delete = %#v, want none", status.EIMs)
 	}
+	if !status.BootstrapAllowed {
+		t.Fatalf("bootstrapAllowed = false after last eIM delete, want true")
+	}
+}
+
+func TestInitialEIMBootstrapEndpoints(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+
+	config := postJSON[eimConfigurationResponse](t, server, "/v1/eims/initial-configuration", map[string]any{
+		"eimFqdn":      "test.eim",
+		"counterValue": 1,
+	}, http.StatusOK)
+	if config.EIMID != "test.eim" || config.Config.EIMFQDN != "test.eim" || config.Config.CounterValue == nil || *config.Config.CounterValue != 1 || config.PayloadBase64 == "" {
+		t.Fatalf("initial config response = %#v, want provisioning-ready test.eim config", config)
+	}
+
+	association := postJSON[initialEIMAssociationResponse](t, server, "/v1/devices/"+testEID+"/eims/initial-association", map[string]any{
+		"associationToken": 42,
+	}, http.StatusOK)
+	if association.BootstrapAllowed || association.EIM.AssociationToken == nil || *association.EIM.AssociationToken != 42 {
+		t.Fatalf("initial association response = %#v, want token 42 and bootstrap disabled", association)
+	}
+	assertAssociatedEIMState(t, server, "test.eim", 1, 42)
 }
 
 func TestDefaultTenantResolverQueuesUnderDefaultTenant(t *testing.T) {

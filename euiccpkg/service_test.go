@@ -474,6 +474,31 @@ func TestSignatureInputIncludesAssociationToken(t *testing.T) {
 	verifyEIMSignature(t, service.Signer.PublicKey(), nonZeroToken)
 }
 
+func TestInitialEIMAssociationConsumesTokenForSigning(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := "eid-initial-association"
+	registerWithState(t, store, eid)
+	eimSigner := newTestSigner(t)
+	service := &Service{Store: store, Signer: eimSigner, EimID: "eim.example"}
+
+	associationToken := int64(44)
+	config, err := NewInitialEIMConfigurationDataFromPublicKey(service.EimID, "eim.example", 1, eimSigner.PublicKey(), &associationToken)
+	if err != nil {
+		t.Fatalf("NewInitialEIMConfigurationDataFromPublicKey() error = %v", err)
+	}
+	if err := RecordInitialEIMAssociation(ctx, store, storage.DefaultTenantID, eid, config); err != nil {
+		t.Fatalf("RecordInitialEIMAssociation() error = %v", err)
+	}
+	assertAssociatedEIMToken(t, store, eid, service.EimID, associationToken)
+
+	request := signPackage(t, ctx, service, eid, testEID(1), nil, Enable([]byte{0x89, 0x10}, false))
+	assertSignatureInputSuffix(t, request, []byte{0x84, 0x01, 0x2c})
+	verifyEIMSignature(t, eimSigner.PublicKey(), request)
+}
+
 func TestECOResultsMapAndApplyState(t *testing.T) {
 	t.Parallel()
 

@@ -43,6 +43,26 @@ func ApplyPackageResultState(
 	return applyECOState(ctx, store, tenantID, eid, pkg, result)
 }
 
+// RecordInitialEIMAssociation records the result of an ES10b AddInitialEim flow
+// completed by the IPA/vendor side. It intentionally does not construct or send
+// AddInitialEim, which is outside the eIM ESipa surface.
+func RecordInitialEIMAssociation(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	config *protocolasn1.EimConfigurationData,
+) error {
+	if err := ValidateInitialEIMConfigurationData(config); err != nil {
+		return err
+	}
+	associated, err := associatedEIMFromConfig(eid, config)
+	if err != nil {
+		return err
+	}
+	return store.SetAssociatedEIM(ctx, tenantID, associated)
+}
+
 func applyPSMOState(
 	ctx context.Context,
 	store storage.Store,

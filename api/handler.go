@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -49,8 +50,10 @@ func (h *Handler) HTTPHandler() http.Handler {
 	mux.HandleFunc("POST /v1/devices/{eid}/profiles/{iccid}/enable", h.enableProfile)
 	mux.HandleFunc("POST /v1/devices/{eid}/profiles/{iccid}/disable", h.disableProfile)
 	mux.HandleFunc("DELETE /v1/devices/{eid}/profiles/{iccid}", h.deleteProfile)
+	mux.HandleFunc("POST /v1/eims/initial-configuration", h.initialEIMConfiguration)
 	mux.HandleFunc("POST /v1/devices/{eid}/eims", h.addEIM)
 	mux.HandleFunc("GET /v1/devices/{eid}/eims", h.eimStatus)
+	mux.HandleFunc("POST /v1/devices/{eid}/eims/initial-association", h.recordInitialEIMAssociation)
 	mux.HandleFunc("PUT /v1/devices/{eid}/eims/{eimId}", h.updateEIM)
 	mux.HandleFunc("DELETE /v1/devices/{eid}/eims/{eimId}", h.deleteEIM)
 	mux.HandleFunc("POST /v1/devices/{eid}/eims/list", h.listEIM)
@@ -118,9 +121,22 @@ type associatedEIMResponse struct {
 	AssociationToken *int64 `json:"associationToken,omitempty"`
 }
 
+type eimConfigurationResponse struct {
+	EIMID         string                `json:"eimId"`
+	PayloadBase64 string                `json:"payloadBase64"`
+	Config        associatedEIMResponse `json:"config"`
+}
+
+type initialEIMAssociationResponse struct {
+	EID              string                `json:"eid"`
+	BootstrapAllowed bool                  `json:"bootstrapAllowed"`
+	EIM              associatedEIMResponse `json:"eim"`
+}
+
 type eimStatusResponse struct {
-	EID  string                  `json:"eid"`
-	EIMs []associatedEIMResponse `json:"eims"`
+	EID              string                  `json:"eid"`
+	BootstrapAllowed bool                    `json:"bootstrapAllowed"`
+	EIMs             []associatedEIMResponse `json:"eims"`
 }
 
 type resultResponse struct {
@@ -197,6 +213,48 @@ func (h *Handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) initialEIMConfiguration(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.resolveTenant(w, r)
+	if !ok {
+		return
+	}
+	service, err := h.packageService()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	var request eimConfigRequest
+	if !decodeJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
+	config, err := request.config(service, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := euiccpkg.ValidateInitialEIMConfigurationData(config); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	payload, err := protocolasn1.Encode(config)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := h.Store.StoreEIMConfig(r.Context(), tenantID, storage.EIMConfig{
+		EIMID: config.EimID,
+		Data:  payload,
+	}); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, eimConfigurationResponse{
+		EIMID:         config.EimID,
+		PayloadBase64: base64.StdEncoding.EncodeToString(payload),
+		Config:        associatedResponseFromConfig(config),
+	})
+}
+
 func (h *Handler) addEIM(w http.ResponseWriter, r *http.Request) {
 	var request eimConfigRequest
 	if !decodeJSON(w, r, h.maxBodyBytes(), &request) {
@@ -244,6 +302,53 @@ func (h *Handler) deleteEIM(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) listEIM(w http.ResponseWriter, r *http.Request) {
 	h.enqueueEIMOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
 		return euiccpkg.ListEim(), nil
+	})
+}
+
+func (h *Handler) recordInitialEIMAssociation(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.resolveTenant(w, r)
+	if !ok {
+		return
+	}
+	service, err := h.packageService()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	eid, _, err := parseEID(r.PathValue("eid"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var request eimConfigRequest
+	if !decodeJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
+	config, err := h.initialAssociationConfig(r.Context(), tenantID, service, request)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if config.AssociationToken == nil {
+		writeError(w, http.StatusBadRequest, errors.New("api: associationToken is required"))
+		return
+	}
+	if err := euiccpkg.ValidateInitialEIMConfigurationData(config); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.Store.RegisterDevice(r.Context(), tenantID, storage.Device{EID: eid}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := euiccpkg.RecordInitialEIMAssociation(r.Context(), h.Store, tenantID, eid, config); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, initialEIMAssociationResponse{
+		EID:              eid,
+		BootstrapAllowed: false,
+		EIM:              associatedResponseFromConfig(config),
 	})
 }
 
@@ -400,21 +505,9 @@ func (h *Handler) eimStatus(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		response := associatedEIMResponse{
-			EIMID:            config.EimID,
-			CounterValue:     cloneInt64(config.CounterValue),
-			AssociationToken: cloneInt64(config.AssociationToken),
-		}
-		if config.EimFQDN != nil {
-			response.EIMFQDN = *config.EimFQDN
-		}
-		if config.EimIDType != nil {
-			value := int64(*config.EimIDType)
-			response.EIMIDType = &value
-		}
-		eims = append(eims, response)
+		eims = append(eims, associatedResponseFromConfig(&config))
 	}
-	writeJSON(w, http.StatusOK, eimStatusResponse{EID: eid, EIMs: eims})
+	writeJSON(w, http.StatusOK, eimStatusResponse{EID: eid, BootstrapAllowed: len(eims) == 0, EIMs: eims})
 }
 
 func (h *Handler) operationResult(w http.ResponseWriter, r *http.Request) {
@@ -565,7 +658,6 @@ func (r eimConfigRequest) config(service *euiccpkg.Service, pathEIMID string) (*
 	}
 
 	var config *protocolasn1.EimConfigurationData
-	var err error
 	switch {
 	case strings.TrimSpace(r.EIMPublicKeyDataBase64) != "":
 		publicKeyDER, err := decodeBase64Field("eimPublicKeyDataBase64", r.EIMPublicKeyDataBase64)
@@ -573,21 +665,32 @@ func (r eimConfigRequest) config(service *euiccpkg.Service, pathEIMID string) (*
 			return nil, err
 		}
 		config, err = euiccpkg.NewEIMConfigurationData(eimID, strings.TrimSpace(r.EIMFQDN), counter, publicKeyDER)
+		if err != nil {
+			return nil, err
+		}
 	case strings.TrimSpace(r.EIMCertificateBase64) != "":
 		certificateDER, err := decodeBase64Field("eimCertificateBase64", r.EIMCertificateBase64)
 		if err != nil {
 			return nil, err
 		}
 		config, err = euiccpkg.NewEIMConfigurationDataFromCertificate(eimID, strings.TrimSpace(r.EIMFQDN), counter, certificateDER)
+		if err != nil {
+			return nil, err
+		}
 	case service != nil && service.Signer != nil && eimID == service.EimID && len(service.Signer.CertificateDER()) > 0:
+		var err error
 		config, err = euiccpkg.NewEIMConfigurationDataFromCertificate(eimID, strings.TrimSpace(r.EIMFQDN), counter, service.Signer.CertificateDER())
+		if err != nil {
+			return nil, err
+		}
 	case service != nil && service.Signer != nil && eimID == service.EimID:
+		var err error
 		config, err = euiccpkg.NewEIMConfigurationDataFromPublicKey(eimID, strings.TrimSpace(r.EIMFQDN), counter, service.Signer.PublicKey())
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, errors.New("api: missing eIM public key data")
-	}
-	if err != nil {
-		return nil, err
 	}
 	if r.EIMIDType != nil {
 		if *r.EIMIDType < int64(protocolasn1.EimIDTypeOID) || *r.EIMIDType > int64(protocolasn1.EimIDTypeProprietary) {
@@ -601,12 +704,65 @@ func (r eimConfigRequest) config(service *euiccpkg.Service, pathEIMID string) (*
 		config.AssociationToken = &value
 	}
 	if strings.TrimSpace(r.EUICCCIPKIDBase64) != "" {
+		var err error
 		config.EUICCCIPKID, err = decodeBase64Field("euiccCiPKIdBase64", r.EUICCCIPKIDBase64)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return config, nil
+}
+
+func (h *Handler) initialAssociationConfig(ctx context.Context, tenantID storage.TenantID, service *euiccpkg.Service, request eimConfigRequest) (*protocolasn1.EimConfigurationData, error) {
+	eimID := strings.TrimSpace(request.EIMID)
+	if eimID == "" && service != nil {
+		eimID = service.EimID
+	}
+	if _, err := parseEIMID(eimID); err != nil {
+		return nil, err
+	}
+	stored, err := h.Store.ReadEIMConfig(ctx, tenantID, eimID)
+	if err == nil {
+		var config protocolasn1.EimConfigurationData
+		if err := protocolasn1.Decode(stored.Data, &config); err != nil {
+			return nil, err
+		}
+		overlayInitialAssociationToken(&config, request.AssociationToken)
+		return &config, nil
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	config, err := request.config(service, eimID)
+	if err != nil {
+		return nil, err
+	}
+	overlayInitialAssociationToken(config, request.AssociationToken)
+	return config, nil
+}
+
+func overlayInitialAssociationToken(config *protocolasn1.EimConfigurationData, token *int64) {
+	if config == nil || token == nil {
+		return
+	}
+	value := *token
+	config.AssociationToken = &value
+}
+
+func associatedResponseFromConfig(config *protocolasn1.EimConfigurationData) associatedEIMResponse {
+	response := associatedEIMResponse{
+		EIMID:            config.EimID,
+		CounterValue:     cloneInt64(config.CounterValue),
+		AssociationToken: cloneInt64(config.AssociationToken),
+	}
+	if config.EimFQDN != nil {
+		response.EIMFQDN = *config.EimFQDN
+	}
+	if config.EimIDType != nil {
+		value := int64(*config.EimIDType)
+		response.EIMIDType = &value
+	}
+	return response
 }
 
 func parseEID(value string) (string, []byte, error) {

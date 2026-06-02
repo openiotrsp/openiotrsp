@@ -100,6 +100,30 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /eims/initial-configuration:
+    post:
+      tags:
+        - Operations
+      operationId: createInitialEimConfiguration
+      summary: Emit initial eIM configuration data for vendor provisioning.
+      description: Builds and stores provisioning-ready EimConfigurationData for ES10b AddInitialEim. The eIM does not orchestrate AddInitialEim itself.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EimConfigurationRequest"
+      responses:
+        "200":
+          description: Initial eIM configuration data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EimConfiguration"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /devices/{eid}/eims:
     post:
       tags:
@@ -143,6 +167,32 @@ paths:
         "400":
           $ref: "#/components/responses/Error"
         "404":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/eims/initial-association:
+    post:
+      tags:
+        - Operations
+      operationId: recordInitialEimAssociation
+      summary: Record a vendor-provisioned initial eIM association.
+      description: Stores the Associated eIM state and association token returned by the IPA/eUICC AddInitialEim flow. This endpoint records the result; it does not send ES10b AddInitialEim.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EimConfigurationRequest"
+      responses:
+        "200":
+          description: Initial association recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InitialEimAssociation"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
           $ref: "#/components/responses/Error"
   /devices/{eid}/eims/{eimId}:
     put:
@@ -442,14 +492,47 @@ components:
           type: string
           format: byte
       additionalProperties: false
+    EimConfiguration:
+      type: object
+      required:
+        - eimId
+        - payloadBase64
+        - config
+      properties:
+        eimId:
+          type: string
+        payloadBase64:
+          type: string
+          format: byte
+          description: BER-TLV encoded EimConfigurationData.
+        config:
+          $ref: "#/components/schemas/AssociatedEim"
+    InitialEimAssociation:
+      type: object
+      required:
+        - eid
+        - bootstrapAllowed
+        - eim
+      properties:
+        eid:
+          type: string
+        bootstrapAllowed:
+          type: boolean
+          description: False after an Associated eIM has been recorded.
+        eim:
+          $ref: "#/components/schemas/AssociatedEim"
     EimStatus:
       type: object
       required:
         - eid
+        - bootstrapAllowed
         - eims
       properties:
         eid:
           type: string
+        bootstrapAllowed:
+          type: boolean
+          description: True when no Associated eIM is currently known for the eUICC, so AddInitialEim is coherent again.
         eims:
           type: array
           items:
