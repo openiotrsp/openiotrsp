@@ -91,7 +91,9 @@ Each entry must include:
 - Chosen reading: OpenIoTRSP emits provisioning-ready `EimConfigurationData`
   and records the association token/state returned by vendor or IPA
   provisioning. It does not orchestrate ES10b `AddInitialEim` over the eIM
-  ESipa surface.
+  ESipa surface. Although SGP.32 marks `eimFqdn` optional, OpenIoTRSP requires
+  it for initial provisioning so a provisioned eUICC has a reachable eIM or
+  intermediate-server address.
 - Rationale: Once any eIM is associated, SGP.32 ECOs are signed eUICC Packages
   and the signature input includes the association token. Keeping bootstrap as a
   recorded vendor/IPA result avoids creating an unsigned eIM command path that

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strings"
 
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 )
@@ -70,6 +71,9 @@ func ValidateInitialEIMConfigurationData(config *protocolasn1.EimConfigurationDa
 	}
 	if len(config.EimID) == 0 || len(config.EimID) > 128 {
 		return errors.New("euiccpkg: eimId must be 1..128 characters")
+	}
+	if config.EimFQDN == nil || strings.TrimSpace(*config.EimFQDN) == "" {
+		return errors.New("euiccpkg: eimFQDN is required for initial provisioning")
 	}
 	if config.CounterValue == nil {
 		return errors.New("euiccpkg: counterValue is required")

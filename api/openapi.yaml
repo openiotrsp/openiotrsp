@@ -106,7 +106,7 @@ paths:
         - Operations
       operationId: createInitialEimConfiguration
       summary: Emit initial eIM configuration data for vendor provisioning.
-      description: Builds and stores provisioning-ready EimConfigurationData for ES10b AddInitialEim. The eIM does not orchestrate AddInitialEim itself.
+      description: Builds and stores provisioning-ready EimConfigurationData for ES10b AddInitialEim. The eIM does not orchestrate AddInitialEim itself. OpenIoTRSP requires eimFqdn on this path so the provisioned eUICC has a reachable eIM address.
       requestBody:
         required: true
         content:
@@ -465,6 +465,7 @@ components:
           description: Defaults to the configured server eIM ID for addEim when omitted.
         eimFqdn:
           type: string
+          description: FQDN of the eIM or intermediate server. Required for initial provisioning.
         eimIdType:
           type: integer
           format: int64

@@ -474,6 +474,87 @@ func TestSignatureInputIncludesAssociationToken(t *testing.T) {
 	verifyEIMSignature(t, service.Signer.PublicKey(), nonZeroToken)
 }
 
+func TestSignatureInputAssociationTokenKnownAnswer(t *testing.T) {
+	t.Parallel()
+
+	// EuiccPackageSigned from the independent EuiccPackageRequest known-answer
+	// fixture in asn1/sgp32_test.go, whose full request DER was generated outside
+	// this encoder and validated with `openssl asn1parse -inform DER`.
+	signedDER := mustDecodeHex(t, "3014800365696d5a020102810101a006a3045a029810")
+	zero := int64(0)
+	seven := int64(7)
+	cases := []struct {
+		name  string
+		token *int64
+		want  []byte
+	}{
+		{name: "no token", token: nil, want: mustDecodeHex(t, "3014800365696d5a020102810101a006a3045a029810840100")},
+		{name: "explicit zero token", token: &zero, want: mustDecodeHex(t, "3014800365696d5a020102810101a006a3045a029810840100")},
+		{name: "non-zero token", token: &seven, want: mustDecodeHex(t, "3014800365696d5a020102810101a006a3045a029810840107")},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := signatureInput(signedDER, tc.token)
+			if err != nil {
+				t.Fatalf("signatureInput() error = %v", err)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("signature input = %x, want %x", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSignAppendsAssociationTokenForAllPackageOperations(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := "eid-all-association-token"
+	registerWithState(t, store, eid)
+	signer := newTestSigner(t)
+	service := &Service{Store: store, Signer: signer, EimID: "eim.example"}
+	config := testEIMConfiguration(t, "other.eim", 1, signer.PublicKey())
+	packages := []struct {
+		name string
+		pkg  protocolasn1.EuiccPackage
+	}{
+		{name: "enable", pkg: Enable([]byte{0x89, 0x10}, false)},
+		{name: "disable", pkg: Disable([]byte{0x89, 0x10})},
+		{name: "delete profile", pkg: Delete([]byte{0x89, 0x10})},
+		{name: "add eim", pkg: AddEim(config)},
+		{name: "update eim", pkg: UpdateEim(config)},
+		{name: "delete eim", pkg: DeleteEim("other.eim")},
+		{name: "list eim", pkg: ListEim()},
+	}
+
+	for index, tc := range packages {
+		request := signPackage(t, ctx, service, eid, testEID(1), []byte{0x00, byte(index)}, tc.pkg)
+		assertSignatureInputSuffix(t, request, []byte{0x84, 0x01, 0x00})
+	}
+
+	associationToken := int64(7)
+	payload := encode(t, &protocolasn1.EimConfigurationData{
+		EimID:            service.EimID,
+		AssociationToken: &associationToken,
+	})
+	if err := store.SetAssociatedEIM(ctx, storage.DefaultTenantID, storage.AssociatedEIM{
+		EID:           eid,
+		EIMID:         service.EimID,
+		ConfigPayload: payload,
+	}); err != nil {
+		t.Fatalf("SetAssociatedEIM() error = %v", err)
+	}
+	for index, tc := range packages {
+		request := signPackage(t, ctx, service, eid, testEID(1), []byte{0x07, byte(index)}, tc.pkg)
+		assertSignatureInputSuffix(t, request, []byte{0x84, 0x01, 0x07})
+	}
+}
+
 func TestInitialEIMAssociationConsumesTokenForSigning(t *testing.T) {
 	t.Parallel()
 
@@ -786,6 +867,15 @@ func assertSignatureInputSuffix(t *testing.T, request *SignedRequest, suffix []b
 	if !bytes.Equal(request.SignatureInput, append(cloneBytes(request.SignedDER), suffix...)) {
 		t.Fatalf("signature input = %x, want signed DER plus %x", request.SignatureInput, suffix)
 	}
+}
+
+func mustDecodeHex(t *testing.T, value string) []byte {
+	t.Helper()
+	out, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("DecodeString(%q) error = %v", value, err)
+	}
+	return out
 }
 
 func registerWithState(t *testing.T, store storage.Store, eid string, states ...storage.ProfileState) {

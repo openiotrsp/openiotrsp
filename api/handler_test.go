@@ -144,6 +144,15 @@ func TestInitialEIMBootstrapEndpoints(t *testing.T) {
 	store := memory.New()
 	server := newTestServer(t, store, DefaultTenantResolver{})
 
+	missingFQDN, err := json.Marshal(map[string]any{"counterValue": 1})
+	if err != nil {
+		t.Fatalf("Marshal(missing FQDN) error = %v", err)
+	}
+	response := doRequest(t, server, http.MethodPost, "/v1/eims/initial-configuration", bytes.NewReader(missingFQDN))
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("initial config without eimFqdn status = %d body = %s, want %d", response.Code, response.Body.String(), http.StatusBadRequest)
+	}
+
 	config := postJSON[eimConfigurationResponse](t, server, "/v1/eims/initial-configuration", map[string]any{
 		"eimFqdn":      "test.eim",
 		"counterValue": 1,
