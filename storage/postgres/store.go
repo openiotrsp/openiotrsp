@@ -405,6 +405,97 @@ func (s *Store) ReadEIMConfig(ctx context.Context, tenantID storage.TenantID, ei
 	return cloneEIMConfig(config), err
 }
 
+// SetAssociatedEIM stores one Associated eIM state for one eUICC.
+func (s *Store) SetAssociatedEIM(ctx context.Context, tenantID storage.TenantID, associated storage.AssociatedEIM) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO associated_eim (tenant_id, eid, eim_id, eim_id_type, config_payload)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (tenant_id, eid, eim_id)
+		DO UPDATE SET eim_id_type = EXCLUDED.eim_id_type,
+			config_payload = EXCLUDED.config_payload,
+			updated_at = now()
+	`, tenantString(tenantID), associated.EID, associated.EIMID, associated.EIMIDType, associated.ConfigPayload)
+	if isForeignKeyViolation(err) {
+		return storage.ErrNotFound
+	}
+	return err
+}
+
+// DeleteAssociatedEIM removes one Associated eIM state for one eUICC.
+func (s *Store) DeleteAssociatedEIM(ctx context.Context, tenantID storage.TenantID, eid string, eimID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM associated_eim
+		WHERE tenant_id = $1 AND eid = $2 AND eim_id = $3
+	`, tenantString(tenantID), eid, eimID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return storage.ErrNotFound
+	}
+	return nil
+}
+
+// GetAssociatedEIM reads one Associated eIM state for one eUICC.
+func (s *Store) GetAssociatedEIM(ctx context.Context, tenantID storage.TenantID, eid string, eimID string) (storage.AssociatedEIM, error) {
+	var associated storage.AssociatedEIM
+	err := s.pool.QueryRow(ctx, `
+		SELECT eid, eim_id, eim_id_type, config_payload
+		FROM associated_eim
+		WHERE tenant_id = $1 AND eid = $2 AND eim_id = $3
+	`, tenantString(tenantID), eid, eimID).Scan(
+		&associated.EID,
+		&associated.EIMID,
+		&associated.EIMIDType,
+		&associated.ConfigPayload,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.AssociatedEIM{}, storage.ErrNotFound
+	}
+	return cloneAssociatedEIM(associated), err
+}
+
+// ListAssociatedEIMs reads all Associated eIM states for one eUICC.
+func (s *Store) ListAssociatedEIMs(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.AssociatedEIM, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT eid, eim_id, eim_id_type, config_payload
+		FROM associated_eim
+		WHERE tenant_id = $1 AND eid = $2
+		ORDER BY eim_id
+	`, tenantString(tenantID), eid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]storage.AssociatedEIM, 0)
+	for rows.Next() {
+		var associated storage.AssociatedEIM
+		if err := rows.Scan(&associated.EID, &associated.EIMID, &associated.EIMIDType, &associated.ConfigPayload); err != nil {
+			return nil, err
+		}
+		items = append(items, cloneAssociatedEIM(associated))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		var exists bool
+		err = s.pool.QueryRow(ctx, `
+			SELECT true
+			FROM devices
+			WHERE tenant_id = $1 AND eid = $2
+		`, tenantString(tenantID), eid).Scan(&exists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, storage.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
 // StoreNotification stores an encoded device notification.
 func (s *Store) StoreNotification(ctx context.Context, tenantID storage.TenantID, notification storage.Notification) error {
 	_, err := s.pool.Exec(ctx, `
@@ -448,6 +539,15 @@ func cloneOperation(operation storage.Operation) storage.Operation {
 
 func cloneEIMConfig(config storage.EIMConfig) storage.EIMConfig {
 	return storage.EIMConfig{EIMID: config.EIMID, Data: cloneBytes(config.Data)}
+}
+
+func cloneAssociatedEIM(associated storage.AssociatedEIM) storage.AssociatedEIM {
+	associated.ConfigPayload = cloneBytes(associated.ConfigPayload)
+	if associated.EIMIDType != nil {
+		value := *associated.EIMIDType
+		associated.EIMIDType = &value
+	}
+	return associated
 }
 
 func cloneBytes(value []byte) []byte {

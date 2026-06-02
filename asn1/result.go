@@ -581,6 +581,24 @@ func IntegerEuiccResult(tagNumber uint64, value int64) (EuiccResultData, error) 
 	return EuiccResultData{Raw: tlv}, nil
 }
 
+// AddEimEuiccResult builds the explicit addEimResult EuiccResultData wrapper.
+func AddEimEuiccResult(result *AddEimResult) (EuiccResultData, error) {
+	return explicitEuiccResult(bertlv.ContextSpecific.Constructed(8), result)
+}
+
+// ListEimEuiccResult builds the explicit listEimResult EuiccResultData wrapper.
+func ListEimEuiccResult(result *ListEimResult) (EuiccResultData, error) {
+	return explicitEuiccResult(bertlv.ContextSpecific.Constructed(11), result)
+}
+
+func explicitEuiccResult(tag bertlv.Tag, value Marshaler) (EuiccResultData, error) {
+	child, err := value.MarshalBERTLV()
+	if err != nil {
+		return EuiccResultData{}, err
+	}
+	return EuiccResultData{Raw: constructed(tag, child)}, nil
+}
+
 func isEuiccResultDataTLV(tlv *bertlv.TLV) bool {
 	if tlv == nil {
 		return false

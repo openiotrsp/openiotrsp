@@ -124,22 +124,15 @@ func (r Runner) handleProfileDownloadTrigger(
 	return nil
 }
 
-// SuccessfulEUICCPackageResult builds the successful PSMO result emitted by the
-// mock IPA. SeqNumber is left at zero; ESipa matches it to pending work by
+// SuccessfulEUICCPackageResult builds the successful PSMO/ECO result emitted by
+// the mock IPA. SeqNumber is left at zero; ESipa matches it to pending work by
 // eIM ID, counter, and transaction ID.
 func SuccessfulEUICCPackageResult(request *protocolasn1.EuiccPackageRequest) (*protocolasn1.EuiccPackageResult, string, error) {
 	if request == nil {
 		return nil, "", errors.New("mockipa: missing eUICC package request")
 	}
 	pkg := request.EuiccPackageSigned.EuiccPackage
-	if pkg.Kind != protocolasn1.EuiccPackagePSMO || len(pkg.PSMOs) != 1 {
-		return nil, "", errors.New("mockipa: only single PSMO eUICC packages are supported")
-	}
-	resultTag, operation, err := psmoResultTag(pkg.PSMOs[0].Operation)
-	if err != nil {
-		return nil, "", err
-	}
-	resultData, err := protocolasn1.IntegerEuiccResult(resultTag, 0)
+	resultData, operation, err := successfulResultData(pkg, request.EuiccPackageSigned.EimID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -157,6 +150,28 @@ func SuccessfulEUICCPackageResult(request *protocolasn1.EuiccPackageRequest) (*p
 	}, operation, nil
 }
 
+func successfulResultData(pkg protocolasn1.EuiccPackage, eimID string) (protocolasn1.EuiccResultData, string, error) {
+	switch pkg.Kind {
+	case protocolasn1.EuiccPackagePSMO:
+		if len(pkg.PSMOs) != 1 {
+			return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: only single PSMO eUICC packages are supported")
+		}
+		resultTag, operation, err := psmoResultTag(pkg.PSMOs[0].Operation)
+		if err != nil {
+			return protocolasn1.EuiccResultData{}, "", err
+		}
+		resultData, err := protocolasn1.IntegerEuiccResult(resultTag, 0)
+		return resultData, operation, err
+	case protocolasn1.EuiccPackageECO:
+		if len(pkg.ECOs) != 1 {
+			return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: only single ECO eUICC packages are supported")
+		}
+		return ecoResultData(pkg.ECOs[0], eimID)
+	default:
+		return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: unsupported eUICC package kind")
+	}
+}
+
 func psmoResultTag(operation protocolasn1.PsmoOperation) (uint64, string, error) {
 	switch operation {
 	case protocolasn1.PsmoEnable:
@@ -167,5 +182,30 @@ func psmoResultTag(operation protocolasn1.PsmoOperation) (uint64, string, error)
 		return 5, "delete", nil
 	default:
 		return 0, "", errors.New("mockipa: unsupported PSMO operation")
+	}
+}
+
+func ecoResultData(eco protocolasn1.Eco, eimID string) (protocolasn1.EuiccResultData, string, error) {
+	switch eco.Operation {
+	case protocolasn1.EcoAddEIM:
+		token := int64(1)
+		if eco.Config != nil && eco.Config.AssociationToken != nil {
+			token = *eco.Config.AssociationToken
+		}
+		resultData, err := protocolasn1.AddEimEuiccResult(&protocolasn1.AddEimResult{AssociationToken: &token})
+		return resultData, "add-eim", err
+	case protocolasn1.EcoDeleteEIM:
+		resultData, err := protocolasn1.IntegerEuiccResult(9, 2)
+		return resultData, "delete-eim", err
+	case protocolasn1.EcoUpdateEIM:
+		resultData, err := protocolasn1.IntegerEuiccResult(10, 0)
+		return resultData, "update-eim", err
+	case protocolasn1.EcoListEIM:
+		resultData, err := protocolasn1.ListEimEuiccResult(&protocolasn1.ListEimResult{
+			EimIDList: []protocolasn1.EimIDInfo{{EimID: eimID}},
+		})
+		return resultData, "list-eim", err
+	default:
+		return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: unsupported ECO operation")
 	}
 }

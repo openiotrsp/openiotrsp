@@ -413,6 +413,7 @@ func cleanDatabase(t testing.TB, dsn string) {
 
 	_, err = pool.Exec(ctx, `
 		DROP TABLE IF EXISTS notifications;
+		DROP TABLE IF EXISTS associated_eim;
 		DROP TABLE IF EXISTS eim_config;
 		DROP TABLE IF EXISTS operation_results;
 		DROP TABLE IF EXISTS operations;

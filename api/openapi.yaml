@@ -100,6 +100,114 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /devices/{eid}/eims:
+    post:
+      tags:
+        - Operations
+      operationId: addEim
+      summary: Queue an addEim ECO operation for an EID.
+      description: Builds a signed ECO addEim package and queues it for the target device IPA.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EimConfigurationRequest"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+    get:
+      tags:
+        - Devices
+      operationId: getAssociatedEims
+      summary: Read locally observed Associated eIM state for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "200":
+          description: Associated eIM state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EimStatus"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/eims/{eimId}:
+    put:
+      tags:
+        - Operations
+      operationId: updateEim
+      summary: Queue an updateEim ECO operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+        - $ref: "#/components/parameters/EIMID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EimConfigurationRequest"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags:
+        - Operations
+      operationId: deleteEim
+      summary: Queue a deleteEim ECO operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+        - $ref: "#/components/parameters/EIMID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /devices/{eid}/eims/list:
+    post:
+      tags:
+        - Operations
+      operationId: listEim
+      summary: Queue a listEim ECO operation for an EID.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "202":
+          description: Operation queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /devices/{eid}/status:
     get:
       tags:
@@ -162,6 +270,14 @@ components:
       schema:
         type: string
         pattern: "^[0-9A-Fa-f]+$"
+    EIMID:
+      name: eimId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
   responses:
     Error:
       description: Error response.
@@ -289,6 +405,73 @@ components:
           type: boolean
         smdpAddress:
           type: string
+    EimConfigurationRequest:
+      type: object
+      properties:
+        eimId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Defaults to the configured server eIM ID for addEim when omitted.
+        eimFqdn:
+          type: string
+        eimIdType:
+          type: integer
+          format: int64
+          enum:
+            - 1
+            - 2
+            - 3
+        counterValue:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 1
+        associationToken:
+          type: integer
+          format: int64
+        eimPublicKeyDataBase64:
+          type: string
+          format: byte
+          description: X.509 SubjectPublicKeyInfo DER. If omitted for this eIM, the configured signer public key is used.
+        eimCertificateBase64:
+          type: string
+          format: byte
+          description: X.509 certificate DER. Mutually exclusive with eimPublicKeyDataBase64.
+        euiccCiPKIdBase64:
+          type: string
+          format: byte
+      additionalProperties: false
+    EimStatus:
+      type: object
+      required:
+        - eid
+        - eims
+      properties:
+        eid:
+          type: string
+        eims:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssociatedEim"
+    AssociatedEim:
+      type: object
+      required:
+        - eimId
+      properties:
+        eimId:
+          type: string
+        eimFqdn:
+          type: string
+        eimIdType:
+          type: integer
+          format: int64
+        counterValue:
+          type: integer
+          format: int64
+        associationToken:
+          type: integer
+          format: int64
     OperationResultResponse:
       type: object
       required:

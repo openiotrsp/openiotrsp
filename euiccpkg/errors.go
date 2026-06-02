@@ -32,6 +32,23 @@ const (
 	ResultUnknown                   ResultCode = "unknown"
 )
 
+// ECOResultCode is the domain form of eIM Configuration Operation result values.
+type ECOResultCode string
+
+const (
+	ECOResultOK                         ECOResultCode = "ok"
+	ECOResultInsufficientMemory         ECOResultCode = "insufficient-memory"
+	ECOResultAssociatedEIMAlreadyExists ECOResultCode = "associated-eim-already-exists"
+	ECOResultCIPKUnknown                ECOResultCode = "ci-pk-unknown"
+	ECOResultInvalidAssociationToken    ECOResultCode = "invalid-association-token"
+	ECOResultCounterValueOutOfRange     ECOResultCode = "counter-value-out-of-range"
+	ECOResultCommandError               ECOResultCode = "command-error"
+	ECOResultEIMNotFound                ECOResultCode = "eim-not-found"
+	ECOResultLastEIMDeleted             ECOResultCode = "last-eim-deleted"
+	ECOResultUndefinedError             ECOResultCode = "undefined-error"
+	ECOResultUnknown                    ECOResultCode = "unknown"
+)
+
 // PackageError is the domain form of EuiccPackageErrorCode.
 type PackageError string
 

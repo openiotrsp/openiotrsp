@@ -93,6 +93,48 @@ func TestProfileLifecycleEndpointsCompleteThroughMockIPA(t *testing.T) {
 	}
 }
 
+func TestEIMConfigurationEndpointsCompleteThroughMockIPA(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+
+	add := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims", map[string]any{
+		"eimFqdn":      "test.eim",
+		"counterValue": 1,
+	}, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, add.Operations[0].ID)
+	assertAssociatedEIMState(t, server, "test.eim", 1, 1)
+
+	update := putJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/test.eim", map[string]any{
+		"eimFqdn":      "test.eim",
+		"counterValue": 2,
+	}, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, update.Operations[0].ID)
+	assertAssociatedEIMState(t, server, "test.eim", 2, 1)
+
+	list := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/list", nil, http.StatusAccepted)
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, list.Operations[0].ID)
+
+	deleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/eims/test.eim", nil)
+	if deleteResponse.Code != http.StatusAccepted {
+		t.Fatalf("DELETE eIM status = %d body = %s, want %d", deleteResponse.Code, deleteResponse.Body.String(), http.StatusAccepted)
+	}
+	var deleted enqueueResponse
+	if err := json.NewDecoder(deleteResponse.Body).Decode(&deleted); err != nil {
+		t.Fatalf("Decode(delete eIM) error = %v", err)
+	}
+	runMockIPAOnce(t, server)
+	assertOperationDone(t, server, deleted.Operations[0].ID)
+	status := getJSON[eimStatusResponse](t, server, "/v1/devices/"+testEID+"/eims", http.StatusOK)
+	if len(status.EIMs) != 0 {
+		t.Fatalf("associated eIMs after delete = %#v, want none", status.EIMs)
+	}
+}
+
 func TestDefaultTenantResolverQueuesUnderDefaultTenant(t *testing.T) {
 	t.Parallel()
 
@@ -128,11 +170,19 @@ func TestEveryEndpointResolvesTenant(t *testing.T) {
 	if deleteResponse.Code != http.StatusAccepted {
 		t.Fatalf("DELETE status = %d body = %s, want %d", deleteResponse.Code, deleteResponse.Body.String(), http.StatusAccepted)
 	}
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims", map[string]any{"counterValue": 1}, http.StatusAccepted)
+	putJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/test.eim", map[string]any{"counterValue": 2}, http.StatusAccepted)
+	eimDeleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/eims/test.eim", nil)
+	if eimDeleteResponse.Code != http.StatusAccepted {
+		t.Fatalf("DELETE eIM status = %d body = %s, want %d", eimDeleteResponse.Code, eimDeleteResponse.Body.String(), http.StatusAccepted)
+	}
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/list", nil, http.StatusAccepted)
+	getJSON[eimStatusResponse](t, server, "/v1/devices/"+testEID+"/eims", http.StatusOK)
 	getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
 	getJSON[operationResultResponse](t, server, "/v1/operations/"+itoa(queued.Operations[0].ID), http.StatusOK)
 
-	if got := resolver.calls.Load(); got != 6 {
-		t.Fatalf("tenant resolver calls = %d, want 6", got)
+	if got := resolver.calls.Load(); got != 11 {
+		t.Fatalf("tenant resolver calls = %d, want 11", got)
 	}
 }
 
@@ -187,6 +237,23 @@ func assertOperationDone(t *testing.T, server *httptest.Server, operationID int6
 	}
 }
 
+func assertAssociatedEIMState(t *testing.T, server *httptest.Server, eimID string, counter int64, associationToken int64) {
+	t.Helper()
+	status := getJSON[eimStatusResponse](t, server, "/v1/devices/"+testEID+"/eims", http.StatusOK)
+	for _, eim := range status.EIMs {
+		if eim.EIMID == eimID {
+			if eim.CounterValue == nil || *eim.CounterValue != counter {
+				t.Fatalf("eIM %s counter = %#v, want %d", eimID, eim.CounterValue, counter)
+			}
+			if eim.AssociationToken == nil || *eim.AssociationToken != associationToken {
+				t.Fatalf("eIM %s association token = %#v, want %d", eimID, eim.AssociationToken, associationToken)
+			}
+			return
+		}
+	}
+	t.Fatalf("eIM %s not found in status %#v", eimID, status)
+}
+
 func postJSON[T any](t *testing.T, server *httptest.Server, path string, body any, wantStatus int) T {
 	t.Helper()
 	var reader *bytes.Reader
@@ -202,6 +269,23 @@ func postJSON[T any](t *testing.T, server *httptest.Server, path string, body an
 	response := doRequest(t, server, http.MethodPost, path, reader)
 	if response.Code != wantStatus {
 		t.Fatalf("POST %s status = %d body = %s, want %d", path, response.Code, response.Body.String(), wantStatus)
+	}
+	var out T
+	if err := json.NewDecoder(response.Body).Decode(&out); err != nil {
+		t.Fatalf("Decode(%s) error = %v", path, err)
+	}
+	return out
+}
+
+func putJSON[T any](t *testing.T, server *httptest.Server, path string, body any, wantStatus int) T {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	response := doRequest(t, server, http.MethodPut, path, bytes.NewReader(payload))
+	if response.Code != wantStatus {
+		t.Fatalf("PUT %s status = %d body = %s, want %d", path, response.Code, response.Body.String(), wantStatus)
 	}
 	var out T
 	if err := json.NewDecoder(response.Body).Decode(&out); err != nil {

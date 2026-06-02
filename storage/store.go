@@ -106,6 +106,15 @@ type EIMConfig struct {
 	Data  []byte
 }
 
+// AssociatedEIM is the eIM's persisted view of one Associated eIM configured on
+// one eUICC.
+type AssociatedEIM struct {
+	EID           string
+	EIMID         string
+	EIMIDType     *int64
+	ConfigPayload []byte
+}
+
 // Notification is an encoded notification emitted by an IPA/eUICC.
 type Notification struct {
 	EID     string
@@ -130,6 +139,10 @@ type Store interface {
 	GetOperationResult(ctx context.Context, tenantID TenantID, operationID int64) (OperationResult, error)
 	StoreEIMConfig(ctx context.Context, tenantID TenantID, config EIMConfig) error
 	ReadEIMConfig(ctx context.Context, tenantID TenantID, eimID string) (EIMConfig, error)
+	SetAssociatedEIM(ctx context.Context, tenantID TenantID, associated AssociatedEIM) error
+	DeleteAssociatedEIM(ctx context.Context, tenantID TenantID, eid string, eimID string) error
+	GetAssociatedEIM(ctx context.Context, tenantID TenantID, eid string, eimID string) (AssociatedEIM, error)
+	ListAssociatedEIMs(ctx context.Context, tenantID TenantID, eid string) ([]AssociatedEIM, error)
 	StoreNotification(ctx context.Context, tenantID TenantID, notification Notification) error
 }
 

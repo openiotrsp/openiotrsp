@@ -441,6 +441,128 @@ func TestECOConstructorsEncode(t *testing.T) {
 	}
 }
 
+func TestSignatureInputIncludesAssociationToken(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := "eid-association-token"
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eid}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	service := &Service{Store: store, Signer: newTestSigner(t), EimID: "eim.example"}
+
+	zeroToken := signPackage(t, ctx, service, eid, testEID(1), nil, Enable([]byte{0x89, 0x10}, false))
+	assertSignatureInputSuffix(t, zeroToken, []byte{0x84, 0x01, 0x00})
+	verifyEIMSignature(t, service.Signer.PublicKey(), zeroToken)
+
+	associationToken := int64(7)
+	config := protocolasn1.EimConfigurationData{
+		EimID:            service.EimID,
+		AssociationToken: &associationToken,
+	}
+	payload := encode(t, &config)
+	if err := store.SetAssociatedEIM(ctx, storage.DefaultTenantID, storage.AssociatedEIM{
+		EID:           eid,
+		EIMID:         service.EimID,
+		ConfigPayload: payload,
+	}); err != nil {
+		t.Fatalf("SetAssociatedEIM() error = %v", err)
+	}
+	nonZeroToken := signPackage(t, ctx, service, eid, testEID(1), nil, Disable([]byte{0x89, 0x10}))
+	assertSignatureInputSuffix(t, nonZeroToken, []byte{0x84, 0x01, 0x07})
+	verifyEIMSignature(t, service.Signer.PublicKey(), nonZeroToken)
+}
+
+func TestECOResultsMapAndApplyState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eimSigner := newTestSigner(t)
+	euiccSigner := newTestSigner(t)
+	service := &Service{Store: store, Signer: eimSigner, EimID: "eim.example"}
+	eid := "eid-eco-results"
+	registerWithState(t, store, eid)
+	config := testEIMConfiguration(t, "other.eim", int64(1), eimSigner.PublicKey())
+
+	addRequest := signPackage(t, ctx, service, eid, testEID(2), []byte{0x01}, AddEim(config))
+	addToken := int64(42)
+	addResultData, err := protocolasn1.AddEimEuiccResult(&protocolasn1.AddEimResult{AssociationToken: &addToken})
+	if err != nil {
+		t.Fatalf("AddEimEuiccResult() error = %v", err)
+	}
+	addResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        addRequest,
+		ResultDER:      signedResultDataDER(t, euiccSigner, addRequest, 1, []protocolasn1.EuiccResultData{addResultData}, addRequest.CounterValue),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 1,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(add) error = %v", err)
+	}
+	if !addResult.OK || addResult.Operation != OperationAddEIM || addResult.AddEIMAssociationToken == nil || *addResult.AddEIMAssociationToken != addToken {
+		t.Fatalf("add result = %#v, want association token %d", addResult, addToken)
+	}
+	assertAssociatedEIMToken(t, store, eid, "other.eim", addToken)
+
+	updateConfig := testEIMConfiguration(t, "other.eim", int64(2), eimSigner.PublicKey())
+	updateRequest := signPackage(t, ctx, service, eid, testEID(2), []byte{0x02}, UpdateEim(updateConfig))
+	updateResultDER := signedResultDER(t, euiccSigner, updateRequest, 2, 10, 0)
+	updateResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        updateRequest,
+		ResultDER:      updateResultDER,
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 2,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(update) error = %v", err)
+	}
+	if !updateResult.OK || updateResult.Operation != OperationUpdateEIM {
+		t.Fatalf("update result = %#v, want ok update", updateResult)
+	}
+	assertAssociatedEIMCounter(t, store, eid, "other.eim", 2)
+
+	listRequest := signPackage(t, ctx, service, eid, testEID(2), []byte{0x03}, ListEim())
+	idType := protocolasn1.EimIDTypeFQDN
+	listResultData, err := protocolasn1.ListEimEuiccResult(&protocolasn1.ListEimResult{
+		EimIDList: []protocolasn1.EimIDInfo{{EimID: "other.eim", EimIDType: &idType}},
+	})
+	if err != nil {
+		t.Fatalf("ListEimEuiccResult() error = %v", err)
+	}
+	listResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        listRequest,
+		ResultDER:      signedResultDataDER(t, euiccSigner, listRequest, 3, []protocolasn1.EuiccResultData{listResultData}, listRequest.CounterValue),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 3,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(list) error = %v", err)
+	}
+	if !listResult.OK || listResult.Operation != OperationListEIM || len(listResult.EIMs) != 1 || listResult.EIMs[0].EIMID != "other.eim" {
+		t.Fatalf("list result = %#v, want other.eim", listResult)
+	}
+
+	deleteRequest := signPackage(t, ctx, service, eid, testEID(2), []byte{0x04}, DeleteEim("other.eim"))
+	deleteResultDER := signedResultDER(t, euiccSigner, deleteRequest, 4, 9, 2)
+	deleteResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        deleteRequest,
+		ResultDER:      deleteResultDER,
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 4,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(delete) error = %v", err)
+	}
+	if !deleteResult.OK || deleteResult.Operation != OperationDeleteEIM || !deleteResult.LastEIMDeleted || deleteResult.ECOResultCode != ECOResultLastEIMDeleted {
+		t.Fatalf("delete result = %#v, want lastEimDeleted", deleteResult)
+	}
+	if _, err := store.GetAssociatedEIM(ctx, storage.DefaultTenantID, eid, "other.eim"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetAssociatedEIM(deleted) error = %v, want %v", err, storage.ErrNotFound)
+	}
+}
+
 type testSigner struct {
 	key *ecdsa.PrivateKey
 }
@@ -519,12 +641,24 @@ func signedResultDERWithCounter(
 	if err != nil {
 		t.Fatalf("IntegerEuiccResult() error = %v", err)
 	}
+	return signedResultDataDER(t, signer, request, sequenceNumber, []protocolasn1.EuiccResultData{resultData}, counter)
+}
+
+func signedResultDataDER(
+	t *testing.T,
+	signer *testSigner,
+	request *SignedRequest,
+	sequenceNumber int64,
+	results []protocolasn1.EuiccResultData,
+	counter int64,
+) []byte {
+	t.Helper()
 	data := protocolasn1.EuiccPackageResultDataSigned{
 		EimID:            request.EimID,
 		CounterValue:     counter,
 		EimTransactionID: cloneBytes(request.EimTransactionID),
 		SeqNumber:        sequenceNumber,
-		Results:          []protocolasn1.EuiccResultData{resultData},
+		Results:          results,
 	}
 	signature := signMarshaler(t, signer, &data)
 	result := &protocolasn1.EuiccPackageResult{
@@ -601,7 +735,7 @@ func verifyEIMSignature(t *testing.T, publicKey crypto.PublicKey, request *Signe
 	if !ok {
 		t.Fatalf("public key type = %T, want *ecdsa.PublicKey", publicKey)
 	}
-	digest := sha256.Sum256(request.SignedDER)
+	digest := sha256.Sum256(request.SignatureInput)
 	if !ecdsa.VerifyASN1(key, digest[:], request.Request.EimSignature) {
 		t.Fatalf("eIM signature did not verify")
 	}
@@ -622,6 +756,13 @@ func assertRequestRoundTrip(t *testing.T, der []byte) {
 	}
 }
 
+func assertSignatureInputSuffix(t *testing.T, request *SignedRequest, suffix []byte) {
+	t.Helper()
+	if !bytes.Equal(request.SignatureInput, append(cloneBytes(request.SignedDER), suffix...)) {
+		t.Fatalf("signature input = %x, want signed DER plus %x", request.SignatureInput, suffix)
+	}
+}
+
 func registerWithState(t *testing.T, store storage.Store, eid string, states ...storage.ProfileState) {
 	t.Helper()
 	ctx := context.Background()
@@ -633,6 +774,44 @@ func registerWithState(t *testing.T, store storage.Store, eid string, states ...
 			t.Fatalf("SetProfileState() error = %v", err)
 		}
 	}
+}
+
+func testEIMConfiguration(t *testing.T, eimID string, counter int64, publicKey crypto.PublicKey) *protocolasn1.EimConfigurationData {
+	t.Helper()
+	config, err := NewEIMConfigurationDataFromPublicKey(eimID, eimID, counter, publicKey)
+	if err != nil {
+		t.Fatalf("NewEIMConfigurationDataFromPublicKey() error = %v", err)
+	}
+	return config
+}
+
+func assertAssociatedEIMToken(t *testing.T, store storage.Store, eid string, eimID string, want int64) {
+	t.Helper()
+	config := associatedEIMConfig(t, store, eid, eimID)
+	if config.AssociationToken == nil || *config.AssociationToken != want {
+		t.Fatalf("associated token = %#v, want %d", config.AssociationToken, want)
+	}
+}
+
+func assertAssociatedEIMCounter(t *testing.T, store storage.Store, eid string, eimID string, want int64) {
+	t.Helper()
+	config := associatedEIMConfig(t, store, eid, eimID)
+	if config.CounterValue == nil || *config.CounterValue != want {
+		t.Fatalf("associated counter = %#v, want %d", config.CounterValue, want)
+	}
+}
+
+func associatedEIMConfig(t *testing.T, store storage.Store, eid string, eimID string) protocolasn1.EimConfigurationData {
+	t.Helper()
+	associated, err := store.GetAssociatedEIM(context.Background(), storage.DefaultTenantID, eid, eimID)
+	if err != nil {
+		t.Fatalf("GetAssociatedEIM() error = %v", err)
+	}
+	var config protocolasn1.EimConfigurationData
+	if err := protocolasn1.Decode(associated.ConfigPayload, &config); err != nil {
+		t.Fatalf("Decode(EimConfigurationData) error = %v", err)
+	}
+	return config
 }
 
 func assertProfileEnabled(t *testing.T, store storage.Store, eid string, iccid []byte, want *bool) {

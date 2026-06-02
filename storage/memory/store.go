@@ -14,12 +14,13 @@ import (
 type Store struct {
 	mu sync.Mutex
 
-	devices       map[deviceKey]memoryDevice
-	profileStates map[profileStateKey]storage.ProfileState
-	operations    map[int64]memoryOperation
-	results       map[resultKey]storage.EUICCPackageResult
-	eimConfigs    map[configKey]storage.EIMConfig
-	notifications []storedNotification
+	devices        map[deviceKey]memoryDevice
+	profileStates  map[profileStateKey]storage.ProfileState
+	associatedEIMs map[associatedEIMKey]storage.AssociatedEIM
+	operations     map[int64]memoryOperation
+	results        map[resultKey]storage.EUICCPackageResult
+	eimConfigs     map[configKey]storage.EIMConfig
+	notifications  []storedNotification
 
 	nextOperationID int64
 }
@@ -51,6 +52,12 @@ type profileStateKey struct {
 	iccid    string
 }
 
+type associatedEIMKey struct {
+	tenantID storage.TenantID
+	eid      string
+	eimID    string
+}
+
 type configKey struct {
 	tenantID storage.TenantID
 	eimID    string
@@ -66,6 +73,7 @@ func New() *Store {
 	return &Store{
 		devices:         make(map[deviceKey]memoryDevice),
 		profileStates:   make(map[profileStateKey]storage.ProfileState),
+		associatedEIMs:  make(map[associatedEIMKey]storage.AssociatedEIM),
 		operations:      make(map[int64]memoryOperation),
 		results:         make(map[resultKey]storage.EUICCPackageResult),
 		eimConfigs:      make(map[configKey]storage.EIMConfig),
@@ -388,6 +396,80 @@ func (s *Store) ReadEIMConfig(ctx context.Context, tenantID storage.TenantID, ei
 	return cloneEIMConfig(config), nil
 }
 
+// SetAssociatedEIM stores one Associated eIM state for one eUICC.
+func (s *Store) SetAssociatedEIM(ctx context.Context, tenantID storage.TenantID, associated storage.AssociatedEIM) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := newAssociatedEIMKey(tenantID, associated.EID, associated.EIMID)
+	if _, ok := s.devices[deviceKey{tenantID: key.tenantID, eid: key.eid}]; !ok {
+		return storage.ErrNotFound
+	}
+	associated.EID = key.eid
+	associated.EIMID = key.eimID
+	s.associatedEIMs[key] = cloneAssociatedEIM(associated)
+	return nil
+}
+
+// DeleteAssociatedEIM removes one Associated eIM state for one eUICC.
+func (s *Store) DeleteAssociatedEIM(ctx context.Context, tenantID storage.TenantID, eid string, eimID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := newAssociatedEIMKey(tenantID, eid, eimID)
+	if _, ok := s.devices[deviceKey{tenantID: key.tenantID, eid: key.eid}]; !ok {
+		return storage.ErrNotFound
+	}
+	if _, ok := s.associatedEIMs[key]; !ok {
+		return storage.ErrNotFound
+	}
+	delete(s.associatedEIMs, key)
+	return nil
+}
+
+// GetAssociatedEIM reads one Associated eIM state for one eUICC.
+func (s *Store) GetAssociatedEIM(ctx context.Context, tenantID storage.TenantID, eid string, eimID string) (storage.AssociatedEIM, error) {
+	if err := ctx.Err(); err != nil {
+		return storage.AssociatedEIM{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	associated, ok := s.associatedEIMs[newAssociatedEIMKey(tenantID, eid, eimID)]
+	if !ok {
+		return storage.AssociatedEIM{}, storage.ErrNotFound
+	}
+	return cloneAssociatedEIM(associated), nil
+}
+
+// ListAssociatedEIMs reads all Associated eIM states for one eUICC.
+func (s *Store) ListAssociatedEIMs(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.AssociatedEIM, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deviceKey := newDeviceKey(tenantID, eid)
+	if _, ok := s.devices[deviceKey]; !ok {
+		return nil, storage.ErrNotFound
+	}
+	items := make([]storage.AssociatedEIM, 0)
+	for key, associated := range s.associatedEIMs {
+		if key.tenantID == deviceKey.tenantID && key.eid == eid {
+			items = append(items, cloneAssociatedEIM(associated))
+		}
+	}
+	sortAssociatedEIMs(items)
+	return items, nil
+}
+
 // StoreNotification stores an encoded device notification.
 func (s *Store) StoreNotification(ctx context.Context, tenantID storage.TenantID, notification storage.Notification) error {
 	if err := ctx.Err(); err != nil {
@@ -419,6 +501,10 @@ func newProfileStateKey(tenantID storage.TenantID, eid string, iccid string) pro
 	return profileStateKey{tenantID: storage.NormalizeTenantID(tenantID), eid: eid, iccid: iccid}
 }
 
+func newAssociatedEIMKey(tenantID storage.TenantID, eid string, eimID string) associatedEIMKey {
+	return associatedEIMKey{tenantID: storage.NormalizeTenantID(tenantID), eid: eid, eimID: eimID}
+}
+
 func sortOperations(operations []storage.Operation) {
 	for i := 1; i < len(operations); i++ {
 		for j := i; j > 0 && operations[j-1].SequenceNumber > operations[j].SequenceNumber; j-- {
@@ -431,6 +517,14 @@ func sortProfileStates(states []storage.ProfileState) {
 	for i := 1; i < len(states); i++ {
 		for j := i; j > 0 && states[j-1].ICCID > states[j].ICCID; j-- {
 			states[j-1], states[j] = states[j], states[j-1]
+		}
+	}
+}
+
+func sortAssociatedEIMs(items []storage.AssociatedEIM) {
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j-1].EIMID > items[j].EIMID; j-- {
+			items[j-1], items[j] = items[j], items[j-1]
 		}
 	}
 }
@@ -453,6 +547,15 @@ func cloneOperation(operation storage.Operation) storage.Operation {
 
 func cloneEIMConfig(config storage.EIMConfig) storage.EIMConfig {
 	return storage.EIMConfig{EIMID: config.EIMID, Data: cloneBytes(config.Data)}
+}
+
+func cloneAssociatedEIM(associated storage.AssociatedEIM) storage.AssociatedEIM {
+	associated.ConfigPayload = cloneBytes(associated.ConfigPayload)
+	if associated.EIMIDType != nil {
+		value := *associated.EIMIDType
+		associated.EIMIDType = &value
+	}
+	return associated
 }
 
 func cloneBytes(value []byte) []byte {

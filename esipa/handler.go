@@ -285,13 +285,16 @@ func recordEimPackageResult(
 	if err := result.UnmarshalBERTLV(resultTLV); err != nil {
 		return nil, err
 	}
-	status := resultStatus(&result)
 	operations, err := matchingEUICCPackageOperations(ctx, store, tenantID, eid, &result)
 	if err != nil {
 		return nil, err
 	}
 	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
 	for _, operation := range operations {
+		status, err := resultStatusForOperation(operation, &result)
+		if err != nil {
+			return nil, err
+		}
 		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
 			EID:            eid,
 			OperationID:    operation.ID,
@@ -302,7 +305,7 @@ func recordEimPackageResult(
 			return nil, err
 		}
 		if status == storage.OperationDone {
-			if err := applyEUICCPackageOperationState(ctx, store, tenantID, operation); err != nil {
+			if err := applyEUICCPackageOperationState(ctx, store, tenantID, operation, &result); err != nil {
 				return nil, err
 			}
 		}
@@ -361,6 +364,7 @@ func applyEUICCPackageOperationState(
 	store storage.Store,
 	tenantID storage.TenantID,
 	operation storage.Operation,
+	result *protocolasn1.EuiccPackageResult,
 ) error {
 	if operation.Kind != storage.OperationEuiccPackage {
 		return nil
@@ -369,7 +373,15 @@ func applyEUICCPackageOperationState(
 	if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
 		return err
 	}
-	return euiccpkg.ApplyPackageState(ctx, store, tenantID, operation.EID, request.EuiccPackageSigned.EuiccPackage)
+	var domain *euiccpkg.Result
+	if result != nil && result.Kind == protocolasn1.EuiccPackageResultOK && result.Signed != nil {
+		parsed, err := euiccpkg.ParseOperationResult(request.EuiccPackageSigned.EuiccPackage, result.Signed.Data.Results)
+		if err != nil {
+			return err
+		}
+		domain = parsed
+	}
+	return euiccpkg.ApplyPackageResultState(ctx, store, tenantID, operation.EID, request.EuiccPackageSigned.EuiccPackage, domain)
 }
 
 func recordProfileDownloadTriggerResult(
@@ -486,6 +498,24 @@ func resultStatus(result *protocolasn1.EuiccPackageResult) storage.OperationStat
 		}
 	}
 	return storage.OperationDone
+}
+
+func resultStatusForOperation(operation storage.Operation, result *protocolasn1.EuiccPackageResult) (storage.OperationStatus, error) {
+	if operation.Kind != storage.OperationEuiccPackage || result == nil || result.Kind != protocolasn1.EuiccPackageResultOK || result.Signed == nil {
+		return resultStatus(result), nil
+	}
+	var request protocolasn1.EuiccPackageRequest
+	if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+		return storage.OperationFailed, err
+	}
+	parsed, err := euiccpkg.ParseOperationResult(request.EuiccPackageSigned.EuiccPackage, result.Signed.Data.Results)
+	if err != nil {
+		return storage.OperationFailed, err
+	}
+	if parsed.OK {
+		return storage.OperationDone, nil
+	}
+	return storage.OperationFailed, nil
 }
 
 func getEimPackageErrorResponse(code protocolasn1.EimPackageResultErrorCode) (Response, error) {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/signing"
@@ -28,6 +29,7 @@ type SignInput struct {
 	EID              string
 	EIDValue         []byte
 	EimTransactionID []byte
+	AssociationToken *int64
 	Package          protocolasn1.EuiccPackage
 }
 
@@ -37,6 +39,7 @@ type SignedRequest struct {
 	Request          protocolasn1.EuiccPackageRequest
 	DER              []byte
 	SignedDER        []byte
+	SignatureInput   []byte
 	TenantID         storage.TenantID
 	EID              string
 	EIDValue         []byte
@@ -81,7 +84,18 @@ func (s *Service) Sign(ctx context.Context, input SignInput) (*SignedRequest, er
 	if err != nil {
 		return nil, fmt.Errorf("encode EuiccPackageSigned: %w", err)
 	}
-	signature, err := s.Signer.Sign(ctx, signedDER)
+	token := input.AssociationToken
+	if token == nil {
+		token, err = s.associationToken(ctx, input.TenantID, input.EID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	signatureInput, err := signatureInput(signedDER, token)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := s.Signer.Sign(ctx, signatureInput)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +113,7 @@ func (s *Service) Sign(ctx context.Context, input SignInput) (*SignedRequest, er
 		Request:          request,
 		DER:              der,
 		SignedDER:        signedDER,
+		SignatureInput:   signatureInput,
 		TenantID:         input.TenantID,
 		EID:              input.EID,
 		EIDValue:         cloneBytes(input.EIDValue),
@@ -107,6 +122,48 @@ func (s *Service) Sign(ctx context.Context, input SignInput) (*SignedRequest, er
 		EimTransactionID: cloneBytes(input.EimTransactionID),
 		Package:          input.Package,
 	}, nil
+}
+
+func (s *Service) associationToken(ctx context.Context, tenantID storage.TenantID, eid string) (*int64, error) {
+	associated, err := s.Store.GetAssociatedEIM(ctx, tenantID, eid, s.EimID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var config protocolasn1.EimConfigurationData
+	if err := protocolasn1.Decode(associated.ConfigPayload, &config); err != nil {
+		return nil, fmt.Errorf("decode stored Associated eIM config: %w", err)
+	}
+	if config.AssociationToken == nil {
+		return nil, nil
+	}
+	value := *config.AssociationToken
+	return &value, nil
+}
+
+func signatureInput(signedDER []byte, associationToken *int64) ([]byte, error) {
+	value := int64(0)
+	if associationToken != nil {
+		value = *associationToken
+	}
+	tokenDER, err := associationTokenTLV(value)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(signedDER)+len(tokenDER))
+	out = append(out, signedDER...)
+	out = append(out, tokenDER...)
+	return out, nil
+}
+
+func associationTokenTLV(value int64) ([]byte, error) {
+	tlv, err := bertlv.MarshalValue(bertlv.ContextSpecific.Primitive(4), primitive.MarshalInt(value))
+	if err != nil {
+		return nil, err
+	}
+	return tlv.MarshalBinary()
 }
 
 // ResultInput contains the expected request metadata and the DER eUICC result.
@@ -120,14 +177,30 @@ type ResultInput struct {
 
 // Result is the verified domain result.
 type Result struct {
-	OK                   bool
-	Operation            OperationKind
-	ResultCode           ResultCode
-	RawResultCode        int64
-	PackageError         PackageError
-	RawPackageError      int64
-	UnsignedPackageError UnsignedPackageError
-	RawUnsignedError     int64
+	OK                     bool
+	Operation              OperationKind
+	ResultCode             ResultCode
+	ECOResultCode          ECOResultCode
+	RawResultCode          int64
+	AddEIMAssociationToken *int64
+	LastEIMDeleted         bool
+	EIMs                   []EIMInfo
+	PackageError           PackageError
+	RawPackageError        int64
+	UnsignedPackageError   UnsignedPackageError
+	RawUnsignedError       int64
+}
+
+// EIMInfo is the domain form of SGP.32 EimIdInfo in listEimResult.
+type EIMInfo struct {
+	EIMID     string
+	EIMIDType *protocolasn1.EimIDType
+}
+
+// ParseOperationResult maps raw EuiccResultData to the domain result for one
+// single-operation package without verifying the eUICC signature.
+func ParseOperationResult(pkg protocolasn1.EuiccPackage, results []protocolasn1.EuiccResultData) (*Result, error) {
+	return operationResult(&SignedRequest{Package: pkg}, results)
 }
 
 // VerifyAndApplyResult decodes an eUICC Package Result, verifies any eUICC
@@ -175,8 +248,7 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 	}
 
 	if result.OK {
-		operation, iccid := requestPSMO(input.Request)
-		if err := applyPSMOState(ctx, s.Store, input.Request.TenantID, input.Request.EID, operation, iccid); err != nil {
+		if err := ApplyPackageResultState(ctx, s.Store, input.Request.TenantID, input.Request.EID, input.Request.Package, result); err != nil {
 			return nil, err
 		}
 	}
@@ -275,9 +347,17 @@ func matchSignedResult(request *SignedRequest, wantSequence int64, eimID string,
 
 func operationResult(request *SignedRequest, results []protocolasn1.EuiccResultData) (*Result, error) {
 	operation, _ := requestPSMO(request)
-	if operation == OperationNone {
-		return &Result{OK: true, Operation: OperationNone, ResultCode: ResultOK}, nil
+	if operation != OperationNone {
+		return psmoOperationResult(operation, results)
 	}
+	operation, _ = requestECO(request)
+	if operation != OperationNone {
+		return ecoOperationResult(operation, results)
+	}
+	return &Result{OK: true, Operation: OperationNone, ResultCode: ResultOK}, nil
+}
+
+func psmoOperationResult(operation OperationKind, results []protocolasn1.EuiccResultData) (*Result, error) {
 	wantTag := operation.resultTag()
 	for index := range results {
 		raw := results[index].Raw
@@ -297,6 +377,124 @@ func operationResult(request *SignedRequest, results []protocolasn1.EuiccResultD
 		}, nil
 	}
 	return nil, fmt.Errorf("euiccpkg: result for operation %s not found", operation)
+}
+
+func ecoOperationResult(operation OperationKind, results []protocolasn1.EuiccResultData) (*Result, error) {
+	raw := resultDataByTag(results, operation.resultTag())
+	if raw == nil {
+		return nil, fmt.Errorf("euiccpkg: result for operation %s not found", operation)
+	}
+	switch operation {
+	case OperationAddEIM:
+		return addEIMResult(raw)
+	case OperationDeleteEIM:
+		value, err := integerResult(raw)
+		if err != nil {
+			return nil, err
+		}
+		code := mapDeleteEIMResult(value)
+		return &Result{
+			OK:             code == ECOResultOK || code == ECOResultLastEIMDeleted,
+			Operation:      operation,
+			ECOResultCode:  code,
+			RawResultCode:  value,
+			LastEIMDeleted: code == ECOResultLastEIMDeleted,
+		}, nil
+	case OperationUpdateEIM:
+		value, err := integerResult(raw)
+		if err != nil {
+			return nil, err
+		}
+		code := mapUpdateEIMResult(value)
+		return &Result{
+			OK:            code == ECOResultOK,
+			Operation:     operation,
+			ECOResultCode: code,
+			RawResultCode: value,
+		}, nil
+	case OperationListEIM:
+		return listEIMResult(raw)
+	default:
+		return nil, fmt.Errorf("euiccpkg: unsupported ECO operation %s", operation)
+	}
+}
+
+func resultDataByTag(results []protocolasn1.EuiccResultData, wantTag uint64) *protocolasn1.TLV {
+	for index := range results {
+		raw := results[index].Raw
+		if raw != nil && raw.Tag.ContextSpecific() && raw.Tag.Value() == wantTag {
+			return raw
+		}
+	}
+	return nil
+}
+
+func addEIMResult(raw *protocolasn1.TLV) (*Result, error) {
+	child, err := explicitResultChild(raw, 8)
+	if err != nil {
+		return nil, err
+	}
+	var decoded protocolasn1.AddEimResult
+	if err := decoded.UnmarshalBERTLV(child); err != nil {
+		return nil, err
+	}
+	result := &Result{Operation: OperationAddEIM}
+	if decoded.AssociationToken != nil {
+		token := *decoded.AssociationToken
+		result.OK = true
+		result.ECOResultCode = ECOResultOK
+		result.AddEIMAssociationToken = &token
+		return result, nil
+	}
+	if decoded.Code == nil {
+		return nil, errors.New("euiccpkg: addEimResult has no selected value")
+	}
+	value := int64(*decoded.Code)
+	code := mapAddEIMResult(value)
+	result.OK = code == ECOResultOK
+	result.ECOResultCode = code
+	result.RawResultCode = value
+	return result, nil
+}
+
+func listEIMResult(raw *protocolasn1.TLV) (*Result, error) {
+	child, err := explicitResultChild(raw, 11)
+	if err != nil {
+		return nil, err
+	}
+	var decoded protocolasn1.ListEimResult
+	if err := decoded.UnmarshalBERTLV(child); err != nil {
+		return nil, err
+	}
+	result := &Result{Operation: OperationListEIM}
+	if decoded.Error != nil {
+		value := int64(*decoded.Error)
+		result.ECOResultCode = mapListEIMResult(value)
+		result.RawResultCode = value
+		return result, nil
+	}
+	result.OK = true
+	result.ECOResultCode = ECOResultOK
+	result.EIMs = make([]EIMInfo, 0, len(decoded.EimIDList))
+	for _, item := range decoded.EimIDList {
+		var eimType *protocolasn1.EimIDType
+		if item.EimIDType != nil {
+			value := *item.EimIDType
+			eimType = &value
+		}
+		result.EIMs = append(result.EIMs, EIMInfo{EIMID: item.EimID, EIMIDType: eimType})
+	}
+	return result, nil
+}
+
+func explicitResultChild(raw *protocolasn1.TLV, tag uint64) (*protocolasn1.TLV, error) {
+	if raw == nil || !raw.Tag.ContextSpecific() || raw.Tag.Value() != tag {
+		return nil, fmt.Errorf("euiccpkg: result tag got %v, want [%d]", raw, tag)
+	}
+	if len(raw.Children) != 1 {
+		return nil, fmt.Errorf("euiccpkg: explicit ECO result [%d] must contain one child", tag)
+	}
+	return raw.Children[0], nil
 }
 
 func integerResult(tlv *protocolasn1.TLV) (int64, error) {
@@ -357,6 +555,74 @@ func mapOperationResult(operation OperationKind, value int64) ResultCode {
 		}
 	}
 	return ResultUnknown
+}
+
+func mapAddEIMResult(value int64) ECOResultCode {
+	switch value {
+	case 0:
+		return ECOResultOK
+	case 1:
+		return ECOResultInsufficientMemory
+	case 2:
+		return ECOResultAssociatedEIMAlreadyExists
+	case 3:
+		return ECOResultCIPKUnknown
+	case 5:
+		return ECOResultInvalidAssociationToken
+	case 6:
+		return ECOResultCounterValueOutOfRange
+	case 7:
+		return ECOResultCommandError
+	case 127:
+		return ECOResultUndefinedError
+	default:
+		return ECOResultUnknown
+	}
+}
+
+func mapDeleteEIMResult(value int64) ECOResultCode {
+	switch value {
+	case 0:
+		return ECOResultOK
+	case 1:
+		return ECOResultEIMNotFound
+	case 2:
+		return ECOResultLastEIMDeleted
+	case 7:
+		return ECOResultCommandError
+	case 127:
+		return ECOResultUndefinedError
+	default:
+		return ECOResultUnknown
+	}
+}
+
+func mapUpdateEIMResult(value int64) ECOResultCode {
+	switch value {
+	case 0:
+		return ECOResultOK
+	case 1:
+		return ECOResultEIMNotFound
+	case 3:
+		return ECOResultCIPKUnknown
+	case 6:
+		return ECOResultCounterValueOutOfRange
+	case 7:
+		return ECOResultCommandError
+	case 127:
+		return ECOResultUndefinedError
+	default:
+		return ECOResultUnknown
+	}
+}
+
+func mapListEIMResult(value int64) ECOResultCode {
+	switch value {
+	case 127:
+		return ECOResultUndefinedError
+	default:
+		return ECOResultUnknown
+	}
 }
 
 func mapPackageError(value int64) PackageError {

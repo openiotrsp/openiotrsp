@@ -93,6 +93,39 @@ func testRecords(t *testing.T, store storage.Store) {
 	}
 	assertBytes(t, "eIM config", gotConfig.Data, []byte("encoded-eim-config"))
 
+	eimType := int64(2)
+	associatedPayload := []byte("encoded-associated-eim")
+	if err := store.SetAssociatedEIM(ctx, tenantID, storage.AssociatedEIM{
+		EID:           eid,
+		EIMID:         "assoc.eim",
+		EIMIDType:     &eimType,
+		ConfigPayload: associatedPayload,
+	}); err != nil {
+		t.Fatalf("SetAssociatedEIM() error = %v", err)
+	}
+	associatedPayload[0] = '!'
+	gotAssociated, err := store.GetAssociatedEIM(ctx, tenantID, eid, "assoc.eim")
+	if err != nil {
+		t.Fatalf("GetAssociatedEIM() error = %v", err)
+	}
+	if gotAssociated.EID != eid || gotAssociated.EIMID != "assoc.eim" || gotAssociated.EIMIDType == nil || *gotAssociated.EIMIDType != eimType {
+		t.Fatalf("associated eIM = %#v, want assoc.eim type %d", gotAssociated, eimType)
+	}
+	assertBytes(t, "associated eIM payload", gotAssociated.ConfigPayload, []byte("encoded-associated-eim"))
+	associatedList, err := store.ListAssociatedEIMs(ctx, tenantID, eid)
+	if err != nil {
+		t.Fatalf("ListAssociatedEIMs() error = %v", err)
+	}
+	if len(associatedList) != 1 || associatedList[0].EIMID != "assoc.eim" {
+		t.Fatalf("ListAssociatedEIMs() = %#v, want assoc.eim", associatedList)
+	}
+	if err := store.DeleteAssociatedEIM(ctx, tenantID, eid, "assoc.eim"); err != nil {
+		t.Fatalf("DeleteAssociatedEIM() error = %v", err)
+	}
+	if _, err := store.GetAssociatedEIM(ctx, tenantID, eid, "assoc.eim"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetAssociatedEIM(deleted) error = %v, want %v", err, storage.ErrNotFound)
+	}
+
 	if err := store.StoreNotification(ctx, tenantID, storage.Notification{
 		EID:     eid,
 		Kind:    "state-change",
