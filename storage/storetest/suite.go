@@ -46,6 +46,9 @@ func testRecords(t *testing.T, store storage.Store) {
 	if _, err := store.GetProfileState(ctx, tenantID, eid, "891"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetProfileState() error = %v, want %v", err, storage.ErrNotFound)
 	}
+	if _, err := store.GetEUICCState(ctx, tenantID, eid); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetEUICCState() error = %v, want %v", err, storage.ErrNotFound)
+	}
 	if _, err := store.ReadEIMConfig(ctx, tenantID, "missing"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ReadEIMConfig() error = %v, want %v", err, storage.ErrNotFound)
 	}
@@ -81,6 +84,31 @@ func testRecords(t *testing.T, store storage.Store) {
 	}
 	if _, err := store.GetProfileState(ctx, tenantID, eid, "891"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("GetProfileState(deleted) error = %v, want %v", err, storage.ErrNotFound)
+	}
+
+	rawEUICCInfo := []byte{0xbf, 0x20, 0x00}
+	if err := store.SetEUICCState(ctx, tenantID, storage.EUICCState{
+		EID:                    eid,
+		EIDValue:               []byte{0x01, 0x02},
+		DefaultSMDPAddress:     "smdp.example",
+		RootSMDSAddress:        "smds.example",
+		EUICCInfo1:             rawEUICCInfo,
+		CertificateIdentifiers: []string{"aa01", "bb02"},
+		RawPayload:             []byte("raw-ipa-data"),
+	}); err != nil {
+		t.Fatalf("SetEUICCState() error = %v", err)
+	}
+	rawEUICCInfo[0] = '!'
+	gotEUICCState, err := store.GetEUICCState(ctx, tenantID, eid)
+	if err != nil {
+		t.Fatalf("GetEUICCState() error = %v", err)
+	}
+	if gotEUICCState.EID != eid || gotEUICCState.DefaultSMDPAddress != "smdp.example" || gotEUICCState.RootSMDSAddress != "smds.example" {
+		t.Fatalf("eUICC state = %#v, want persisted addresses", gotEUICCState)
+	}
+	assertBytes(t, "eUICC info1", gotEUICCState.EUICCInfo1, []byte{0xbf, 0x20, 0x00})
+	if len(gotEUICCState.CertificateIdentifiers) != 2 || gotEUICCState.CertificateIdentifiers[0] != "aa01" {
+		t.Fatalf("certificate identifiers = %#v, want aa01/bb02", gotEUICCState.CertificateIdentifiers)
 	}
 
 	configPayload := []byte("encoded-eim-config")

@@ -190,6 +190,12 @@ var requiredRoundTripStructures = []string{
 	"EimPackageResult",
 	"ProvideEimPackageResult",
 	"ProvideEimPackageResultResponse",
+	"IpaEuiccDataRequest",
+	"IpaEuiccDataResponse",
+	"IpaEuiccDataResponseError",
+	"IpaEuiccDataErrorCode",
+	"IpaEuiccData",
+	"IpaCapabilities",
 	"ESipaMessageFromIpaToEim",
 	"ESipaMessageFromEimToIpa",
 }
@@ -266,7 +272,9 @@ func roundTripCases() []roundTripCase {
 	stateCause := StateChangeCause(0)
 	profileState := ProfileStateEnabled
 	getError := EimPackageResultErrorCode(1)
+	ipaError := IpaEuiccDataErrorCode(1)
 	eimType := EimIDTypeFQDN
+	notificationSeq := int64(7)
 
 	epr := sampleEuiccPackageResult()
 	eprTLV, err := epr.MarshalBERTLV()
@@ -278,6 +286,12 @@ func roundTripCases() []roundTripCase {
 		EuiccPackageRequest: sampleEuiccPackageRequest(),
 	}
 	transferTLV, err := transferRequest.MarshalBERTLV()
+	if err != nil {
+		panic(err)
+	}
+	profileListTLV, err := (&ProfileInfoListResponse{
+		Profiles: []ProfileInfo{{ICCID: []byte{0x89, 0x10}, ProfileState: &profileState, FallbackAttribute: true}},
+	}).MarshalBERTLV()
 	if err != nil {
 		panic(err)
 	}
@@ -519,6 +533,59 @@ func roundTripCases() []roundTripCase {
 			value:   &ProvideEimPackageResultResponse{Raw: (&EimAcknowledgements{SequenceNumbers: []SequenceNumber{1}}).mustTLV()},
 			newFunc: func() Unmarshaler { return new(ProvideEimPackageResultResponse) },
 			tagHex:  "bf50",
+		},
+		{
+			name: "IpaEuiccDataRequest",
+			covers: []string{
+				"IpaEuiccDataRequest",
+			},
+			value: &IpaEuiccDataRequest{
+				TagList: []byte{0x5a, 0xbf, 0x20, 0xbf, 0x2d},
+				SearchCriteriaNotification: &IpaEuiccDataNotificationSearchCriteria{
+					SeqNumber: &notificationSeq,
+				},
+				SearchCriteriaEuiccPackageResult: &IpaEuiccDataPackageResultSearchCriteria{SeqNumber: 9},
+				EimTransactionID:                 []byte{0x01, 0x02},
+			},
+			newFunc: func() Unmarshaler { return new(IpaEuiccDataRequest) },
+			tagHex:  "bf52",
+		},
+		{
+			name: "IpaEuiccDataResponse",
+			covers: []string{
+				"IpaEuiccDataResponse",
+				"IpaEuiccData",
+				"IpaCapabilities",
+			},
+			value: &IpaEuiccDataResponse{Data: &IpaEuiccData{RawObjects: []*bertlv.TLV{
+				bertlv.NewValue(tagEID, []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}),
+				bertlv.NewChildren(tagEUICCInfo1,
+					bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x03, 0x02, 0x01}),
+					bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
+						bertlv.NewValue(tagOctet, []byte{0xaa}),
+					),
+					bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10),
+						bertlv.NewValue(tagOctet, []byte{0xbb}),
+					),
+				),
+				bertlv.NewChildren(tagIPACapabilities,
+					bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{0x02, 0xfc}),
+					bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte{0x03, 0xc0}),
+				),
+				profileListTLV,
+			}}},
+			newFunc: func() Unmarshaler { return new(IpaEuiccDataResponse) },
+			tagHex:  "bf52",
+		},
+		{
+			name: "IpaEuiccDataResponseError",
+			covers: []string{
+				"IpaEuiccDataResponseError",
+				"IpaEuiccDataErrorCode",
+			},
+			value:   &IpaEuiccDataResponse{Error: &IpaEuiccDataResponseError{EimTransactionID: []byte{0x01}, Code: ipaError}},
+			newFunc: func() Unmarshaler { return new(IpaEuiccDataResponse) },
+			tagHex:  "bf52",
 		},
 		{
 			name:    "ESipaMessageFromIpaToEim",

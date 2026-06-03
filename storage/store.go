@@ -24,13 +24,36 @@ type Device struct {
 	EID string
 }
 
-// ProfileState is the eIM's persisted view of one profile on one eUICC.
+// ProfileState is the eIM's persisted observability view of one profile on one
+// eUICC. It may be refreshed from BF52 IPA eUICC data responses, which are not
+// signed eUICC Package Results, so callers must not treat it as authorization
+// evidence for trust decisions without independent verification.
 type ProfileState struct {
 	EID         string
 	ICCID       string
 	IsEnabled   bool
 	IsFallback  bool
 	SMDPAddress string
+}
+
+// EUICCState is the eIM's current IPA-reported observability view of one eUICC.
+// BF52 IpaEuiccDataResponse messages do not carry EuiccSignEPR signatures, so
+// this state is suitable for reporting/reconciliation but not for authorization
+// or security decisions unless a future caller adds a separate trust mechanism.
+type EUICCState struct {
+	EID                    string
+	EIDValue               []byte
+	DefaultSMDPAddress     string
+	RootSMDSAddress        string
+	EUICCInfo1             []byte
+	EUICCInfo2             []byte
+	IPACapabilities        []byte
+	DeviceInfo             []byte
+	EUMCertificate         []byte
+	EUICCCertificate       []byte
+	CertificateIdentifiers []string
+	RawPayload             []byte
+	UpdatedAt              time.Time
 }
 
 // OperationStatus is the lifecycle state of an operation queued for an IPA poll.
@@ -131,6 +154,8 @@ type Store interface {
 	ListProfileStates(ctx context.Context, tenantID TenantID, eid string) ([]ProfileState, error)
 	SetProfileState(ctx context.Context, tenantID TenantID, state ProfileState) error
 	DeleteProfileState(ctx context.Context, tenantID TenantID, eid string, iccid string) error
+	GetEUICCState(ctx context.Context, tenantID TenantID, eid string) (EUICCState, error)
+	SetEUICCState(ctx context.Context, tenantID TenantID, state EUICCState) error
 	NextEUICCPackageCounter(ctx context.Context, tenantID TenantID, eid string) (int64, error)
 	EnqueueOperation(ctx context.Context, tenantID TenantID, operation OperationRequest) (Operation, error)
 	GetOperation(ctx context.Context, tenantID TenantID, operationID int64) (Operation, error)

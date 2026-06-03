@@ -3,6 +3,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -137,6 +138,87 @@ func (s *Store) DeleteProfileState(ctx context.Context, tenantID storage.TenantI
 		WHERE tenant_id = $1 AND eid = $2 AND iccid = $3
 	`, tenantString(tenantID), eid, iccid)
 	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return storage.ErrNotFound
+	}
+	return nil
+}
+
+// GetEUICCState reads the current IPA-reported eUICC state.
+func (s *Store) GetEUICCState(ctx context.Context, tenantID storage.TenantID, eid string) (storage.EUICCState, error) {
+	var state storage.EUICCState
+	var identifiers []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT eid, eid_value, default_smdp_address, root_smds_address,
+			euicc_info1, euicc_info2, ipa_capabilities, device_info,
+			eum_certificate, euicc_certificate, certificate_identifiers,
+			raw_payload, updated_at
+		FROM euicc_state
+		WHERE tenant_id = $1 AND eid = $2
+	`, tenantString(tenantID), eid).Scan(
+		&state.EID,
+		&state.EIDValue,
+		&state.DefaultSMDPAddress,
+		&state.RootSMDSAddress,
+		&state.EUICCInfo1,
+		&state.EUICCInfo2,
+		&state.IPACapabilities,
+		&state.DeviceInfo,
+		&state.EUMCertificate,
+		&state.EUICCCertificate,
+		&identifiers,
+		&state.RawPayload,
+		&state.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.EUICCState{}, storage.ErrNotFound
+	}
+	if err != nil {
+		return storage.EUICCState{}, err
+	}
+	if len(identifiers) > 0 {
+		if err := json.Unmarshal(identifiers, &state.CertificateIdentifiers); err != nil {
+			return storage.EUICCState{}, err
+		}
+	}
+	return cloneEUICCState(state), nil
+}
+
+// SetEUICCState stores the current IPA-reported eUICC state.
+func (s *Store) SetEUICCState(ctx context.Context, tenantID storage.TenantID, state storage.EUICCState) error {
+	identifiers, err := json.Marshal(state.CertificateIdentifiers)
+	if err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO euicc_state (
+			tenant_id, eid, eid_value, default_smdp_address, root_smds_address,
+			euicc_info1, euicc_info2, ipa_capabilities, device_info,
+			eum_certificate, euicc_certificate, certificate_identifiers, raw_payload
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT (tenant_id, eid)
+		DO UPDATE SET eid_value = EXCLUDED.eid_value,
+			default_smdp_address = EXCLUDED.default_smdp_address,
+			root_smds_address = EXCLUDED.root_smds_address,
+			euicc_info1 = EXCLUDED.euicc_info1,
+			euicc_info2 = EXCLUDED.euicc_info2,
+			ipa_capabilities = EXCLUDED.ipa_capabilities,
+			device_info = EXCLUDED.device_info,
+			eum_certificate = EXCLUDED.eum_certificate,
+			euicc_certificate = EXCLUDED.euicc_certificate,
+			certificate_identifiers = EXCLUDED.certificate_identifiers,
+			raw_payload = EXCLUDED.raw_payload,
+			updated_at = now()
+	`, tenantString(tenantID), state.EID, state.EIDValue, state.DefaultSMDPAddress, state.RootSMDSAddress,
+		state.EUICCInfo1, state.EUICCInfo2, state.IPACapabilities, state.DeviceInfo,
+		state.EUMCertificate, state.EUICCCertificate, identifiers, state.RawPayload)
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			return storage.ErrNotFound
+		}
 		return err
 	}
 	if tag.RowsAffected() == 0 {
@@ -549,6 +631,21 @@ func cloneAssociatedEIM(associated storage.AssociatedEIM) storage.AssociatedEIM 
 		associated.EIMIDType = &value
 	}
 	return associated
+}
+
+func cloneEUICCState(state storage.EUICCState) storage.EUICCState {
+	state.EIDValue = cloneBytes(state.EIDValue)
+	state.EUICCInfo1 = cloneBytes(state.EUICCInfo1)
+	state.EUICCInfo2 = cloneBytes(state.EUICCInfo2)
+	state.IPACapabilities = cloneBytes(state.IPACapabilities)
+	state.DeviceInfo = cloneBytes(state.DeviceInfo)
+	state.EUMCertificate = cloneBytes(state.EUMCertificate)
+	state.EUICCCertificate = cloneBytes(state.EUICCCertificate)
+	state.RawPayload = cloneBytes(state.RawPayload)
+	if state.CertificateIdentifiers != nil {
+		state.CertificateIdentifiers = append([]string(nil), state.CertificateIdentifiers...)
+	}
+	return state
 }
 
 func cloneBytes(value []byte) []byte {

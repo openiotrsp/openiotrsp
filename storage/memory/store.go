@@ -16,6 +16,7 @@ type Store struct {
 
 	devices        map[deviceKey]memoryDevice
 	profileStates  map[profileStateKey]storage.ProfileState
+	euiccStates    map[deviceKey]storage.EUICCState
 	associatedEIMs map[associatedEIMKey]storage.AssociatedEIM
 	operations     map[int64]memoryOperation
 	results        map[resultKey]storage.EUICCPackageResult
@@ -73,6 +74,7 @@ func New() *Store {
 	return &Store{
 		devices:         make(map[deviceKey]memoryDevice),
 		profileStates:   make(map[profileStateKey]storage.ProfileState),
+		euiccStates:     make(map[deviceKey]storage.EUICCState),
 		associatedEIMs:  make(map[associatedEIMKey]storage.AssociatedEIM),
 		operations:      make(map[int64]memoryOperation),
 		results:         make(map[resultKey]storage.EUICCPackageResult),
@@ -167,6 +169,39 @@ func (s *Store) DeleteProfileState(ctx context.Context, tenantID storage.TenantI
 		return storage.ErrNotFound
 	}
 	delete(s.profileStates, key)
+	return nil
+}
+
+// GetEUICCState reads the current IPA-reported eUICC state.
+func (s *Store) GetEUICCState(ctx context.Context, tenantID storage.TenantID, eid string) (storage.EUICCState, error) {
+	if err := ctx.Err(); err != nil {
+		return storage.EUICCState{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, ok := s.euiccStates[newDeviceKey(tenantID, eid)]
+	if !ok {
+		return storage.EUICCState{}, storage.ErrNotFound
+	}
+	return cloneEUICCState(state), nil
+}
+
+// SetEUICCState stores the current IPA-reported eUICC state.
+func (s *Store) SetEUICCState(ctx context.Context, tenantID storage.TenantID, state storage.EUICCState) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := newDeviceKey(tenantID, state.EID)
+	if _, ok := s.devices[key]; !ok {
+		return storage.ErrNotFound
+	}
+	state.EID = key.eid
+	state.UpdatedAt = time.Now().UTC()
+	s.euiccStates[key] = cloneEUICCState(state)
 	return nil
 }
 
@@ -556,6 +591,21 @@ func cloneAssociatedEIM(associated storage.AssociatedEIM) storage.AssociatedEIM 
 		associated.EIMIDType = &value
 	}
 	return associated
+}
+
+func cloneEUICCState(state storage.EUICCState) storage.EUICCState {
+	state.EIDValue = cloneBytes(state.EIDValue)
+	state.EUICCInfo1 = cloneBytes(state.EUICCInfo1)
+	state.EUICCInfo2 = cloneBytes(state.EUICCInfo2)
+	state.IPACapabilities = cloneBytes(state.IPACapabilities)
+	state.DeviceInfo = cloneBytes(state.DeviceInfo)
+	state.EUMCertificate = cloneBytes(state.EUMCertificate)
+	state.EUICCCertificate = cloneBytes(state.EUICCCertificate)
+	state.RawPayload = cloneBytes(state.RawPayload)
+	if state.CertificateIdentifiers != nil {
+		state.CertificateIdentifiers = append([]string(nil), state.CertificateIdentifiers...)
+	}
+	return state
 }
 
 func cloneBytes(value []byte) []byte {

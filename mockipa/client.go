@@ -82,6 +82,29 @@ func (c Client) UploadEUICCPackageResult(ctx context.Context, eid []byte, result
 	return decoded.UnmarshalBERTLV(response.Raw)
 }
 
+// UploadIpaEuiccDataResponse sends an IPA eUICC data response back to the eIM.
+func (c Client) UploadIpaEuiccDataResponse(ctx context.Context, eid []byte, result *protocolasn1.IpaEuiccDataResponse) error {
+	tlv, err := result.MarshalBERTLV()
+	if err != nil {
+		return err
+	}
+	raw, err := marshalIPAEnvelope(&protocolasn1.ProvideEimPackageResult{
+		EID: eid,
+		EimPackageResult: protocolasn1.EimPackageResult{
+			Raw: tlv,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	response, err := c.exchange(ctx, raw)
+	if err != nil {
+		return err
+	}
+	var decoded protocolasn1.ProvideEimPackageResultResponse
+	return decoded.UnmarshalBERTLV(response.Raw)
+}
+
 func (c Client) exchange(ctx context.Context, payload []byte) (*protocolasn1.ESipaMessageFromEimToIpa, error) {
 	client := c.HTTPClient
 	if client == nil {

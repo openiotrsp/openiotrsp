@@ -55,6 +55,36 @@ func TestProfileDownloadEndpointCompletesThroughMockIPA(t *testing.T) {
 	}
 }
 
+func TestEUICCDataEndpointCompletesThroughMockIPA(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+
+	queued := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/euicc-data/fetch", map[string]any{
+		"tagListHex":                  "5abf20bf22bf2da8",
+		"notificationSeqNumber":       7,
+		"euiccPackageResultSeqNumber": 9,
+	}, http.StatusAccepted)
+	if len(queued.Operations) != 1 {
+		t.Fatalf("queued operations = %#v, want one", queued.Operations)
+	}
+
+	runMockIPAOnce(t, server)
+
+	data := getJSON[euiccDataResponse](t, server, "/v1/devices/"+testEID+"/euicc-data", http.StatusOK)
+	if data.DefaultSMDPAddress != "smdp.example" || data.EUICCInfo1Base64 == "" || data.IPACapabilitiesBase64 == "" {
+		t.Fatalf("eUICC data = %#v, want SMDP, eUICCInfo1, and IPA capabilities", data)
+	}
+	if len(data.CertificateIdentifiers) != 3 {
+		t.Fatalf("certificate identifiers = %#v, want CI identifiers from eUICCInfo1/2", data.CertificateIdentifiers)
+	}
+	if len(data.Profiles) != 1 || data.Profiles[0].ICCID != "89101122334455" || !data.Profiles[0].IsEnabled {
+		t.Fatalf("profiles = %#v, want enabled mock profile", data.Profiles)
+	}
+	assertOperationDone(t, server, queued.Operations[0].ID)
+}
+
 func TestProfileLifecycleEndpointsCompleteThroughMockIPA(t *testing.T) {
 	t.Parallel()
 
@@ -279,12 +309,20 @@ func TestEveryEndpointResolvesTenant(t *testing.T) {
 		t.Fatalf("DELETE eIM status = %d body = %s, want %d", eimDeleteResponse.Code, eimDeleteResponse.Body.String(), http.StatusAccepted)
 	}
 	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/list", nil, http.StatusAccepted)
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/euicc-data/fetch", nil, http.StatusAccepted)
+	if err := store.SetEUICCState(context.Background(), storage.DefaultTenantID, storage.EUICCState{
+		EID:                testEID,
+		DefaultSMDPAddress: "smdp.example",
+	}); err != nil {
+		t.Fatalf("SetEUICCState() error = %v", err)
+	}
+	getJSON[euiccDataResponse](t, server, "/v1/devices/"+testEID+"/euicc-data", http.StatusOK)
 	getJSON[eimStatusResponse](t, server, "/v1/devices/"+testEID+"/eims", http.StatusOK)
 	getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
 	getJSON[operationResultResponse](t, server, "/v1/operations/"+itoa(queued.Operations[0].ID), http.StatusOK)
 
-	if got := resolver.calls.Load(); got != 17 {
-		t.Fatalf("tenant resolver calls = %d, want 17", got)
+	if got := resolver.calls.Load(); got != 19 {
+		t.Fatalf("tenant resolver calls = %d, want 19", got)
 	}
 }
 

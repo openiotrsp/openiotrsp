@@ -16,6 +16,7 @@ import (
 	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
+	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
@@ -292,6 +293,9 @@ func recordEimPackageResult(
 	if tlv.Tag.Equal(tagDownloadTrig) {
 		return recordProfileDownloadTriggerResult(ctx, store, tenantID, eid, tlv, payload)
 	}
+	if tlv.Tag.Equal(tagIpaEuiccData) {
+		return recordIpaEuiccDataResponse(ctx, store, tenantID, eid, tlv, payload)
+	}
 	resultTLV := tlv
 	if tlv.Tag.Equal(tagSequence) {
 		resultTLV = tlv.First(tagEuiccPackage)
@@ -371,6 +375,91 @@ func recordEimPackageResult(
 		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
 	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+}
+
+func recordIpaEuiccDataResponse(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	tlv *bertlv.TLV,
+	payload []byte,
+) (*protocolasn1.EimAcknowledgements, error) {
+	var response protocolasn1.IpaEuiccDataResponse
+	if err := response.UnmarshalBERTLV(tlv); err != nil {
+		return nil, err
+	}
+	transactionID := ipaEuiccDataTransactionID(&response)
+	operation, ok, err := pendingIpaEuiccDataOperation(ctx, store, tenantID, eid, transactionID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+	status := storage.OperationDone
+	if response.Error != nil {
+		status = storage.OperationFailed
+	}
+	if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
+		EID:            eid,
+		OperationID:    operation.ID,
+		SequenceNumber: operation.SequenceNumber,
+		Status:         status,
+		Payload:        cloneBytes(payload),
+	}); err != nil {
+		return nil, err
+	}
+	if status == storage.OperationDone {
+		if err := ipadata.ApplyResponse(ctx, store, tenantID, eid, &response, payload); err != nil {
+			return nil, err
+		}
+	}
+	return &protocolasn1.EimAcknowledgements{
+		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)},
+	}, nil
+}
+
+func pendingIpaEuiccDataOperation(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	transactionID []byte,
+) (storage.Operation, bool, error) {
+	operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 100)
+	if err != nil {
+		return storage.Operation{}, false, err
+	}
+	for _, operation := range operations {
+		if operation.Kind != storage.OperationIpaEuiccData {
+			continue
+		}
+		if len(transactionID) == 0 {
+			return operation, true, nil
+		}
+		var request protocolasn1.IpaEuiccDataRequest
+		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+			return storage.Operation{}, false, err
+		}
+		if bytes.Equal(request.EimTransactionID, transactionID) {
+			return operation, true, nil
+		}
+	}
+	return storage.Operation{}, false, nil
+}
+
+func ipaEuiccDataTransactionID(response *protocolasn1.IpaEuiccDataResponse) []byte {
+	if response == nil {
+		return nil
+	}
+	if response.Error != nil {
+		return response.Error.EimTransactionID
+	}
+	if response.Data != nil {
+		return response.Data.EimTransactionID
+	}
+	return nil
 }
 
 func verifiedOperationResult(

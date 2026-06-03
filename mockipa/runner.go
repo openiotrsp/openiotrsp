@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/damonto/euicc-go/bertlv"
+	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 )
@@ -63,6 +64,8 @@ func (r Runner) pollOnce(ctx context.Context, downloader Downloader, logger *slo
 	switch poll.Kind {
 	case protocolasn1.GetEimPackageEuiccPackageRequest:
 		return r.handleEUICCPackage(ctx, logger, poll.EuiccPackageRequest)
+	case protocolasn1.GetEimPackageIpaEuiccDataRequest:
+		return r.handleIpaEuiccDataRequest(ctx, logger, poll.IpaEuiccDataRequest)
 	case protocolasn1.GetEimPackageProfileDownloadTriggerRequest:
 		return r.handleProfileDownloadTrigger(ctx, downloader, logger, poll.ProfileDownloadTriggerRequest)
 	case protocolasn1.GetEimPackageError:
@@ -72,6 +75,26 @@ func (r Runner) pollOnce(ctx context.Context, downloader Downloader, logger *slo
 		logger.Info("unsupported eIM package for mock IPA", "kind", poll.Kind)
 		return nil
 	}
+}
+
+func (r Runner) handleIpaEuiccDataRequest(
+	ctx context.Context,
+	logger *slog.Logger,
+	tlv *bertlv.TLV,
+) error {
+	var request protocolasn1.IpaEuiccDataRequest
+	if err := request.UnmarshalBERTLV(tlv); err != nil {
+		return err
+	}
+	response, err := IpaEuiccDataResponse(r.EID, &request)
+	if err != nil {
+		return err
+	}
+	if err := r.Client.UploadIpaEuiccDataResponse(ctx, r.EID, response); err != nil {
+		return err
+	}
+	logger.Info("IPA eUICC data read complete", "eid", hex.EncodeToString(r.EID), "tagList", hex.EncodeToString(request.TagList))
+	return nil
 }
 
 func (r Runner) handleEUICCPackage(
@@ -123,6 +146,76 @@ func (r Runner) handleProfileDownloadTrigger(
 		"offlineStub", result.Offline,
 	)
 	return nil
+}
+
+// IpaEuiccDataResponse builds representative eUICC/IPA data for the mock IPA.
+func IpaEuiccDataResponse(eid []byte, request *protocolasn1.IpaEuiccDataRequest) (*protocolasn1.IpaEuiccDataResponse, error) {
+	state := protocolasn1.ProfileStateEnabled
+	profiles, err := (&protocolasn1.ProfileInfoListResponse{
+		Profiles: []protocolasn1.ProfileInfo{{
+			ICCID:             []byte{0x89, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55},
+			ProfileState:      &state,
+			FallbackAttribute: true,
+		}},
+	}).MarshalBERTLV()
+	if err != nil {
+		return nil, err
+	}
+	transactionID := []byte(nil)
+	if request != nil {
+		transactionID = cloneBytes(request.EimTransactionID)
+	}
+	defaultSMDP := "smdp.example"
+	rootSMDS := "smds.example"
+	return &protocolasn1.IpaEuiccDataResponse{
+		Data: &protocolasn1.IpaEuiccData{
+			RawObjects: []*bertlv.TLV{
+				bertlv.NewValue(bertlv.Application.Primitive(26), cloneBytes(eid)),
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte(defaultSMDP)),
+				euiccInfo1TLV(),
+				euiccInfo2TLV(),
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(3), []byte(rootSMDS)),
+				ipaCapabilitiesTLV(),
+				profiles,
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(7), transactionID),
+			},
+		},
+	}, nil
+}
+
+func euiccInfo1TLV() *bertlv.TLV {
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(32),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x03, 0x02, 0x01}),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
+			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xaa, 0x01}),
+		),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10),
+			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xbb, 0x02}),
+		),
+	)
+}
+
+func euiccInfo2TLV() *bertlv.TLV {
+	category, _ := bertlv.MarshalValue(bertlv.ContextSpecific.Primitive(11), primitive.MarshalInt(int64(1)))
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(34),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte{0x03, 0x00, 0x00}),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x03, 0x02, 0x01}),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(3), []byte{0x01, 0x00, 0x00}),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
+			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xaa, 0x01}),
+		),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10),
+			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xcc, 0x03}),
+		),
+		category,
+	)
+}
+
+func ipaCapabilitiesTLV() *bertlv.TLV {
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(8),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{0x02, 0xfc}),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte{0x03, 0xc0}),
+	)
 }
 
 // SuccessfulEUICCPackageResult builds the successful PSMO/ECO result emitted by

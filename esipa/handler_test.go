@@ -26,6 +26,7 @@ import (
 
 	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
@@ -236,6 +237,88 @@ func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *test
 	}
 	if secondAfter.Status != storage.OperationDone {
 		t.Fatalf("second operation status = %s, want done", secondAfter.Status)
+	}
+}
+
+func TestIpaEuiccDataRequestResponsePersistsState(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x62)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+
+	notificationSeq := int64(11)
+	packageResultSeq := int64(12)
+	transactionID := []byte{0x01, 0x02, 0x03}
+	operation, err := ipadata.EnqueueRequest(ctx, store, storage.DefaultTenantID, eidKey, ipadata.RequestInput{
+		TagList:                     []byte{0x5a, 0xbf, 0x20, 0xbf, 0x2d},
+		NotificationSeqNumber:       &notificationSeq,
+		EuiccPackageResultSeqNumber: &packageResultSeq,
+		EimTransactionID:            transactionID,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueRequest() error = %v", err)
+	}
+
+	pollResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	if err != nil {
+		t.Fatalf("Handle(GetEimPackageRequest) error = %v", err)
+	}
+	poll := decodeGetResponse(t, encodeResponse(t, pollResponse))
+	if poll.Kind != protocolasn1.GetEimPackageIpaEuiccDataRequest {
+		t.Fatalf("poll kind = %v, want IPA eUICC data request", poll.Kind)
+	}
+	var polledRequest protocolasn1.IpaEuiccDataRequest
+	if err := polledRequest.UnmarshalBERTLV(poll.IpaEuiccDataRequest); err != nil {
+		t.Fatalf("UnmarshalBERTLV(polled request) error = %v", err)
+	}
+	if polledRequest.SearchCriteriaNotification == nil || polledRequest.SearchCriteriaNotification.SeqNumber == nil || *polledRequest.SearchCriteriaNotification.SeqNumber != notificationSeq {
+		t.Fatalf("notification search criteria = %#v, want seq %d", polledRequest.SearchCriteriaNotification, notificationSeq)
+	}
+	if polledRequest.SearchCriteriaEuiccPackageResult == nil || polledRequest.SearchCriteriaEuiccPackageResult.SeqNumber != packageResultSeq {
+		t.Fatalf("package-result search criteria = %#v, want seq %d", polledRequest.SearchCriteriaEuiccPackageResult, packageResultSeq)
+	}
+
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, sampleIpaEuiccDataResponse(t, eid, transactionID)),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(ProvideEimPackageResult IPA data) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)}) {
+		t.Fatalf("ack = %v, want operation sequence %d", ack.SequenceNumbers, operation.SequenceNumber)
+	}
+
+	gotOperation, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if gotOperation.Status != storage.OperationDone {
+		t.Fatalf("operation status = %q, want done", gotOperation.Status)
+	}
+	state, err := store.GetEUICCState(ctx, storage.DefaultTenantID, eidKey)
+	if err != nil {
+		t.Fatalf("GetEUICCState() error = %v", err)
+	}
+	if state.DefaultSMDPAddress != "smdp.example" || len(state.EUICCInfo1) == 0 || len(state.CertificateIdentifiers) != 2 {
+		t.Fatalf("eUICC state = %#v, want default SMDP, info1, and certificate identifiers", state)
+	}
+	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eidKey, "89101122334455")
+	if err != nil {
+		t.Fatalf("GetProfileState() error = %v", err)
+	}
+	if !profile.IsEnabled || !profile.IsFallback {
+		t.Fatalf("profile state = %#v, want enabled fallback", profile)
 	}
 }
 
@@ -967,6 +1050,40 @@ func sampleEuiccPackageResultForTag(sequence int64, resultTag uint64, resultCode
 				Results:      []protocolasn1.EuiccResultData{result},
 			},
 			EuiccSignEPR: []byte{0x30, 0x03, 0x02, 0x01, 0x02},
+		},
+	}
+}
+
+func sampleIpaEuiccDataResponse(t *testing.T, eid []byte, transactionID []byte) *protocolasn1.IpaEuiccDataResponse {
+	t.Helper()
+	state := protocolasn1.ProfileStateEnabled
+	profiles, err := (&protocolasn1.ProfileInfoListResponse{
+		Profiles: []protocolasn1.ProfileInfo{{
+			ICCID:             []byte{0x89, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55},
+			ProfileState:      &state,
+			FallbackAttribute: true,
+		}},
+	}).MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("ProfileInfoListResponse MarshalBERTLV() error = %v", err)
+	}
+	return &protocolasn1.IpaEuiccDataResponse{
+		Data: &protocolasn1.IpaEuiccData{
+			RawObjects: []*bertlv.TLV{
+				bertlv.NewValue(tagEID, eid),
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte("smdp.example")),
+				bertlv.NewChildren(bertlv.ContextSpecific.Constructed(32),
+					bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x03, 0x02, 0x01}),
+					bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
+						bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xaa, 0x01}),
+					),
+					bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10),
+						bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xbb, 0x02}),
+					),
+				),
+				profiles,
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(7), transactionID),
+			},
 		},
 	}
 }

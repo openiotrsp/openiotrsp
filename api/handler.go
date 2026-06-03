@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	stdasn1 "encoding/asn1"
@@ -17,6 +18,7 @@ import (
 
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
+	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
@@ -64,6 +66,8 @@ func (h *Handler) HTTPHandler() http.Handler {
 	mux.HandleFunc("PUT /v1/devices/{eid}/eims/{eimId}", h.updateEIM)
 	mux.HandleFunc("DELETE /v1/devices/{eid}/eims/{eimId}", h.deleteEIM)
 	mux.HandleFunc("POST /v1/devices/{eid}/eims/list", h.listEIM)
+	mux.HandleFunc("POST /v1/devices/{eid}/euicc-data/fetch", h.fetchEUICCData)
+	mux.HandleFunc("GET /v1/devices/{eid}/euicc-data", h.euiccData)
 	mux.HandleFunc("GET /v1/devices/{eid}/status", h.deviceStatus)
 	mux.HandleFunc("GET /v1/operations/{id}", h.operationResult)
 	return mux
@@ -131,6 +135,15 @@ type setDefaultDPAddressRequest struct {
 	DefaultDPAddress string `json:"defaultDpAddress"`
 }
 
+type euiccDataFetchRequest struct {
+	TagListHex                  string `json:"tagListHex,omitempty"`
+	TagListBase64               string `json:"tagListBase64,omitempty"`
+	EUICCCIPKIdentifierBase64   string `json:"euiccCiPKIdentifierBase64,omitempty"`
+	NotificationSeqNumber       *int64 `json:"notificationSeqNumber,omitempty"`
+	EuiccPackageResultSeqNumber *int64 `json:"euiccPackageResultSeqNumber,omitempty"`
+	EimTransactionIDBase64      string `json:"eimTransactionIdBase64,omitempty"`
+}
+
 type associatedEIMResponse struct {
 	EIMID            string `json:"eimId"`
 	EIMFQDN          string `json:"eimFqdn,omitempty"`
@@ -155,6 +168,23 @@ type eimStatusResponse struct {
 	EID              string                  `json:"eid"`
 	BootstrapAllowed bool                    `json:"bootstrapAllowed"`
 	EIMs             []associatedEIMResponse `json:"eims"`
+}
+
+type euiccDataResponse struct {
+	EID                    string            `json:"eid"`
+	EIDValueBase64         string            `json:"eidValueBase64,omitempty"`
+	DefaultSMDPAddress     string            `json:"defaultSmdpAddress,omitempty"`
+	RootSMDSAddress        string            `json:"rootSmdsAddress,omitempty"`
+	EUICCInfo1Base64       string            `json:"euiccInfo1Base64,omitempty"`
+	EUICCInfo2Base64       string            `json:"euiccInfo2Base64,omitempty"`
+	IPACapabilitiesBase64  string            `json:"ipaCapabilitiesBase64,omitempty"`
+	DeviceInfoBase64       string            `json:"deviceInfoBase64,omitempty"`
+	EUMCertificateBase64   string            `json:"eumCertificateBase64,omitempty"`
+	EUICCCertificateBase64 string            `json:"euiccCertificateBase64,omitempty"`
+	CertificateIdentifiers []string          `json:"certificateIdentifiers,omitempty"`
+	Profiles               []profileResponse `json:"profiles"`
+	RawPayloadBase64       string            `json:"rawPayloadBase64,omitempty"`
+	UpdatedAt              time.Time         `json:"updatedAt"`
 }
 
 type resultResponse struct {
@@ -375,6 +405,37 @@ func (h *Handler) listEIM(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) fetchEUICCData(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.resolveTenant(w, r)
+	if !ok {
+		return
+	}
+	eid, _, err := parseEID(r.PathValue("eid"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var request euiccDataFetchRequest
+	if !decodeOptionalJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
+	input, err := request.input()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := h.Store.RegisterDevice(r.Context(), tenantID, storage.Device{EID: eid}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	operation, err := ipadata.EnqueueRequest(r.Context(), h.Store, tenantID, eid, input)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, enqueueResponse{Operations: []operationResponse{newOperationResponse(operation)}})
+}
+
 func (h *Handler) recordInitialEIMAssociation(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := h.resolveTenant(w, r)
 	if !ok {
@@ -585,6 +646,29 @@ func (h *Handler) eimStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, eimStatusResponse{EID: eid, BootstrapAllowed: len(eims) == 0, EIMs: eims})
 }
 
+func (h *Handler) euiccData(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.resolveTenant(w, r)
+	if !ok {
+		return
+	}
+	eid, _, err := parseEID(r.PathValue("eid"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	state, err := h.Store.GetEUICCState(r.Context(), tenantID, eid)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	profileStates, err := h.Store.ListProfileStates(r.Context(), tenantID, eid)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, newEUICCDataResponse(state, profileStates))
+}
+
 func (h *Handler) operationResult(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := h.resolveTenant(w, r)
 	if !ok {
@@ -788,6 +872,47 @@ func (r eimConfigRequest) config(service *euiccpkg.Service, pathEIMID string) (*
 	return config, nil
 }
 
+func (r euiccDataFetchRequest) input() (ipadata.RequestInput, error) {
+	if strings.TrimSpace(r.TagListHex) != "" && strings.TrimSpace(r.TagListBase64) != "" {
+		return ipadata.RequestInput{}, errors.New("api: provide either tagListHex or tagListBase64, not both")
+	}
+	var tagList []byte
+	var err error
+	if strings.TrimSpace(r.TagListHex) != "" {
+		tagList, err = hex.DecodeString(strings.TrimSpace(r.TagListHex))
+		if err != nil || len(tagList) == 0 {
+			return ipadata.RequestInput{}, errors.New("api: tagListHex must be non-empty hex")
+		}
+	}
+	if strings.TrimSpace(r.TagListBase64) != "" {
+		tagList, err = decodeBase64Field("tagListBase64", r.TagListBase64)
+		if err != nil {
+			return ipadata.RequestInput{}, err
+		}
+	}
+	var cipk []byte
+	if strings.TrimSpace(r.EUICCCIPKIdentifierBase64) != "" {
+		cipk, err = decodeBase64Field("euiccCiPKIdentifierBase64", r.EUICCCIPKIdentifierBase64)
+		if err != nil {
+			return ipadata.RequestInput{}, err
+		}
+	}
+	var transactionID []byte
+	if strings.TrimSpace(r.EimTransactionIDBase64) != "" {
+		transactionID, err = decodeBase64Field("eimTransactionIdBase64", r.EimTransactionIDBase64)
+		if err != nil {
+			return ipadata.RequestInput{}, err
+		}
+	}
+	return ipadata.RequestInput{
+		TagList:                     tagList,
+		EUICCCIPKIdentifierToBeUsed: cipk,
+		NotificationSeqNumber:       r.NotificationSeqNumber,
+		EuiccPackageResultSeqNumber: r.EuiccPackageResultSeqNumber,
+		EimTransactionID:            transactionID,
+	}, nil
+}
+
 func (h *Handler) initialAssociationConfig(ctx context.Context, tenantID storage.TenantID, service *euiccpkg.Service, request eimConfigRequest) (*protocolasn1.EimConfigurationData, error) {
 	eimID := strings.TrimSpace(request.EIMID)
 	if eimID == "" && service != nil {
@@ -814,6 +939,34 @@ func (h *Handler) initialAssociationConfig(ctx context.Context, tenantID storage
 	}
 	overlayInitialAssociationToken(config, request.AssociationToken)
 	return config, nil
+}
+
+func newEUICCDataResponse(state storage.EUICCState, profiles []storage.ProfileState) euiccDataResponse {
+	out := euiccDataResponse{
+		EID:                    state.EID,
+		EIDValueBase64:         encodeOptionalBase64(state.EIDValue),
+		DefaultSMDPAddress:     state.DefaultSMDPAddress,
+		RootSMDSAddress:        state.RootSMDSAddress,
+		EUICCInfo1Base64:       encodeOptionalBase64(state.EUICCInfo1),
+		EUICCInfo2Base64:       encodeOptionalBase64(state.EUICCInfo2),
+		IPACapabilitiesBase64:  encodeOptionalBase64(state.IPACapabilities),
+		DeviceInfoBase64:       encodeOptionalBase64(state.DeviceInfo),
+		EUMCertificateBase64:   encodeOptionalBase64(state.EUMCertificate),
+		EUICCCertificateBase64: encodeOptionalBase64(state.EUICCCertificate),
+		CertificateIdentifiers: append([]string(nil), state.CertificateIdentifiers...),
+		RawPayloadBase64:       encodeOptionalBase64(state.RawPayload),
+		UpdatedAt:              state.UpdatedAt,
+		Profiles:               make([]profileResponse, 0, len(profiles)),
+	}
+	for _, profile := range profiles {
+		out.Profiles = append(out.Profiles, profileResponse{
+			ICCID:       profile.ICCID,
+			IsEnabled:   profile.IsEnabled,
+			IsFallback:  profile.IsFallback,
+			SMDPAddress: profile.SMDPAddress,
+		})
+	}
+	return out
 }
 
 func overlayInitialAssociationToken(config *protocolasn1.EimConfigurationData, token *int64) {
@@ -909,6 +1062,13 @@ func decodeBase64Field(name string, value string) ([]byte, error) {
 	return decoded, nil
 }
 
+func encodeOptionalBase64(value []byte) string {
+	if len(value) == 0 {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(value)
+}
+
 func cloneInt64(value *int64) *int64 {
 	if value == nil {
 		return nil
@@ -939,6 +1099,32 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any)
 		_ = r.Body.Close()
 	}()
 	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return false
+	}
+	if err := decoder.Decode(new(struct{})); !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, errors.New("api: request body must contain one JSON object"))
+		return false
+	}
+	return true
+}
+
+func decodeOptionalJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) bool {
+	body := http.MaxBytesReader(w, r.Body, maxBytes)
+	defer func() {
+		_ = r.Body.Close()
+	}()
+	payload, err := io.ReadAll(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return false
+	}
+	if strings.TrimSpace(string(payload)) == "" {
+		return true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, err)
