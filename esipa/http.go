@@ -57,14 +57,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(encoded.Payload)
 }
 
-func (h *Handler) handleEncoded(ctx context.Context, payload []byte) ([]byte, error) {
-	encoded, err := h.handleEncodedResponse(ctx, payload)
-	if err != nil || encoded.NoContent {
-		return nil, err
-	}
-	return encoded.Payload, nil
-}
-
 type encodedResponse struct {
 	Payload   []byte
 	NoContent bool
