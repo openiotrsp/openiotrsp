@@ -156,12 +156,31 @@ func testRecords(t *testing.T, store storage.Store) {
 	}
 
 	if err := store.StoreNotification(ctx, tenantID, storage.Notification{
-		EID:     eid,
-		Kind:    "state-change",
-		Payload: []byte("notification"),
+		EID:            eid,
+		SequenceNumber: 7,
+		Kind:           "state-change",
+		Payload:        []byte("notification"),
 	}); err != nil {
 		t.Fatalf("StoreNotification() error = %v", err)
 	}
+	notificationPayload := []byte("notification-updated")
+	if err := store.StoreNotification(ctx, tenantID, storage.Notification{
+		EID:            eid,
+		SequenceNumber: 7,
+		Kind:           "enable",
+		Payload:        notificationPayload,
+	}); err != nil {
+		t.Fatalf("StoreNotification(update) error = %v", err)
+	}
+	notificationPayload[0] = '!'
+	notifications, err := store.ListNotifications(ctx, tenantID, eid)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 || notifications[0].SequenceNumber != 7 || notifications[0].Kind != "enable" {
+		t.Fatalf("notifications = %#v, want one updated sequence 7 enable notification", notifications)
+	}
+	assertBytes(t, "notification payload", notifications[0].Payload, []byte("notification-updated"))
 
 	operation, err := store.EnqueueOperation(ctx, tenantID, storage.OperationRequest{
 		EID:     eid,

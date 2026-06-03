@@ -120,3 +120,27 @@ Each entry must include:
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms the
   operation boundary, but fallback execution remains outside the eIM's direct
   ESipa command surface.
+
+## SGP.32 Indirect ES9+ Relay Payloads
+
+- Spec section: SGP.32 `EsipaMessageFromIpaToEim` relay arms
+  `initiateAuthenticationRequestEsipa`, `authenticateClientRequestEsipa`,
+  `getBoundProfilePackageRequestEsipa`, `handleNotificationEsipa`, and
+  `cancelSessionRequestEsipa`.
+- Ambiguity: The eIM must route indirect profile-download messages to the
+  SM-DP+, but the relayed ES9+ exchange is signed between the eUICC and SM-DP+.
+- Chosen reading: The eIM routes by the ESipa tag and extracts the minimum
+  routing metadata needed to choose the SM-DP+ address. On the SM-DP+ leg,
+  ES9+' uses the SGP.22 ES9+ binding with the eIM in the LPA role; for ASN.1
+  this means the BF39/BF3B/BF3A/BF41/BF3D function object is carried inside the
+  `RemoteProfileProvisioningRequest`/`Response` `[2]` (`A2`) wrapper on
+  `/gsma/rsp2/asn1`. The relayed signed eUICC payloads, including
+  `ProfileInstallationResult` and compact variants, remain raw TLV bytes unless
+  a future consumer needs structured decoded fields.
+- Rationale: Decoding and re-encoding the signed ES9+ objects would add eIM
+  trust in data it does not own and risks changing signature input bytes. The
+  eIM may adapt the unsigned outer interface binding, but must preserve the
+  signed eUICC-originated TLVs.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms the
+  interface behavior, but byte-preserving relay handling is an implementation
+  boundary.

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -28,6 +29,8 @@ const (
 	testEID   = "89049032000000000000000000000001"
 	testICCID = "89101122334455"
 )
+
+var nextMockNotificationSequence atomic.Int64
 
 func TestProfileDownloadEndpointCompletesThroughMockIPA(t *testing.T) {
 	t.Parallel()
@@ -48,6 +51,10 @@ func TestProfileDownloadEndpointCompletesThroughMockIPA(t *testing.T) {
 	status := getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
 	if len(status.Profiles) != 1 || status.Profiles[0].ICCID != "TS48V1-B-UNIQUE" || !status.Profiles[0].IsEnabled {
 		t.Fatalf("status = %#v, want enabled downloaded profile", status)
+	}
+	notifications := getJSON[notificationsResponse](t, server, "/v1/devices/"+testEID+"/notifications", http.StatusOK)
+	if len(notifications.Notifications) != 1 || notifications.Notifications[0].Kind != "install" || notifications.Notifications[0].PayloadBase64 == "" {
+		t.Fatalf("notifications = %#v, want one persisted install notification", notifications)
 	}
 	result := getJSON[operationResultResponse](t, server, "/v1/operations/"+itoa(queued.Operations[0].ID), http.StatusOK)
 	if result.Operation.Status != string(storage.OperationDone) || result.Result == nil {
@@ -120,6 +127,17 @@ func TestProfileLifecycleEndpointsCompleteThroughMockIPA(t *testing.T) {
 	status := getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
 	if len(status.Profiles) != 0 {
 		t.Fatalf("profiles after delete = %#v, want none", status.Profiles)
+	}
+	notifications := getJSON[notificationsResponse](t, server, "/v1/devices/"+testEID+"/notifications", http.StatusOK)
+	gotKinds := make([]string, 0, len(notifications.Notifications))
+	for _, notification := range notifications.Notifications {
+		gotKinds = append(gotKinds, notification.Kind)
+		if notification.SequenceNumber <= 0 || notification.PayloadBase64 == "" {
+			t.Fatalf("notification = %#v, want sequence and payload", notification)
+		}
+	}
+	if !reflect.DeepEqual(gotKinds, []string{"enable", "disable", "delete"}) {
+		t.Fatalf("notification kinds = %#v, want enable/disable/delete", gotKinds)
 	}
 }
 
@@ -346,11 +364,12 @@ func newTestServer(t *testing.T, store storage.Store, resolver TenantResolver) *
 func runMockIPAOnce(t *testing.T, server *httptest.Server) {
 	t.Helper()
 	runner := mockipa.Runner{
-		Client:     mockipa.Client{Endpoint: server.URL + esipa.DefaultPath, HTTPClient: server.Client()},
-		Downloader: mockipa.OfflineDownloader{},
-		EID:        mustEIDBytes(t, testEID),
-		Once:       true,
-		Logger:     slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+		Client:                   mockipa.Client{Endpoint: server.URL + esipa.DefaultPath, HTTPClient: server.Client()},
+		Downloader:               mockipa.OfflineDownloader{},
+		EID:                      mustEIDBytes(t, testEID),
+		Once:                     true,
+		NextNotificationSequence: nextMockNotificationSequence.Add(1),
+		Logger:                   slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
 	}
 	if err := runner.Run(context.Background()); err != nil {
 		t.Fatalf("mock IPA Run() error = %v", err)

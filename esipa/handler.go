@@ -18,6 +18,7 @@ import (
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
+	"github.com/openiotrsp/openiotrsp/relay"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
 
@@ -52,21 +53,29 @@ var (
 	tagEuiccPackage     = bertlv.ContextSpecific.Constructed(81)
 	tagIpaEuiccData     = bertlv.ContextSpecific.Constructed(82)
 	tagDownloadTrig     = bertlv.ContextSpecific.Constructed(84)
+	tagInitiateAuth     = bertlv.ContextSpecific.Constructed(57)
+	tagAuthenticate     = bertlv.ContextSpecific.Constructed(59)
+	tagGetBoundPackage  = bertlv.ContextSpecific.Constructed(58)
+	tagCancelSession    = bertlv.ContextSpecific.Constructed(65)
 	tagTransferPackage  = bertlv.ContextSpecific.Constructed(78)
 	tagGetEimPackage    = bertlv.ContextSpecific.Constructed(79)
 	tagProvideResult    = bertlv.ContextSpecific.Constructed(80)
 	tagHandleNotify     = bertlv.ContextSpecific.Constructed(61)
 	tagNotificationList = bertlv.ContextSpecific.Constructed(0)
+	tagNotificationMeta = bertlv.ContextSpecific.Constructed(47)
+	tagProfileInstall   = bertlv.ContextSpecific.Constructed(55)
 )
 
 // Request is the exact SGP.32 ESipa IPA-to-eIM top-level envelope.
 type Request struct {
 	Message protocolasn1.ESipaMessageFromIpaToEim
+	Raw     []byte
 }
 
 // Response is the exact SGP.32 ESipa eIM-to-IPA top-level envelope.
 type Response struct {
 	Message protocolasn1.ESipaMessageFromEimToIpa
+	Raw     []byte
 }
 
 // EUICCPublicKeyResolver returns the trusted public key for verifying signed
@@ -84,6 +93,7 @@ type Handler struct {
 	// eUICCs that cannot produce verifiable result signatures. Production
 	// handlers must leave this false so state is not updated from unverified EPRs.
 	AllowUnverifiedEUICCPackageResults bool
+	Relay                              *relay.Relay
 
 	blockwiseMu        sync.Mutex
 	blockwiseResponses map[string]coapBlockwiseResponse
@@ -105,48 +115,137 @@ func DecodeRequest(data []byte) (Request, error) {
 	if err := protocolasn1.Decode(data, &message); err != nil {
 		return Request{}, err
 	}
-	return Request{Message: message}, nil
+	return Request{Message: message, Raw: cloneBytes(data)}, nil
 }
 
 // EncodeResponse encodes a BER-TLV ESipa eIM-to-IPA envelope.
 func EncodeResponse(response Response) ([]byte, error) {
+	if response.Raw != nil {
+		return cloneBytes(response.Raw), nil
+	}
 	return protocolasn1.Encode(&response.Message)
 }
 
 // Handle applies one decoded ESipa request to the Store and returns the decoded
 // response. HTTP and CoAP/DTLS transports call this same function.
 func Handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request) (Response, error) {
-	return handle(ctx, store, tenantID, request, nil, false)
+	return handle(ctx, store, tenantID, request, nil, false, nil)
 }
 
 func (h *Handler) handle(ctx context.Context, request Request) (Response, error) {
 	if h == nil {
 		return Response{}, errors.New("esipa: nil Handler")
 	}
-	return handle(ctx, h.Store, h.TenantID, request, h.EUICCPublicKey, h.AllowUnverifiedEUICCPackageResults)
+	return handle(ctx, h.Store, h.TenantID, request, h.EUICCPublicKey, h.AllowUnverifiedEUICCPackageResults, h.Relay)
 }
 
-func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
-	if store == nil {
-		return Response{}, errors.New("esipa: nil Store")
-	}
+func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool, relayService *relay.Relay) (Response, error) {
 	if request.Message.Raw == nil {
 		return Response{}, errors.New("esipa: missing request message")
 	}
 	tenantID = storage.NormalizeTenantID(tenantID)
 
 	switch {
+	case shouldRelay(request.Message.Raw, relayService):
+		return handleRelay(ctx, request, relayService)
 	case request.Message.Raw.Tag.Equal(tagGetEimPackage):
+		if store == nil {
+			return Response{}, errors.New("esipa: nil Store")
+		}
 		return handleGetEimPackage(ctx, store, tenantID, request.Message.Raw)
 	case request.Message.Raw.Tag.Equal(tagProvideResult):
+		if store == nil {
+			return Response{}, errors.New("esipa: nil Store")
+		}
 		return handleProvideEimPackageResult(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	case request.Message.Raw.Tag.Equal(tagTransferPackage):
+		if store == nil {
+			return Response{}, errors.New("esipa: nil Store")
+		}
 		return handleTransferEimPackageResponse(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	case request.Message.Raw.Tag.Equal(tagHandleNotify):
+		if store == nil {
+			return Response{}, errors.New("esipa: nil Store")
+		}
 		return handleNotification(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	default:
 		return Response{}, fmt.Errorf("%w: %s", errUnsupportedMessage, request.Message.Raw.Tag.String())
 	}
+}
+
+func isRelayMessage(tlv *bertlv.TLV) bool {
+	if tlv == nil {
+		return false
+	}
+	return tlv.Tag.Equal(tagInitiateAuth) ||
+		tlv.Tag.Equal(tagAuthenticate) ||
+		tlv.Tag.Equal(tagGetBoundPackage) ||
+		tlv.Tag.Equal(tagCancelSession) ||
+		tlv.Tag.Equal(tagHandleNotify)
+}
+
+func shouldRelay(tlv *bertlv.TLV, relayService *relay.Relay) bool {
+	if relayService == nil || !isRelayMessage(tlv) {
+		return false
+	}
+	return !tlv.Tag.Equal(tagHandleNotify) || relayService.Active()
+}
+
+func handleRelay(ctx context.Context, request Request, relayService *relay.Relay) (Response, error) {
+	payload, err := relayRequestPayload(request)
+	if err != nil {
+		return Response{}, err
+	}
+	var relayed relay.Response
+	switch {
+	case request.Message.Raw.Tag.Equal(tagInitiateAuth):
+		relayed, err = relayService.InitiateAuthentication(ctx, payload)
+	case request.Message.Raw.Tag.Equal(tagAuthenticate):
+		relayed, err = relayService.AuthenticateClient(ctx, payload)
+	case request.Message.Raw.Tag.Equal(tagGetBoundPackage):
+		relayed, err = relayService.GetBoundProfilePackage(ctx, payload)
+	case request.Message.Raw.Tag.Equal(tagCancelSession):
+		relayed, err = relayService.CancelSession(ctx, payload)
+	case request.Message.Raw.Tag.Equal(tagHandleNotify):
+		relayed, err = relayService.HandleNotification(ctx, payload)
+	default:
+		err = fmt.Errorf("%w: %s", errUnsupportedMessage, request.Message.Raw.Tag.String())
+	}
+	if err != nil {
+		return Response{}, err
+	}
+	if request.Message.Raw.Tag.Equal(tagHandleNotify) || relayed.NoContent {
+		return Response{}, nil
+	}
+	return relayResponse(relayed.Payload)
+}
+
+func relayRequestPayload(request Request) ([]byte, error) {
+	if request.Raw != nil {
+		return cloneBytes(request.Raw), nil
+	}
+	if request.Message.Raw == nil {
+		return nil, errors.New("esipa: missing relay payload")
+	}
+	payload, err := request.Message.Raw.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func relayResponse(payload []byte) (Response, error) {
+	if len(payload) == 0 {
+		return Response{}, nil
+	}
+	var message protocolasn1.ESipaMessageFromEimToIpa
+	if err := protocolasn1.Decode(payload, &message); err != nil {
+		return Response{}, err
+	}
+	return Response{
+		Message: message,
+		Raw:     cloneBytes(payload),
+	}, nil
 }
 
 func handleGetEimPackage(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV) (Response, error) {
@@ -163,12 +262,6 @@ func handleGetEimPackage(ctx context.Context, store storage.Store, tenantID stor
 	} else if err != nil {
 		return Response{}, err
 	}
-	if request.NotifyStateChange {
-		if err := storeNotification(ctx, store, tenantID, eid, "state-change", tlv); err != nil {
-			return Response{}, err
-		}
-	}
-
 	operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 1)
 	if errors.Is(err, storage.ErrNotFound) {
 		return getEimPackageErrorResponse(getEimPackageErrorEIDNotFound)
@@ -229,12 +322,214 @@ func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, 
 
 func handleNotification(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
 	if len(tlv.Children) == 1 && tlv.Children[0].Tag.Equal(tagProvideResult) {
-		return handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0], euiccPublicKey, allowUnverifiedEUICCPackageResults)
-	}
-	if err := storeNotification(ctx, store, tenantID, "", "handle-notification", tlv); err != nil {
+		_, err := handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0], euiccPublicKey, allowUnverifiedEUICCPackageResults)
 		return Response{}, err
 	}
-	return getEimPackageErrorResponse(getEimPackageErrorNoPackage)
+	notifications, err := notificationsFromHandleNotification(tlv)
+	if err != nil {
+		return Response{}, err
+	}
+	for _, notification := range notifications {
+		if err := store.StoreNotification(ctx, tenantID, notification); err != nil {
+			return Response{}, err
+		}
+	}
+	return Response{}, nil
+}
+
+func recordNotificationsFromList(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, tlv *bertlv.TLV) ([]protocolasn1.SequenceNumber, error) {
+	if tlv == nil {
+		return nil, nil
+	}
+	if !tlv.Tag.Equal(tagNotificationList) {
+		return nil, fmt.Errorf("esipa: notification list has tag %s", tlv.Tag.String())
+	}
+	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(tlv.Children))
+	for _, child := range tlv.Children {
+		notification, err := notificationFromTLV(eid, child)
+		if err != nil {
+			return nil, err
+		}
+		if err := store.StoreNotification(ctx, tenantID, notification); err != nil {
+			return nil, err
+		}
+		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(notification.SequenceNumber))
+	}
+	return sequenceNumbers, nil
+}
+
+func notificationsFromHandleNotification(tlv *bertlv.TLV) ([]storage.Notification, error) {
+	if tlv == nil {
+		return nil, errors.New("esipa: missing HandleNotificationEsipa")
+	}
+	if len(tlv.Children) != 1 {
+		return nil, errors.New("esipa: HandleNotificationEsipa requires one selected child")
+	}
+	child := tlv.Children[0]
+	if child.Tag.Equal(tagNotificationList) && len(child.Children) == 1 && isPendingNotificationTLV(child.Children[0]) {
+		child = child.Children[0]
+	}
+	notification, err := notificationFromTLV("", child)
+	if err != nil {
+		return nil, err
+	}
+	return []storage.Notification{notification}, nil
+}
+
+func notificationFromTLV(eid string, tlv *bertlv.TLV) (storage.Notification, error) {
+	if tlv == nil {
+		return storage.Notification{}, errors.New("esipa: missing pending notification")
+	}
+	if eid == "" {
+		eid = eidFromNotification(tlv)
+	}
+	if eid == "" {
+		return storage.Notification{}, errors.New("esipa: pending notification does not identify an EID")
+	}
+	sequenceNumber, kind, err := notificationSequenceAndKind(tlv)
+	if err != nil {
+		return storage.Notification{}, err
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	payload, err := tlv.MarshalBinary()
+	if err != nil {
+		return storage.Notification{}, err
+	}
+	return storage.Notification{
+		EID:            eid,
+		SequenceNumber: sequenceNumber,
+		Kind:           kind,
+		Payload:        payload,
+	}, nil
+}
+
+func notificationSequenceAndKind(tlv *bertlv.TLV) (int64, string, error) {
+	if metadata := findNotificationMetadata(tlv); metadata != nil {
+		sequenceNumber, err := integerValue(metadata.First(bertlv.ContextSpecific.Primitive(0)))
+		if err != nil {
+			return 0, "", err
+		}
+		kind := notificationKindFromEvent(metadata.First(bertlv.ContextSpecific.Primitive(1)))
+		if kind == "" && tlv.Tag.Equal(tagProfileInstall) {
+			kind = "install"
+		}
+		return sequenceNumber, kind, nil
+	}
+	if tlv.Tag.Equal(tagNotificationList) {
+		sequenceNumber, err := compactProfileInstallationSequence(tlv)
+		if err != nil {
+			return 0, "", err
+		}
+		return sequenceNumber, "install", nil
+	}
+	return 0, "", errors.New("esipa: pending notification missing sequence number")
+}
+
+func findNotificationMetadata(tlv *bertlv.TLV) *bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	if tlv.Tag.Equal(tagNotificationMeta) {
+		return tlv
+	}
+	for _, child := range tlv.Children {
+		if found := findNotificationMetadata(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func compactProfileInstallationSequence(tlv *bertlv.TLV) (int64, error) {
+	if tlv == nil || len(tlv.Children) == 0 {
+		return 0, errors.New("esipa: compact profile-install notification missing data")
+	}
+	data := tlv.Children[0]
+	if !data.Tag.Equal(tagNotificationList) {
+		return 0, errors.New("esipa: compact profile-install notification missing compact data")
+	}
+	for _, child := range data.Children {
+		if child.Tag.Equal(tagInteger) {
+			return integerValue(child)
+		}
+	}
+	return 0, errors.New("esipa: compact profile-install notification missing sequence number")
+}
+
+func notificationKindFromEvent(tlv *bertlv.TLV) string {
+	if tlv == nil || len(tlv.Value) == 0 {
+		return ""
+	}
+	bits, err := bitStringBits(tlv.Value)
+	if err != nil {
+		return ""
+	}
+	kinds := []string{"install", "enable", "disable", "delete"}
+	for index, kind := range kinds {
+		if index < len(bits) && bits[index] {
+			return kind
+		}
+	}
+	return "unknown"
+}
+
+func bitStringBits(data []byte) ([]bool, error) {
+	if len(data) == 0 {
+		return nil, errors.New("esipa: BIT STRING missing unused-bit octet")
+	}
+	unusedBits := int(data[0])
+	if unusedBits > 7 || len(data) == 1 && unusedBits != 0 {
+		return nil, errors.New("esipa: invalid BIT STRING unused-bit count")
+	}
+	bitLength := (len(data)-1)*8 - unusedBits
+	bits := make([]bool, bitLength)
+	for index := range bitLength {
+		bits[index] = data[1+index/8]&(1<<(7-byte(index%8))) != 0
+	}
+	return bits, nil
+}
+
+func eidFromNotification(tlv *bertlv.TLV) string {
+	if tlv == nil {
+		return ""
+	}
+	if tlv.Tag.Equal(tagEID) && len(tlv.Value) == 16 {
+		return hex.EncodeToString(tlv.Value)
+	}
+	for _, child := range tlv.Children {
+		if eid := eidFromNotification(child); eid != "" {
+			return eid
+		}
+	}
+	return ""
+}
+
+func isPendingNotificationTLV(tlv *bertlv.TLV) bool {
+	if tlv == nil {
+		return false
+	}
+	return tlv.Tag.Equal(tagProfileInstall) ||
+		tlv.Tag.Equal(tagSequence) ||
+		tlv.Tag.Equal(tagNotificationList) ||
+		tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(1))
+}
+
+func appendAckSequences(existing []protocolasn1.SequenceNumber, additions ...protocolasn1.SequenceNumber) []protocolasn1.SequenceNumber {
+	for _, addition := range additions {
+		seen := false
+		for _, value := range existing {
+			if value == addition {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			existing = append(existing, addition)
+		}
+	}
+	return existing
 }
 
 func getEimPackageOperationResponse(operation storage.Operation) (*protocolasn1.GetEimPackageResponse, error) {
@@ -297,16 +592,13 @@ func recordEimPackageResult(
 		return recordIpaEuiccDataResponse(ctx, store, tenantID, eid, tlv, payload)
 	}
 	resultTLV := tlv
+	var notificationList *bertlv.TLV
 	if tlv.Tag.Equal(tagSequence) {
 		resultTLV = tlv.First(tagEuiccPackage)
 		if resultTLV == nil {
 			return nil, errors.New("esipa: EPRAndNotifications missing EuiccPackageResult")
 		}
-		if notification := tlv.First(tagNotificationList); notification != nil {
-			if err := storeNotification(ctx, store, tenantID, eid, "epr-notification-list", notification); err != nil {
-				return nil, err
-			}
-		}
+		notificationList = tlv.First(tagNotificationList)
 	}
 
 	var result protocolasn1.EuiccPackageResult
@@ -374,6 +666,11 @@ func recordEimPackageResult(
 		}
 		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
+	notificationSequences, err := recordNotificationsFromList(ctx, store, tenantID, eid, notificationList)
+	if err != nil {
+		return nil, err
+	}
+	sequenceNumbers = appendAckSequences(sequenceNumbers, notificationSequences...)
 	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
 }
 
@@ -415,9 +712,15 @@ func recordIpaEuiccDataResponse(
 			return nil, err
 		}
 	}
-	return &protocolasn1.EimAcknowledgements{
-		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)},
-	}, nil
+	sequenceNumbers := []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)}
+	if response.Data != nil {
+		notificationSequences, err := recordNotificationsFromList(ctx, store, tenantID, eid, response.Data.NotificationsRaw)
+		if err != nil {
+			return nil, err
+		}
+		sequenceNumbers = appendAckSequences(sequenceNumbers, notificationSequences...)
+	}
+	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
 }
 
 func pendingIpaEuiccDataOperation(
@@ -774,21 +1077,6 @@ func eidKey(eid []byte) (string, *protocolasn1.EimPackageResultErrorCode) {
 		code := getEimPackageErrorInvalidEID
 		return "", &code
 	}
-}
-
-func storeNotification(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, kind string, tlv *bertlv.TLV) error {
-	if eid == "" {
-		return nil
-	}
-	payload, err := tlv.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	return store.StoreNotification(ctx, tenantID, storage.Notification{
-		EID:     eid,
-		Kind:    kind,
-		Payload: payload,
-	})
 }
 
 func ensureDeviceKnown(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string) error {

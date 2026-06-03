@@ -107,7 +107,10 @@ func cleanLoadDatabase(t testing.TB, ctx context.Context, dsn string) {
 	}
 	defer pool.Close()
 	_, err = pool.Exec(ctx, `
+		DROP INDEX IF EXISTS notifications_sequence_idx;
+		DROP INDEX IF EXISTS notifications_device_idx;
 		DROP TABLE IF EXISTS notifications;
+		DROP TABLE IF EXISTS euicc_state;
 		DROP TABLE IF EXISTS associated_eim;
 		DROP TABLE IF EXISTS eim_config;
 		DROP TABLE IF EXISTS operation_results;

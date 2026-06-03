@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/esipa"
 	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
@@ -62,6 +63,54 @@ func TestRunnerCompletesProfileDownloadTrigger(t *testing.T) {
 	}
 	if !state.IsEnabled || state.SMDPAddress != "smdpp.test.rsp.sysmocom.de" {
 		t.Fatalf("profile state = %#v, want enabled sysmocom profile", state)
+	}
+	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eid)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 || notifications[0].Kind != "install" || notifications[0].SequenceNumber != 1 {
+		t.Fatalf("notifications = %#v, want install sequence 1", notifications)
+	}
+}
+
+func TestRunnerNotificationAcknowledgementClearsOnlyAckedSequences(t *testing.T) {
+	t.Parallel()
+
+	eidBytes, err := hex.DecodeString("89049032000000000000000000000003")
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+	runner := Runner{EID: eidBytes}
+	first := runner.queueNotification("enable")
+	second := runner.queueNotification("disable")
+
+	pending := runner.pendingNotificationTLVs()
+	if len(pending) != 2 {
+		t.Fatalf("pending notifications before ack = %d, want 2", len(pending))
+	}
+
+	runner.acknowledgeNotifications(&protocolasn1.EimAcknowledgements{
+		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(first.SequenceNumber)},
+	})
+	pending = runner.pendingNotificationTLVs()
+	if len(pending) != 1 || runner.pendingNotifications[0].SequenceNumber != second.SequenceNumber {
+		t.Fatalf("pending after first ack = %#v, want only sequence %d", runner.pendingNotifications, second.SequenceNumber)
+	}
+
+	runner.acknowledgeNotifications(&protocolasn1.EimAcknowledgements{
+		SequenceNumbers: []protocolasn1.SequenceNumber{99},
+	})
+	pending = runner.pendingNotificationTLVs()
+	if len(pending) != 1 || runner.pendingNotifications[0].SequenceNumber != second.SequenceNumber {
+		t.Fatalf("pending after unrelated ack = %#v, want sequence %d still available", runner.pendingNotifications, second.SequenceNumber)
+	}
+
+	runner.acknowledgeNotifications(&protocolasn1.EimAcknowledgements{
+		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(second.SequenceNumber)},
+	})
+	pending = runner.pendingNotificationTLVs()
+	if len(pending) != 0 {
+		t.Fatalf("pending after all acked = %d, want 0", len(pending))
 	}
 }
 

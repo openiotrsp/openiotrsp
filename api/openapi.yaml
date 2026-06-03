@@ -407,6 +407,26 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /devices/{eid}/notifications:
+    get:
+      tags:
+        - Devices
+      operationId: listDeviceNotifications
+      summary: Read stored notification history for one EID.
+      description: Returns the eIM persisted notification log, keyed by eUICC notification sequence number.
+      parameters:
+        - $ref: "#/components/parameters/EID"
+      responses:
+        "200":
+          description: Device notifications.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationsResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /operations/{id}:
     get:
       tags:
@@ -734,6 +754,43 @@ components:
           enum:
             - done
             - failed
+        payloadBase64:
+          type: string
+          format: byte
+        createdAt:
+          type: string
+          format: date-time
+    NotificationsResponse:
+      type: object
+      required:
+        - eid
+        - notifications
+      properties:
+        eid:
+          type: string
+        notifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/Notification"
+    Notification:
+      type: object
+      required:
+        - sequenceNumber
+        - kind
+        - payloadBase64
+        - createdAt
+      properties:
+        sequenceNumber:
+          type: integer
+          format: int64
+        kind:
+          type: string
+          enum:
+            - install
+            - enable
+            - disable
+            - delete
+            - unknown
         payloadBase64:
           type: string
           format: byte

@@ -21,6 +21,15 @@ type Runner struct {
 	PollInterval time.Duration
 	Once         bool
 	Logger       *slog.Logger
+
+	NextNotificationSequence int64
+
+	pendingNotifications []pendingNotification
+}
+
+type pendingNotification struct {
+	SequenceNumber int64
+	TLV            *bertlv.TLV
 }
 
 // Run starts the mock IPA polling loop.
@@ -56,7 +65,7 @@ func (r Runner) Run(ctx context.Context) error {
 	}
 }
 
-func (r Runner) pollOnce(ctx context.Context, downloader Downloader, logger *slog.Logger) error {
+func (r *Runner) pollOnce(ctx context.Context, downloader Downloader, logger *slog.Logger) error {
 	poll, err := r.Client.Poll(ctx, r.EID)
 	if err != nil {
 		return err
@@ -77,7 +86,7 @@ func (r Runner) pollOnce(ctx context.Context, downloader Downloader, logger *slo
 	}
 }
 
-func (r Runner) handleIpaEuiccDataRequest(
+func (r *Runner) handleIpaEuiccDataRequest(
 	ctx context.Context,
 	logger *slog.Logger,
 	tlv *bertlv.TLV,
@@ -97,7 +106,7 @@ func (r Runner) handleIpaEuiccDataRequest(
 	return nil
 }
 
-func (r Runner) handleEUICCPackage(
+func (r *Runner) handleEUICCPackage(
 	ctx context.Context,
 	logger *slog.Logger,
 	request *protocolasn1.EuiccPackageRequest,
@@ -106,14 +115,24 @@ func (r Runner) handleEUICCPackage(
 	if err != nil {
 		return err
 	}
-	if err := r.Client.UploadEUICCPackageResult(ctx, r.EID, result); err != nil {
-		return err
+	if notificationKind := notificationKindForOperation(operation); notificationKind != "" {
+		r.queueNotification(notificationKind)
+		ack, err := r.Client.UploadEUICCPackageResultWithNotifications(ctx, r.EID, result, r.pendingNotificationTLVs())
+		if err != nil {
+			return err
+		}
+		r.acknowledgeNotifications(ack)
+		logger.Info("eUICC package notification acknowledged", "eid", hex.EncodeToString(r.EID), "operation", operation, "acknowledged", ack.SequenceNumbers)
+	} else {
+		if err := r.Client.UploadEUICCPackageResult(ctx, r.EID, result); err != nil {
+			return err
+		}
 	}
 	logger.Info("eUICC package operation complete", "eid", hex.EncodeToString(r.EID), "operation", operation)
 	return nil
 }
 
-func (r Runner) handleProfileDownloadTrigger(
+func (r *Runner) handleProfileDownloadTrigger(
 	ctx context.Context,
 	downloader Downloader,
 	logger *slog.Logger,
@@ -137,6 +156,11 @@ func (r Runner) handleProfileDownloadTrigger(
 	if err := r.Client.UploadProfileDownloadResult(ctx, r.EID, SuccessfulProfileDownloadResult(trigger.EimTransactionID)); err != nil {
 		return err
 	}
+	notification := r.queueNotification("install")
+	if err := r.Client.SendNotification(ctx, notification.TLV); err != nil {
+		return err
+	}
+	r.clearNotification(notification.SequenceNumber)
 	logger.Info(
 		"trigger->download->enable complete",
 		"eid", hex.EncodeToString(r.EID),
@@ -146,6 +170,67 @@ func (r Runner) handleProfileDownloadTrigger(
 		"offlineStub", result.Offline,
 	)
 	return nil
+}
+
+func (r *Runner) queueNotification(kind string) pendingNotification {
+	sequenceNumber := r.nextNotificationSequence()
+	notification := pendingNotification{
+		SequenceNumber: sequenceNumber,
+		TLV:            Notification(r.EID, sequenceNumber, kind),
+	}
+	r.pendingNotifications = append(r.pendingNotifications, notification)
+	return notification
+}
+
+func (r *Runner) pendingNotificationTLVs() []*bertlv.TLV {
+	notifications := make([]*bertlv.TLV, 0, len(r.pendingNotifications))
+	for _, notification := range r.pendingNotifications {
+		if notification.TLV != nil {
+			notifications = append(notifications, notification.TLV.Clone())
+		}
+	}
+	return notifications
+}
+
+func (r *Runner) acknowledgeNotifications(ack *protocolasn1.EimAcknowledgements) {
+	if ack == nil || len(ack.SequenceNumbers) == 0 {
+		return
+	}
+	acknowledged := make(map[int64]bool, len(ack.SequenceNumbers))
+	for _, sequenceNumber := range ack.SequenceNumbers {
+		acknowledged[int64(sequenceNumber)] = true
+	}
+	pending := r.pendingNotifications[:0]
+	for _, notification := range r.pendingNotifications {
+		if !acknowledged[notification.SequenceNumber] {
+			pending = append(pending, notification)
+		}
+	}
+	r.pendingNotifications = pending
+}
+
+func (r *Runner) clearNotification(sequenceNumber int64) {
+	r.acknowledgeNotifications(&protocolasn1.EimAcknowledgements{
+		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(sequenceNumber)},
+	})
+}
+
+func (r *Runner) nextNotificationSequence() int64 {
+	if r.NextNotificationSequence <= 0 {
+		r.NextNotificationSequence = 1
+	}
+	sequenceNumber := r.NextNotificationSequence
+	r.NextNotificationSequence++
+	return sequenceNumber
+}
+
+func notificationKindForOperation(operation string) string {
+	switch operation {
+	case "enable", "disable", "delete":
+		return operation
+	default:
+		return ""
+	}
 }
 
 // IpaEuiccDataResponse builds representative eUICC/IPA data for the mock IPA.

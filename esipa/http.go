@@ -41,27 +41,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("read ESipa request: %v", err), http.StatusBadRequest)
 		return
 	}
-	responsePayload, err := h.handleEncoded(r.Context(), payload)
+	encoded, err := h.handleEncodedResponse(r.Context(), payload)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("handle ESipa request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if encoded.NoContent {
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.Header().Set("Content-Type", MediaType)
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(responsePayload)
+	_, _ = w.Write(encoded.Payload)
 }
 
 func (h *Handler) handleEncoded(ctx context.Context, payload []byte) ([]byte, error) {
+	encoded, err := h.handleEncodedResponse(ctx, payload)
+	if err != nil || encoded.NoContent {
+		return nil, err
+	}
+	return encoded.Payload, nil
+}
+
+type encodedResponse struct {
+	Payload   []byte
+	NoContent bool
+}
+
+func (h *Handler) handleEncodedResponse(ctx context.Context, payload []byte) (encodedResponse, error) {
 	request, err := DecodeRequest(payload)
 	if err != nil {
-		return nil, err
+		return encodedResponse{}, err
 	}
 	response, err := h.handle(ctx, request)
 	if err != nil {
-		return nil, err
+		return encodedResponse{}, err
 	}
-	return EncodeResponse(response)
+	if response.Message.Raw == nil {
+		return encodedResponse{NoContent: true}, nil
+	}
+	encoded, err := EncodeResponse(response)
+	if err != nil {
+		return encodedResponse{}, err
+	}
+	return encodedResponse{Payload: encoded}, nil
 }
 
 func (h *Handler) path() string {

@@ -582,13 +582,62 @@ func (s *Store) ListAssociatedEIMs(ctx context.Context, tenantID storage.TenantI
 // StoreNotification stores an encoded device notification.
 func (s *Store) StoreNotification(ctx context.Context, tenantID storage.TenantID, notification storage.Notification) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO notifications (tenant_id, eid, kind, payload)
-		VALUES ($1, $2, $3, $4)
-	`, tenantString(tenantID), notification.EID, notification.Kind, notification.Payload)
+		INSERT INTO notifications (tenant_id, eid, sequence_number, kind, payload)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (tenant_id, eid, sequence_number)
+		DO UPDATE SET kind = EXCLUDED.kind, payload = EXCLUDED.payload
+	`, tenantString(tenantID), notification.EID, notification.SequenceNumber, notification.Kind, notification.Payload)
 	if isForeignKeyViolation(err) {
 		return storage.ErrNotFound
 	}
 	return err
+}
+
+// ListNotifications reads stored notifications for one eUICC in sequence order.
+func (s *Store) ListNotifications(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.Notification, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT eid, sequence_number, kind, payload, created_at
+		FROM notifications
+		WHERE tenant_id = $1 AND eid = $2
+		ORDER BY sequence_number
+	`, tenantString(tenantID), eid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]storage.Notification, 0)
+	for rows.Next() {
+		var notification storage.Notification
+		if err := rows.Scan(
+			&notification.EID,
+			&notification.SequenceNumber,
+			&notification.Kind,
+			&notification.Payload,
+			&notification.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, cloneNotification(notification))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		var exists bool
+		err = s.pool.QueryRow(ctx, `
+			SELECT true
+			FROM devices
+			WHERE tenant_id = $1 AND eid = $2
+		`, tenantString(tenantID), eid).Scan(&exists)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, storage.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
 }
 
 func rollback(ctx context.Context, tx pgx.Tx) {
@@ -646,6 +695,11 @@ func cloneEUICCState(state storage.EUICCState) storage.EUICCState {
 		state.CertificateIdentifiers = append([]string(nil), state.CertificateIdentifiers...)
 	}
 	return state
+}
+
+func cloneNotification(notification storage.Notification) storage.Notification {
+	notification.Payload = cloneBytes(notification.Payload)
+	return notification
 }
 
 func cloneBytes(value []byte) []byte {

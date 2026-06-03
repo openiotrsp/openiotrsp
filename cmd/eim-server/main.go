@@ -18,6 +18,7 @@ import (
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	appruntime "github.com/openiotrsp/openiotrsp/internal/app/runtime"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
+	relaypkg "github.com/openiotrsp/openiotrsp/relay"
 	filesigner "github.com/openiotrsp/openiotrsp/signing/file"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
@@ -82,6 +83,7 @@ func run(logger *slog.Logger) error {
 	handler := esipa.NewHandler(store, storage.DefaultTenantID)
 	handler.EUICCPublicKey = euiccPublicKey
 	handler.AllowUnverifiedEUICCPackageResults = cfg.allowUnverifiedEUICCResults
+	handler.Relay = relaypkg.New(relaypkg.HTTPTransport{})
 	mux.HandleFunc(esipa.DefaultPath, handler.ServeHTTP)
 	mux.Handle("/v1/", api.NewHTTPHandler(store, api.DefaultTenantResolver{}, packageService))
 	mux.Handle("/healthz", appruntime.HealthHandler("eim-server", started))

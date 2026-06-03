@@ -280,6 +280,9 @@ func (d *IpaEuiccData) marshal() (*bertlv.TLV, error) {
 	if d.DefaultSMDPAddress != nil {
 		children = append(children, utf8TLV(bertlv.ContextSpecific.Primitive(1), *d.DefaultSMDPAddress))
 	}
+	if d.NotificationsRaw != nil {
+		children = append(children, rawChild(d.NotificationsRaw))
+	}
 	if d.EuiccPackageResultRaw != nil {
 		children = append(children, rawChild(d.EuiccPackageResultRaw))
 	}
@@ -326,6 +329,8 @@ func (d *IpaEuiccData) unmarshal(tlv *bertlv.TLV) error {
 		switch {
 		case child.Tag.Equal(tagEID):
 			out.EID, err = octetValue(child)
+		case child.Tag.Equal(bertlv.ContextSpecific.Constructed(0)):
+			out.NotificationsRaw = cloneTLV(child)
 		case child.Tag.Equal(bertlv.ContextSpecific.Primitive(1)):
 			value, valueErr := utf8Value(child)
 			err = valueErr

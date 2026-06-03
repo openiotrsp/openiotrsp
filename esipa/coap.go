@@ -65,11 +65,16 @@ func (h *Handler) ServeCoAP(w mux.ResponseWriter, r *mux.Message) {
 			return
 		}
 	}
-	responsePayload, err := h.handleEncoded(r.Context(), payload)
+	encoded, err := h.handleEncodedResponse(r.Context(), payload)
 	if err != nil {
 		_ = w.SetResponse(codes.BadRequest, message.TextPlain, strings.NewReader(fmt.Sprintf("handle ESipa request: %v", err)))
 		return
 	}
+	if encoded.NoContent {
+		_ = w.SetResponse(codes.Changed, message.AppOctets, nil)
+		return
+	}
+	responsePayload := encoded.Payload
 	if cacheKey != "" {
 		h.cacheBlockwiseResponse(cacheKey, responsePayload)
 	}

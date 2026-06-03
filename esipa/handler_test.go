@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/damonto/euicc-go/bertlv"
+	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/pki"
@@ -51,7 +52,7 @@ type scenarioObservation struct {
 }
 
 func handleUnverified(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request) (Response, error) {
-	return handle(ctx, store, tenantID, request, nil, true)
+	return handle(ctx, store, tenantID, request, nil, true, nil)
 }
 
 func TestSGP33ESipaTransportParity(t *testing.T) {
@@ -586,6 +587,119 @@ func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 	}
 }
 
+func TestProvideEimPackageResultPersistsAndAcknowledgesNotifications(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x63)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)),
+	}); err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	resultTLV := mustTLV(t, sampleEuiccPackageResult(1))
+	notification := samplePendingNotification(t, eid, 17, "enable")
+	resultAndNotifications := bertlv.NewChildren(tagSequence,
+		resultTLV,
+		bertlv.NewChildren(tagNotificationList, notification),
+	)
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: resultAndNotifications,
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(ProvideEimPackageResult with notification) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1, 17}) {
+		t.Fatalf("ack = %v, want [1 17]", ack.SequenceNumbers)
+	}
+
+	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eidKey)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 || notifications[0].SequenceNumber != 17 || notifications[0].Kind != "enable" {
+		t.Fatalf("notifications = %#v, want one enable notification with sequence 17", notifications)
+	}
+
+	resultResponse, err = handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: resultAndNotifications,
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(redelivered notification) error = %v", err)
+	}
+	ack = decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1, 17}) {
+		t.Fatalf("redelivery ack = %v, want [1 17]", ack.SequenceNumbers)
+	}
+	notifications, err = store.ListNotifications(ctx, storage.DefaultTenantID, eidKey)
+	if err != nil {
+		t.Fatalf("ListNotifications(after redelivery) error = %v", err)
+	}
+	if len(notifications) != 1 {
+		t.Fatalf("notifications after redelivery = %#v, want idempotent single record", notifications)
+	}
+}
+
+func TestHandleNotificationHTTPReturns204AndPersists(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x64)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	server := httptest.NewServer(NewHandler(store, storage.DefaultTenantID).HTTPHandler())
+	defer server.Close()
+
+	payload := encode(t, &protocolasn1.ESipaMessageFromIpaToEim{
+		Raw: bertlv.NewChildren(tagHandleNotify,
+			bertlv.NewChildren(tagNotificationList, samplePendingNotification(t, eid, 22, "delete")),
+		),
+	})
+	response, err := server.Client().Post(server.URL+DefaultPath, MediaType, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST HandleNotification error = %v", err)
+	}
+	defer func() {
+		_ = response.Body.Close()
+	}()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if response.StatusCode != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("HandleNotification response = %s body %x, want empty 204", response.Status, body)
+	}
+	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eidKey)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 || notifications[0].SequenceNumber != 22 || notifications[0].Kind != "delete" {
+		t.Fatalf("notifications = %#v, want delete sequence 22", notifications)
+	}
+}
+
 func TestEmptyPollReturnsNoPackageAvailable(t *testing.T) {
 	t.Parallel()
 
@@ -1052,6 +1166,52 @@ func sampleEuiccPackageResultForTag(sequence int64, resultTag uint64, resultCode
 			EuiccSignEPR: []byte{0x30, 0x03, 0x02, 0x01, 0x02},
 		},
 	}
+}
+
+func samplePendingNotification(t *testing.T, eid []byte, sequenceNumber int64, kind string) *bertlv.TLV {
+	t.Helper()
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(1),
+		bertlv.NewValue(tagEID, cloneBytes(eid)),
+		bertlv.NewChildren(tagNotificationMeta,
+			mustTestIntegerTLV(t, bertlv.ContextSpecific.Primitive(0), sequenceNumber),
+			mustTestBitStringTLV(t, bertlv.ContextSpecific.Primitive(1), notificationEventBits(kind)),
+			bertlv.NewValue(bertlv.Universal.Primitive(12), []byte("notification.openiotrsp.local")),
+		),
+		bertlv.NewValue(bertlv.Application.Primitive(55), []byte{0x30, 0x00}),
+	)
+}
+
+func notificationEventBits(kind string) []bool {
+	bits := make([]bool, 4)
+	switch kind {
+	case "install":
+		bits[0] = true
+	case "enable":
+		bits[1] = true
+	case "disable":
+		bits[2] = true
+	case "delete":
+		bits[3] = true
+	}
+	return bits
+}
+
+func mustTestIntegerTLV(t *testing.T, tag bertlv.Tag, value int64) *bertlv.TLV {
+	t.Helper()
+	tlv, err := bertlv.MarshalValue(tag, primitive.MarshalInt(value))
+	if err != nil {
+		t.Fatalf("MarshalValue(INTEGER) error = %v", err)
+	}
+	return tlv
+}
+
+func mustTestBitStringTLV(t *testing.T, tag bertlv.Tag, bits []bool) *bertlv.TLV {
+	t.Helper()
+	tlv, err := bertlv.MarshalValue(tag, primitive.MarshalBitString(bits))
+	if err != nil {
+		t.Fatalf("MarshalValue(BIT STRING) error = %v", err)
+	}
+	return tlv
 }
 
 func sampleIpaEuiccDataResponse(t *testing.T, eid []byte, transactionID []byte) *protocolasn1.IpaEuiccDataResponse {

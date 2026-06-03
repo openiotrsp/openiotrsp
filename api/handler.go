@@ -69,6 +69,7 @@ func (h *Handler) HTTPHandler() http.Handler {
 	mux.HandleFunc("POST /v1/devices/{eid}/euicc-data/fetch", h.fetchEUICCData)
 	mux.HandleFunc("GET /v1/devices/{eid}/euicc-data", h.euiccData)
 	mux.HandleFunc("GET /v1/devices/{eid}/status", h.deviceStatus)
+	mux.HandleFunc("GET /v1/devices/{eid}/notifications", h.deviceNotifications)
 	mux.HandleFunc("GET /v1/operations/{id}", h.operationResult)
 	return mux
 }
@@ -191,6 +192,18 @@ type resultResponse struct {
 	Status        string    `json:"status"`
 	PayloadBase64 string    `json:"payloadBase64"`
 	CreatedAt     time.Time `json:"createdAt"`
+}
+
+type notificationResponse struct {
+	SequenceNumber int64     `json:"sequenceNumber"`
+	Kind           string    `json:"kind"`
+	PayloadBase64  string    `json:"payloadBase64"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+type notificationsResponse struct {
+	EID           string                 `json:"eid"`
+	Notifications []notificationResponse `json:"notifications"`
 }
 
 type operationResultResponse struct {
@@ -617,6 +630,36 @@ func (h *Handler) deviceStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, statusResponse{EID: eid, Profiles: profiles})
+}
+
+func (h *Handler) deviceNotifications(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := h.resolveTenant(w, r)
+	if !ok {
+		return
+	}
+	eid, _, err := parseEID(r.PathValue("eid"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	notifications, err := h.Store.ListNotifications(r.Context(), tenantID, eid)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	response := notificationsResponse{
+		EID:           eid,
+		Notifications: make([]notificationResponse, 0, len(notifications)),
+	}
+	for _, notification := range notifications {
+		response.Notifications = append(response.Notifications, notificationResponse{
+			SequenceNumber: notification.SequenceNumber,
+			Kind:           notification.Kind,
+			PayloadBase64:  base64.StdEncoding.EncodeToString(notification.Payload),
+			CreatedAt:      notification.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *Handler) eimStatus(w http.ResponseWriter, r *http.Request) {

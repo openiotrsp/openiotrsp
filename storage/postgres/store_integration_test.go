@@ -34,12 +34,14 @@ func TestMigrationRoundTrip(t *testing.T) {
 	runMigration(t, dsn, func(migration *migrate.Migrate) error {
 		return migration.Up()
 	})
+	assertMigrationVersion(t, dsn, 5, false)
 	runMigration(t, dsn, func(migration *migrate.Migrate) error {
 		return migration.Down()
 	})
 	runMigration(t, dsn, func(migration *migrate.Migrate) error {
 		return migration.Up()
 	})
+	assertMigrationVersion(t, dsn, 5, false)
 }
 
 func TestStoreConformance(t *testing.T) {
@@ -412,6 +414,8 @@ func cleanDatabase(t testing.TB, dsn string) {
 	defer pool.Close()
 
 	_, err = pool.Exec(ctx, `
+		DROP INDEX IF EXISTS notifications_sequence_idx;
+		DROP INDEX IF EXISTS notifications_device_idx;
 		DROP TABLE IF EXISTS notifications;
 		DROP TABLE IF EXISTS euicc_state;
 		DROP TABLE IF EXISTS associated_eim;
@@ -425,6 +429,25 @@ func cleanDatabase(t testing.TB, dsn string) {
 	`)
 	if err != nil {
 		t.Fatalf("clean database error = %v", err)
+	}
+}
+
+func assertMigrationVersion(t testing.TB, dsn string, wantVersion int, wantDirty bool) {
+	t.Helper()
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New() error = %v", err)
+	}
+	defer pool.Close()
+
+	var version int
+	var dirty bool
+	if err := pool.QueryRow(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
+		t.Fatalf("query schema_migrations error = %v", err)
+	}
+	if version != wantVersion || dirty != wantDirty {
+		t.Fatalf("schema_migrations = version %d dirty %v, want version %d dirty %v", version, dirty, wantVersion, wantDirty)
 	}
 }
 

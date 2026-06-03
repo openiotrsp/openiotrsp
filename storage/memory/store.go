@@ -21,7 +21,7 @@ type Store struct {
 	operations     map[int64]memoryOperation
 	results        map[resultKey]storage.EUICCPackageResult
 	eimConfigs     map[configKey]storage.EIMConfig
-	notifications  []storedNotification
+	notifications  map[notificationKey]storage.Notification
 
 	nextOperationID int64
 }
@@ -64,9 +64,10 @@ type configKey struct {
 	eimID    string
 }
 
-type storedNotification struct {
-	tenantID     storage.TenantID
-	notification storage.Notification
+type notificationKey struct {
+	tenantID       storage.TenantID
+	eid            string
+	sequenceNumber int64
 }
 
 // New returns an empty in-memory Store.
@@ -79,6 +80,7 @@ func New() *Store {
 		operations:      make(map[int64]memoryOperation),
 		results:         make(map[resultKey]storage.EUICCPackageResult),
 		eimConfigs:      make(map[configKey]storage.EIMConfig),
+		notifications:   make(map[notificationKey]storage.Notification),
 		nextOperationID: 1,
 	}
 }
@@ -517,15 +519,40 @@ func (s *Store) StoreNotification(ctx context.Context, tenantID storage.TenantID
 	if _, ok := s.devices[deviceKey{tenantID: tenantID, eid: notification.EID}]; !ok {
 		return storage.ErrNotFound
 	}
-	s.notifications = append(s.notifications, storedNotification{
-		tenantID: tenantID,
-		notification: storage.Notification{
-			EID:     notification.EID,
-			Kind:    notification.Kind,
-			Payload: cloneBytes(notification.Payload),
-		},
-	})
+	if notification.SequenceNumber <= 0 {
+		return storage.ErrNotFound
+	}
+	key := notificationKey{tenantID: tenantID, eid: notification.EID, sequenceNumber: notification.SequenceNumber}
+	if existing, ok := s.notifications[key]; ok {
+		notification.CreatedAt = existing.CreatedAt
+	}
+	if notification.CreatedAt.IsZero() {
+		notification.CreatedAt = time.Now().UTC()
+	}
+	s.notifications[key] = cloneNotification(notification)
 	return nil
+}
+
+// ListNotifications reads stored notifications for one eUICC in sequence order.
+func (s *Store) ListNotifications(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.Notification, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	deviceKey := newDeviceKey(tenantID, eid)
+	if _, ok := s.devices[deviceKey]; !ok {
+		return nil, storage.ErrNotFound
+	}
+	items := make([]storage.Notification, 0)
+	for key, notification := range s.notifications {
+		if key.tenantID == deviceKey.tenantID && key.eid == eid {
+			items = append(items, cloneNotification(notification))
+		}
+	}
+	sortNotifications(items)
+	return items, nil
 }
 
 func newDeviceKey(tenantID storage.TenantID, eid string) deviceKey {
@@ -559,6 +586,14 @@ func sortProfileStates(states []storage.ProfileState) {
 func sortAssociatedEIMs(items []storage.AssociatedEIM) {
 	for i := 1; i < len(items); i++ {
 		for j := i; j > 0 && items[j-1].EIMID > items[j].EIMID; j-- {
+			items[j-1], items[j] = items[j], items[j-1]
+		}
+	}
+}
+
+func sortNotifications(items []storage.Notification) {
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j-1].SequenceNumber > items[j].SequenceNumber; j-- {
 			items[j-1], items[j] = items[j], items[j-1]
 		}
 	}
@@ -606,6 +641,11 @@ func cloneEUICCState(state storage.EUICCState) storage.EUICCState {
 		state.CertificateIdentifiers = append([]string(nil), state.CertificateIdentifiers...)
 	}
 	return state
+}
+
+func cloneNotification(notification storage.Notification) storage.Notification {
+	notification.Payload = cloneBytes(notification.Payload)
+	return notification
 }
 
 func cloneBytes(value []byte) []byte {

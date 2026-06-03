@@ -141,9 +141,11 @@ type AssociatedEIM struct {
 
 // Notification is an encoded notification emitted by an IPA/eUICC.
 type Notification struct {
-	EID     string
-	Kind    string
-	Payload []byte
+	EID            string
+	SequenceNumber int64
+	Kind           string
+	Payload        []byte
+	CreatedAt      time.Time
 }
 
 // Store is the tenant-scoped persistence contract used by protocol logic. Every
@@ -170,6 +172,7 @@ type Store interface {
 	GetAssociatedEIM(ctx context.Context, tenantID TenantID, eid string, eimID string) (AssociatedEIM, error)
 	ListAssociatedEIMs(ctx context.Context, tenantID TenantID, eid string) ([]AssociatedEIM, error)
 	StoreNotification(ctx context.Context, tenantID TenantID, notification Notification) error
+	ListNotifications(ctx context.Context, tenantID TenantID, eid string) ([]Notification, error)
 }
 
 // NormalizeTenantID maps the open source empty tenant path to DefaultTenantID.
