@@ -708,14 +708,6 @@ func sampleEuiccPackageResult() *EuiccPackageResult {
 	}
 }
 
-func (a *EimAcknowledgements) mustTLV() *bertlv.TLV {
-	tlv, err := a.MarshalBERTLV()
-	if err != nil {
-		panic(err)
-	}
-	return tlv
-}
-
 func stringPtr(value string) *string {
 	return &value
 }

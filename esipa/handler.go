@@ -47,7 +47,6 @@ var (
 	errUnsupportedMessage    = errors.New("esipa: unsupported IPA-to-eIM message")
 	errMissingEUICCPublicKey = errors.New("esipa: eUICC public key resolver is required")
 
-	tagInteger          = bertlv.Universal.Primitive(2)
 	tagSequence         = bertlv.Universal.Constructed(16)
 	tagEID              = bertlv.Application.Primitive(26)
 	tagEuiccPackage     = bertlv.ContextSpecific.Constructed(81)
@@ -1008,10 +1007,6 @@ func parseOneTLV(data []byte) (*bertlv.TLV, error) {
 		return nil, errors.New("esipa: trailing data after BER-TLV object")
 	}
 	return tlv, nil
-}
-
-func integerTLV(value protocolasn1.EimPackageResultErrorCode) (*bertlv.TLV, error) {
-	return bertlv.MarshalValue(tagInteger, primitive.MarshalInt(value))
 }
 
 func integerValue(tlv *bertlv.TLV) (int64, error) {
