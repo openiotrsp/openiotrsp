@@ -24,6 +24,8 @@ var (
 	tagProfileInfo         = bertlv.Private.Constructed(3)
 	tagProfileState        = bertlv.ContextSpecific.Primitive(112)
 	tagFallbackAttribute   = bertlv.ContextSpecific.Primitive(38)
+	tagNotificationList    = bertlv.ContextSpecific.Constructed(0)
+	tagNotificationMeta    = bertlv.ContextSpecific.Constructed(47)
 	tagProfileInstall      = bertlv.ContextSpecific.Constructed(55)
 	tagProfileInstallData  = bertlv.ContextSpecific.Constructed(39)
 	tagProfileFinalResult  = bertlv.ContextSpecific.Constructed(2)

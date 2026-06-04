@@ -90,20 +90,46 @@ func ApplyResponse(ctx context.Context, store storage.Store, tenantID storage.Te
 	if err := store.SetEUICCState(ctx, tenantID, state); err != nil {
 		return err
 	}
-	for _, profile := range response.Data.Profiles {
+	return syncProfileInventory(ctx, store, tenantID, eid, response.Data)
+}
+
+func syncProfileInventory(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, data *protocolasn1.IpaEuiccData) error {
+	if data == nil || !data.ProfileInfoListPresent && len(data.Profiles) == 0 {
+		return nil
+	}
+	existing, err := store.ListProfileStates(ctx, tenantID, eid)
+	if err != nil {
+		return err
+	}
+	existingByICCID := make(map[string]storage.ProfileState, len(existing))
+	for _, state := range existing {
+		existingByICCID[state.ICCID] = state
+	}
+	seen := make(map[string]bool, len(data.Profiles))
+	for _, profile := range data.Profiles {
 		if len(profile.ICCID) == 0 {
 			continue
 		}
+		iccid := hex.EncodeToString(profile.ICCID)
+		seen[iccid] = true
 		enabled := false
 		if profile.ProfileState != nil {
 			enabled = *profile.ProfileState == protocolasn1.ProfileStateEnabled
 		}
-		if err := store.SetProfileState(ctx, tenantID, storage.ProfileState{
-			EID:        eid,
-			ICCID:      hex.EncodeToString(profile.ICCID),
-			IsEnabled:  enabled,
-			IsFallback: profile.FallbackAttribute,
-		}); err != nil {
+		state := existingByICCID[iccid]
+		state.EID = eid
+		state.ICCID = iccid
+		state.IsEnabled = enabled
+		state.IsFallback = profile.FallbackAttribute
+		if err := store.SetProfileState(ctx, tenantID, state); err != nil {
+			return err
+		}
+	}
+	for _, state := range existing {
+		if seen[state.ICCID] {
+			continue
+		}
+		if err := store.DeleteProfileState(ctx, tenantID, eid, state.ICCID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
 	}

@@ -146,6 +146,7 @@ type ProfileDownloadError struct {
 // ProfileDownloadTriggerResult is SGP.32 ProfileDownloadTriggerResult, tag BF54.
 type ProfileDownloadTriggerResult struct {
 	EimTransactionID             []byte
+	ProfileInstallation          *ProfileInstallationResult
 	ProfileInstallationRaw       *bertlv.TLV
 	ProfileInstallationSucceeded *bool
 	Error                        *ProfileDownloadError
@@ -161,6 +162,12 @@ func (r *ProfileDownloadTriggerResult) MarshalBERTLV() (*bertlv.TLV, error) {
 		children = append(children, octetTLV(bertlv.ContextSpecific.Primitive(2), r.EimTransactionID))
 	}
 	switch {
+	case r.ProfileInstallation != nil:
+		installation, err := r.ProfileInstallation.MarshalBERTLV()
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, installation)
 	case r.ProfileInstallationRaw != nil:
 		if !r.ProfileInstallationRaw.Tag.Equal(tagProfileInstall) {
 			return nil, fmt.Errorf("%w: got %s, want %s", errUnexpectedTag, r.ProfileInstallationRaw.Tag.String(), tagProfileInstall.String())
@@ -192,11 +199,14 @@ func (r *ProfileDownloadTriggerResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 		return errors.New("asn1: missing ProfileDownloadTriggerResult data")
 	case child.Tag.Equal(tagProfileInstall):
 		out.ProfileInstallationRaw = cloneTLV(child)
-		succeeded, err := profileInstallationSucceeded(child)
-		if err != nil {
+		out.ProfileInstallation = new(ProfileInstallationResult)
+		if err := out.ProfileInstallation.UnmarshalBERTLV(child); err != nil {
 			return err
 		}
-		out.ProfileInstallationSucceeded = &succeeded
+		if out.ProfileInstallation.Data != nil && out.ProfileInstallation.Data.Succeeded != nil {
+			succeeded := *out.ProfileInstallation.Data.Succeeded
+			out.ProfileInstallationSucceeded = &succeeded
+		}
 	case child.Tag.Equal(tagSequence):
 		out.Error = new(ProfileDownloadError)
 		if err := out.Error.UnmarshalBERTLV(child); err != nil {
@@ -243,23 +253,356 @@ func (e *ProfileDownloadError) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	return nil
 }
 
-func profileInstallationSucceeded(tlv *bertlv.TLV) (bool, error) {
+// NotificationMetadata is the SGP.22 metadata embedded in SGP.32 pending notifications.
+type NotificationMetadata struct {
+	SequenceNumber      int64
+	ProfileManagement   []bool
+	NotificationAddress string
+	Raw                 *bertlv.TLV
+}
+
+// MarshalBERTLV encodes NotificationMetadata.
+func (m *NotificationMetadata) MarshalBERTLV() (*bertlv.TLV, error) {
+	if m == nil {
+		return nil, errors.New("asn1: nil NotificationMetadata")
+	}
+	sequence, err := integerTLV(bertlv.ContextSpecific.Primitive(0), m.SequenceNumber)
+	if err != nil {
+		return nil, err
+	}
+	children := []*bertlv.TLV{sequence}
+	if m.ProfileManagement != nil {
+		children = append(children, bitStringTLV(bertlv.ContextSpecific.Primitive(1), m.ProfileManagement))
+	}
+	if m.NotificationAddress != "" {
+		children = append(children, utf8TLV(tagUTF8, m.NotificationAddress))
+	}
+	return constructed(tagNotificationMeta, children...), nil
+}
+
+// UnmarshalBERTLV decodes NotificationMetadata.
+func (m *NotificationMetadata) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if err := expectTag(tlv, tagNotificationMeta); err != nil {
+		return err
+	}
+	var out NotificationMetadata
+	var err error
+	if out.SequenceNumber, err = integerValue[int64](tlv.First(bertlv.ContextSpecific.Primitive(0))); err != nil {
+		return err
+	}
+	if child := tlv.First(bertlv.ContextSpecific.Primitive(1)); child != nil {
+		out.ProfileManagement, err = bitStringValue(child)
+		if err != nil {
+			return err
+		}
+	}
+	if child := tlv.First(tagUTF8); child != nil {
+		out.NotificationAddress, err = utf8Value(child)
+		if err != nil {
+			return err
+		}
+	}
+	out.Raw = cloneTLV(tlv)
+	*m = out
+	return nil
+}
+
+// Kind returns the OpenIoTRSP notification kind mapped from NotificationEvent.
+func (m *NotificationMetadata) Kind() string {
+	if m == nil {
+		return ""
+	}
+	kinds := []string{"install", "enable", "disable", "delete"}
+	for index, kind := range kinds {
+		if index < len(m.ProfileManagement) && m.ProfileManagement[index] {
+			return kind
+		}
+	}
+	if len(m.ProfileManagement) > 0 {
+		return "unknown"
+	}
+	return ""
+}
+
+// ProfileInstallationResult is SGP.32/SGP.22 ProfileInstallationResult, tag BF37.
+type ProfileInstallationResult struct {
+	Data      *ProfileInstallationResultData
+	Signature []byte
+	Raw       *bertlv.TLV
+}
+
+// MarshalBERTLV encodes ProfileInstallationResult.
+func (r *ProfileInstallationResult) MarshalBERTLV() (*bertlv.TLV, error) {
+	if r == nil {
+		return nil, errors.New("asn1: nil ProfileInstallationResult")
+	}
+	if r.Raw != nil {
+		return cloneTLV(r.Raw), nil
+	}
+	if r.Data == nil {
+		return nil, errors.New("asn1: missing ProfileInstallationResultData")
+	}
+	data, err := r.Data.MarshalBERTLV()
+	if err != nil {
+		return nil, err
+	}
+	children := []*bertlv.TLV{data}
+	if r.Signature != nil {
+		children = append(children, octetTLV(tagSignature, r.Signature))
+	}
+	return constructed(tagProfileInstall, children...), nil
+}
+
+// UnmarshalBERTLV decodes ProfileInstallationResult.
+func (r *ProfileInstallationResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if err := expectTag(tlv, tagProfileInstall); err != nil {
-		return false, err
+		return err
 	}
-	data := tlv.First(tagProfileInstallData)
-	if data == nil {
-		return false, errors.New("asn1: ProfileInstallationResult missing ProfileInstallationResultData")
+	var out ProfileInstallationResult
+	out.Raw = cloneTLV(tlv)
+	if data := tlv.First(tagProfileInstallData); data != nil {
+		out.Data = new(ProfileInstallationResultData)
+		if err := out.Data.UnmarshalBERTLV(data); err != nil {
+			return err
+		}
 	}
-	finalResult := data.First(tagProfileFinalResult)
+	if out.Data == nil {
+		return errors.New("asn1: ProfileInstallationResult missing ProfileInstallationResultData")
+	}
+	if child := tlv.First(tagSignature); child != nil {
+		signature, err := octetValue(child)
+		if err != nil {
+			return err
+		}
+		out.Signature = signature
+	}
+	*r = out
+	return nil
+}
+
+// ProfileInstallationResultData is SGP.32/SGP.22 ProfileInstallationResultData, tag BF27.
+type ProfileInstallationResultData struct {
+	TransactionID  []byte
+	Metadata       *NotificationMetadata
+	FinalResultRaw *bertlv.TLV
+	Succeeded      *bool
+	Raw            *bertlv.TLV
+}
+
+// MarshalBERTLV encodes ProfileInstallationResultData.
+func (d *ProfileInstallationResultData) MarshalBERTLV() (*bertlv.TLV, error) {
+	if d == nil {
+		return nil, errors.New("asn1: nil ProfileInstallationResultData")
+	}
+	if d.Raw != nil {
+		return cloneTLV(d.Raw), nil
+	}
+	var children []*bertlv.TLV
+	if d.TransactionID != nil {
+		children = append(children, octetTLV(bertlv.ContextSpecific.Primitive(0), d.TransactionID))
+	}
+	if d.Metadata != nil {
+		metadata, err := d.Metadata.MarshalBERTLV()
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, metadata)
+	}
+	if d.FinalResultRaw != nil {
+		children = append(children, cloneTLV(d.FinalResultRaw))
+	}
+	return constructed(tagProfileInstallData, children...), nil
+}
+
+// UnmarshalBERTLV decodes ProfileInstallationResultData.
+func (d *ProfileInstallationResultData) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if err := expectTag(tlv, tagProfileInstallData); err != nil {
+		return err
+	}
+	var out ProfileInstallationResultData
+	out.Raw = cloneTLV(tlv)
+	if child := tlv.First(bertlv.ContextSpecific.Primitive(0)); child != nil {
+		out.TransactionID = copyBytes(child.Value)
+	}
+	if child := tlv.First(tagNotificationMeta); child != nil {
+		out.Metadata = new(NotificationMetadata)
+		if err := out.Metadata.UnmarshalBERTLV(child); err != nil {
+			return err
+		}
+	}
+	finalResult := tlv.First(tagProfileFinalResult)
 	if finalResult == nil {
-		return false, errors.New("asn1: ProfileInstallationResultData missing finalResult")
+		return errors.New("asn1: ProfileInstallationResultData missing finalResult")
 	}
+	out.FinalResultRaw = cloneTLV(finalResult)
 	succeeded, ok := finalResultSucceeded(finalResult.Children)
 	if !ok {
-		return false, errors.New("asn1: cannot determine ProfileInstallationResult finalResult outcome")
+		return errors.New("asn1: cannot determine ProfileInstallationResult finalResult outcome")
 	}
-	return succeeded, nil
+	out.Succeeded = &succeeded
+	*d = out
+	return nil
+}
+
+// PendingNotificationList is SGP.32 PendingNotificationList, tag A0 in response wrappers.
+type PendingNotificationList struct {
+	Notifications []PendingNotification
+}
+
+// MarshalBERTLV encodes PendingNotificationList.
+func (l *PendingNotificationList) MarshalBERTLV() (*bertlv.TLV, error) {
+	if l == nil {
+		return nil, errors.New("asn1: nil PendingNotificationList")
+	}
+	children := make([]*bertlv.TLV, 0, len(l.Notifications))
+	for index := range l.Notifications {
+		child, err := l.Notifications[index].MarshalBERTLV()
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, child)
+	}
+	return constructed(tagNotificationList, children...), nil
+}
+
+// UnmarshalBERTLV decodes PendingNotificationList.
+func (l *PendingNotificationList) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if err := expectTag(tlv, tagNotificationList); err != nil {
+		return err
+	}
+	out := PendingNotificationList{Notifications: make([]PendingNotification, 0, len(tlv.Children))}
+	for _, child := range tlv.Children {
+		var notification PendingNotification
+		if err := notification.UnmarshalBERTLV(child); err != nil {
+			return err
+		}
+		out.Notifications = append(out.Notifications, notification)
+	}
+	*l = out
+	return nil
+}
+
+// PendingNotification is the non-compact subset of SGP.32 PendingNotification currently consumed by the eIM.
+type PendingNotification struct {
+	ProfileInstallation *ProfileInstallationResult
+	Raw                 *bertlv.TLV
+}
+
+// MarshalBERTLV encodes PendingNotification.
+func (n *PendingNotification) MarshalBERTLV() (*bertlv.TLV, error) {
+	if n == nil {
+		return nil, errors.New("asn1: nil PendingNotification")
+	}
+	if n.ProfileInstallation != nil {
+		return n.ProfileInstallation.MarshalBERTLV()
+	}
+	if n.Raw != nil {
+		return cloneTLV(n.Raw), nil
+	}
+	return nil, errors.New("asn1: empty PendingNotification")
+}
+
+// UnmarshalBERTLV decodes PendingNotification.
+func (n *PendingNotification) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if tlv == nil {
+		return errors.New("asn1: missing PendingNotification")
+	}
+	var out PendingNotification
+	out.Raw = cloneTLV(tlv)
+	if tlv.Tag.Equal(tagProfileInstall) {
+		out.ProfileInstallation = new(ProfileInstallationResult)
+		if err := out.ProfileInstallation.UnmarshalBERTLV(tlv); err != nil {
+			return err
+		}
+	}
+	if !isPendingNotificationTLV(tlv) {
+		return fmt.Errorf("%w: unknown PendingNotification tag %s", errUnexpectedTag, tlv.Tag.String())
+	}
+	*n = out
+	return nil
+}
+
+// Metadata returns the notification metadata when present.
+func (n *PendingNotification) Metadata() *NotificationMetadata {
+	if n == nil {
+		return nil
+	}
+	if n.ProfileInstallation != nil && n.ProfileInstallation.Data != nil && n.ProfileInstallation.Data.Metadata != nil {
+		return n.ProfileInstallation.Data.Metadata
+	}
+	if metadata := findNotificationMetadata(n.Raw); metadata != nil {
+		out := new(NotificationMetadata)
+		if err := out.UnmarshalBERTLV(metadata); err == nil {
+			return out
+		}
+	}
+	return nil
+}
+
+// SequenceNumber returns the notification sequence number.
+func (n *PendingNotification) SequenceNumber() (int64, error) {
+	if metadata := n.Metadata(); metadata != nil {
+		return metadata.SequenceNumber, nil
+	}
+	return 0, errors.New("asn1: pending notification missing sequence number")
+}
+
+// Kind returns the OpenIoTRSP notification kind.
+func (n *PendingNotification) Kind() string {
+	if metadata := n.Metadata(); metadata != nil {
+		if kind := metadata.Kind(); kind != "" {
+			return kind
+		}
+	}
+	if n != nil && n.ProfileInstallation != nil {
+		return "install"
+	}
+	return "unknown"
+}
+
+// EID returns the embedded EID value when the notification carries one.
+func (n *PendingNotification) EID() []byte {
+	if n == nil {
+		return nil
+	}
+	return eidFromTLV(n.Raw)
+}
+
+func isPendingNotificationTLV(tlv *bertlv.TLV) bool {
+	return tlv.Tag.Equal(tagProfileInstall) ||
+		tlv.Tag.Equal(tagSequence) ||
+		tlv.Tag.Equal(tagNotificationList) ||
+		tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(1))
+}
+
+func findNotificationMetadata(tlv *bertlv.TLV) *bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	if tlv.Tag.Equal(tagNotificationMeta) {
+		return tlv
+	}
+	for _, child := range tlv.Children {
+		if found := findNotificationMetadata(child); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func eidFromTLV(tlv *bertlv.TLV) []byte {
+	if tlv == nil {
+		return nil
+	}
+	if tlv.Tag.Equal(tagEID) && len(tlv.Value) == 16 {
+		return copyBytes(tlv.Value)
+	}
+	for _, child := range tlv.Children {
+		if eid := eidFromTLV(child); len(eid) > 0 {
+			return eid
+		}
+	}
+	return nil
 }
 
 func finalResultSucceeded(children []*bertlv.TLV) (bool, bool) {

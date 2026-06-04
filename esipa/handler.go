@@ -63,7 +63,6 @@ var (
 	tagHandleNotify     = bertlv.ContextSpecific.Constructed(61)
 	tagNotificationList = bertlv.ContextSpecific.Constructed(0)
 	tagNotificationMeta = bertlv.ContextSpecific.Constructed(47)
-	tagProfileInstall   = bertlv.ContextSpecific.Constructed(55)
 )
 
 // Request is the exact SGP.32 ESipa IPA-to-eIM top-level envelope.
@@ -341,12 +340,13 @@ func recordNotificationsFromList(ctx context.Context, store storage.Store, tenan
 	if tlv == nil {
 		return nil, nil
 	}
-	if !tlv.Tag.Equal(tagNotificationList) {
-		return nil, fmt.Errorf("esipa: notification list has tag %s", tlv.Tag.String())
+	var notifications protocolasn1.PendingNotificationList
+	if err := notifications.UnmarshalBERTLV(tlv); err != nil {
+		return nil, err
 	}
-	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(tlv.Children))
-	for _, child := range tlv.Children {
-		notification, err := notificationFromTLV(eid, child)
+	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(notifications.Notifications))
+	for index := range notifications.Notifications {
+		notification, err := notificationFromPending(eid, &notifications.Notifications[index])
 		if err != nil {
 			return nil, err
 		}
@@ -366,8 +366,17 @@ func notificationsFromHandleNotification(tlv *bertlv.TLV) ([]storage.Notificatio
 		return nil, errors.New("esipa: HandleNotificationEsipa requires one selected child")
 	}
 	child := tlv.Children[0]
-	if child.Tag.Equal(tagNotificationList) && len(child.Children) == 1 && isPendingNotificationTLV(child.Children[0]) {
-		child = child.Children[0]
+	var notifications protocolasn1.PendingNotificationList
+	if err := notifications.UnmarshalBERTLV(child); err == nil {
+		out := make([]storage.Notification, 0, len(notifications.Notifications))
+		for index := range notifications.Notifications {
+			notification, err := notificationFromPending("", &notifications.Notifications[index])
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, notification)
+		}
+		return out, nil
 	}
 	notification, err := notificationFromTLV("", child)
 	if err != nil {
@@ -377,143 +386,43 @@ func notificationsFromHandleNotification(tlv *bertlv.TLV) ([]storage.Notificatio
 }
 
 func notificationFromTLV(eid string, tlv *bertlv.TLV) (storage.Notification, error) {
-	if tlv == nil {
+	var pending protocolasn1.PendingNotification
+	if err := pending.UnmarshalBERTLV(tlv); err != nil {
+		return storage.Notification{}, err
+	}
+	return notificationFromPending(eid, &pending)
+}
+
+func notificationFromPending(eid string, pending *protocolasn1.PendingNotification) (storage.Notification, error) {
+	if pending == nil {
 		return storage.Notification{}, errors.New("esipa: missing pending notification")
 	}
 	if eid == "" {
-		eid = eidFromNotification(tlv)
+		if eidValue := pending.EID(); len(eidValue) == 16 {
+			eid = hex.EncodeToString(eidValue)
+		}
 	}
 	if eid == "" {
 		return storage.Notification{}, errors.New("esipa: pending notification does not identify an EID")
 	}
-	sequenceNumber, kind, err := notificationSequenceAndKind(tlv)
+	sequenceNumber, err := pending.SequenceNumber()
 	if err != nil {
 		return storage.Notification{}, err
 	}
-	if kind == "" {
-		kind = "unknown"
+	payloadTLV, err := pending.MarshalBERTLV()
+	if err != nil {
+		return storage.Notification{}, err
 	}
-	payload, err := tlv.MarshalBinary()
+	payload, err := payloadTLV.MarshalBinary()
 	if err != nil {
 		return storage.Notification{}, err
 	}
 	return storage.Notification{
 		EID:            eid,
 		SequenceNumber: sequenceNumber,
-		Kind:           kind,
+		Kind:           pending.Kind(),
 		Payload:        payload,
 	}, nil
-}
-
-func notificationSequenceAndKind(tlv *bertlv.TLV) (int64, string, error) {
-	if metadata := findNotificationMetadata(tlv); metadata != nil {
-		sequenceNumber, err := integerValue(metadata.First(bertlv.ContextSpecific.Primitive(0)))
-		if err != nil {
-			return 0, "", err
-		}
-		kind := notificationKindFromEvent(metadata.First(bertlv.ContextSpecific.Primitive(1)))
-		if kind == "" && tlv.Tag.Equal(tagProfileInstall) {
-			kind = "install"
-		}
-		return sequenceNumber, kind, nil
-	}
-	if tlv.Tag.Equal(tagNotificationList) {
-		sequenceNumber, err := compactProfileInstallationSequence(tlv)
-		if err != nil {
-			return 0, "", err
-		}
-		return sequenceNumber, "install", nil
-	}
-	return 0, "", errors.New("esipa: pending notification missing sequence number")
-}
-
-func findNotificationMetadata(tlv *bertlv.TLV) *bertlv.TLV {
-	if tlv == nil {
-		return nil
-	}
-	if tlv.Tag.Equal(tagNotificationMeta) {
-		return tlv
-	}
-	for _, child := range tlv.Children {
-		if found := findNotificationMetadata(child); found != nil {
-			return found
-		}
-	}
-	return nil
-}
-
-func compactProfileInstallationSequence(tlv *bertlv.TLV) (int64, error) {
-	if tlv == nil || len(tlv.Children) == 0 {
-		return 0, errors.New("esipa: compact profile-install notification missing data")
-	}
-	data := tlv.Children[0]
-	if !data.Tag.Equal(tagNotificationList) {
-		return 0, errors.New("esipa: compact profile-install notification missing compact data")
-	}
-	for _, child := range data.Children {
-		if child.Tag.Equal(tagInteger) {
-			return integerValue(child)
-		}
-	}
-	return 0, errors.New("esipa: compact profile-install notification missing sequence number")
-}
-
-func notificationKindFromEvent(tlv *bertlv.TLV) string {
-	if tlv == nil || len(tlv.Value) == 0 {
-		return ""
-	}
-	bits, err := bitStringBits(tlv.Value)
-	if err != nil {
-		return ""
-	}
-	kinds := []string{"install", "enable", "disable", "delete"}
-	for index, kind := range kinds {
-		if index < len(bits) && bits[index] {
-			return kind
-		}
-	}
-	return "unknown"
-}
-
-func bitStringBits(data []byte) ([]bool, error) {
-	if len(data) == 0 {
-		return nil, errors.New("esipa: BIT STRING missing unused-bit octet")
-	}
-	unusedBits := int(data[0])
-	if unusedBits > 7 || len(data) == 1 && unusedBits != 0 {
-		return nil, errors.New("esipa: invalid BIT STRING unused-bit count")
-	}
-	bitLength := (len(data)-1)*8 - unusedBits
-	bits := make([]bool, bitLength)
-	for index := range bitLength {
-		bits[index] = data[1+index/8]&(1<<(7-byte(index%8))) != 0
-	}
-	return bits, nil
-}
-
-func eidFromNotification(tlv *bertlv.TLV) string {
-	if tlv == nil {
-		return ""
-	}
-	if tlv.Tag.Equal(tagEID) && len(tlv.Value) == 16 {
-		return hex.EncodeToString(tlv.Value)
-	}
-	for _, child := range tlv.Children {
-		if eid := eidFromNotification(child); eid != "" {
-			return eid
-		}
-	}
-	return ""
-}
-
-func isPendingNotificationTLV(tlv *bertlv.TLV) bool {
-	if tlv == nil {
-		return false
-	}
-	return tlv.Tag.Equal(tagProfileInstall) ||
-		tlv.Tag.Equal(tagSequence) ||
-		tlv.Tag.Equal(tagNotificationList) ||
-		tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(1))
 }
 
 func appendAckSequences(existing []protocolasn1.SequenceNumber, additions ...protocolasn1.SequenceNumber) []protocolasn1.SequenceNumber {
@@ -1033,19 +942,17 @@ func provideResultAckResponse(ack *protocolasn1.EimAcknowledgements) (Response, 
 	if ack == nil {
 		ack = &protocolasn1.EimAcknowledgements{}
 	}
-	ackTLV, err := ack.MarshalBERTLV()
-	if err != nil {
-		return Response{}, err
-	}
-	return responseFromMarshaler(&protocolasn1.ProvideEimPackageResultResponse{Raw: ackTLV})
+	return responseFromMarshaler(&protocolasn1.ProvideEimPackageResultResponse{
+		Kind:             protocolasn1.ProvideResultResponseAcknowledgements,
+		Acknowledgements: ack,
+	})
 }
 
 func provideResultErrorResponse(code protocolasn1.EimPackageResultErrorCode) (Response, error) {
-	tlv, err := integerTLV(code)
-	if err != nil {
-		return Response{}, err
-	}
-	return responseFromMarshaler(&protocolasn1.ProvideEimPackageResultResponse{Raw: tlv})
+	return responseFromMarshaler(&protocolasn1.ProvideEimPackageResultResponse{
+		Kind:  protocolasn1.ProvideResultResponseError,
+		Error: &code,
+	})
 }
 
 func transferAckResponse(ack *protocolasn1.EimAcknowledgements) (Response, error) {

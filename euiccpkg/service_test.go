@@ -841,6 +841,13 @@ func TestPSMOResultsMapAndApplyState(t *testing.T) {
 	if !defaultDPResult.OK || defaultDPResult.Operation != OperationSetDefaultDPAddress {
 		t.Fatalf("default DP result = %#v, want ok", defaultDPResult)
 	}
+	euiccState, err := store.GetEUICCState(ctx, storage.DefaultTenantID, eid)
+	if err != nil {
+		t.Fatalf("GetEUICCState(default DP) error = %v", err)
+	}
+	if euiccState.DefaultSMDPAddress != "smdp.example" {
+		t.Fatalf("default SMDP address = %q, want smdp.example", euiccState.DefaultSMDPAddress)
+	}
 }
 
 func TestNewPSMOErrorResultsMap(t *testing.T) {

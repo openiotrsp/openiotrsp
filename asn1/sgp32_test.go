@@ -277,10 +277,6 @@ func roundTripCases() []roundTripCase {
 	notificationSeq := int64(7)
 
 	epr := sampleEuiccPackageResult()
-	eprTLV, err := epr.MarshalBERTLV()
-	if err != nil {
-		panic(err)
-	}
 	transferRequest := &TransferEimPackageRequest{
 		Kind:                TransferEuiccPackageRequest,
 		EuiccPackageRequest: sampleEuiccPackageRequest(),
@@ -294,6 +290,35 @@ func roundTripCases() []roundTripCase {
 	}).MarshalBERTLV()
 	if err != nil {
 		panic(err)
+	}
+	notificationMetadata := &NotificationMetadata{
+		SequenceNumber:      7,
+		ProfileManagement:   []bool{true, false, false, false},
+		NotificationAddress: "notification.example",
+	}
+	finalResult := bertlv.NewChildren(tagProfileFinalResult,
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)),
+	)
+	profileInstallation := &ProfileInstallationResult{
+		Data: &ProfileInstallationResultData{
+			TransactionID:  []byte{0x01, 0x02},
+			Metadata:       notificationMetadata,
+			FinalResultRaw: finalResult,
+		},
+		Signature: []byte{0x30, 0x00},
+	}
+	pendingNotifications := &PendingNotificationList{Notifications: []PendingNotification{{ProfileInstallation: profileInstallation}}}
+	eimPackageResultWithNotifications := &EimPackageResult{
+		Kind:               EimPackageResultEPRAndNotifications,
+		EuiccPackageResult: epr,
+		Notifications:      pendingNotifications,
+	}
+	receivedWithCID := &EimPackageReceivedWithCID{
+		CorrelationID: &EimPackageCorrelationID{EimTransactionID: []byte{0xaa}},
+	}
+	errorWithCID := &EimPackageErrorWithCID{
+		CorrelationID: &EimPackageCorrelationID{EID: []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}},
+		Error:         EimPackageResultErrorCode(127),
 	}
 
 	return []roundTripCase{
@@ -366,19 +391,35 @@ func roundTripCases() []roundTripCase {
 			name: "ProfileDownloadTriggerResult",
 			covers: []string{
 				"ProfileDownloadTriggerResult",
+				"ProfileInstallationResult",
 			},
 			value: &ProfileDownloadTriggerResult{
-				EimTransactionID: []byte{1},
-				ProfileInstallationRaw: bertlv.NewChildren(tagProfileInstall,
-					bertlv.NewChildren(tagProfileInstallData,
-						bertlv.NewChildren(tagProfileFinalResult,
-							bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)),
-						),
-					),
-				),
+				EimTransactionID:    []byte{1},
+				ProfileInstallation: profileInstallation,
 			},
 			newFunc: func() Unmarshaler { return new(ProfileDownloadTriggerResult) },
 			tagHex:  "bf54",
+		},
+		{
+			name:    "NotificationMetadata",
+			covers:  []string{"NotificationMetadata"},
+			value:   notificationMetadata,
+			newFunc: func() Unmarshaler { return new(NotificationMetadata) },
+			tagHex:  "bf2f",
+		},
+		{
+			name:    "ProfileInstallationResult",
+			covers:  []string{"ProfileInstallationResult"},
+			value:   profileInstallation,
+			newFunc: func() Unmarshaler { return new(ProfileInstallationResult) },
+			tagHex:  "bf37",
+		},
+		{
+			name:    "PendingNotificationList",
+			covers:  []string{"PendingNotificationList", "PendingNotification"},
+			value:   &PendingNotificationList{Notifications: []PendingNotification{{ProfileInstallation: profileInstallation}}},
+			newFunc: func() Unmarshaler { return new(PendingNotificationList) },
+			tagHex:  "a0",
 		},
 		{
 			name:    "EimAcknowledgements",
@@ -494,8 +535,8 @@ func roundTripCases() []roundTripCase {
 		},
 		{
 			name:    "TransferEimPackageResponse",
-			covers:  []string{"TransferEimPackageResponse"},
-			value:   &TransferEimPackageResponse{Raw: eprTLV},
+			covers:  []string{"TransferEimPackageResponse", "EimPackageReceivedWithCid"},
+			value:   &TransferEimPackageResponse{Kind: TransferResponseReceivedWithCID, ReceivedWithCID: receivedWithCID},
 			newFunc: func() Unmarshaler { return new(TransferEimPackageResponse) },
 			tagHex:  "bf4e",
 		},
@@ -515,24 +556,31 @@ func roundTripCases() []roundTripCase {
 		},
 		{
 			name:    "EimPackageResult",
-			covers:  []string{"EimPackageResult"},
-			value:   &EimPackageResult{Raw: eprTLV},
+			covers:  []string{"EimPackageResult", "PendingNotificationList"},
+			value:   eimPackageResultWithNotifications,
 			newFunc: func() Unmarshaler { return new(EimPackageResult) },
-			tagHex:  "bf51",
+			tagHex:  "30",
 		},
 		{
 			name:    "ProvideEimPackageResult",
 			covers:  []string{"ProvideEimPackageResult"},
-			value:   &ProvideEimPackageResult{EID: []byte{1, 2}, EimPackageResult: EimPackageResult{Raw: eprTLV}},
+			value:   &ProvideEimPackageResult{EID: []byte{1, 2}, EimPackageResult: EimPackageResult{Kind: EimPackageResultEuiccPackage, EuiccPackageResult: epr}},
 			newFunc: func() Unmarshaler { return new(ProvideEimPackageResult) },
 			tagHex:  "bf50",
 		},
 		{
 			name:    "ProvideEimPackageResultResponse",
 			covers:  []string{"ProvideEimPackageResultResponse"},
-			value:   &ProvideEimPackageResultResponse{Raw: (&EimAcknowledgements{SequenceNumbers: []SequenceNumber{1}}).mustTLV()},
+			value:   &ProvideEimPackageResultResponse{Kind: ProvideResultResponseAcknowledgements, Acknowledgements: &EimAcknowledgements{SequenceNumbers: []SequenceNumber{1}}},
 			newFunc: func() Unmarshaler { return new(ProvideEimPackageResultResponse) },
 			tagHex:  "bf50",
+		},
+		{
+			name:    "EimPackageErrorWithCID",
+			covers:  []string{"EimPackageErrorWithCid"},
+			value:   errorWithCID,
+			newFunc: func() Unmarshaler { return new(EimPackageErrorWithCID) },
+			tagHex:  "bf61",
 		},
 		{
 			name: "IpaEuiccDataRequest",

@@ -19,8 +19,7 @@ func ApplyPackageState(
 	eid string,
 	pkg protocolasn1.EuiccPackage,
 ) error {
-	operation, iccid := packagePSMO(pkg)
-	if err := applyPSMOState(ctx, store, tenantID, eid, operation, iccid, nil); err != nil {
+	if err := applyPSMOState(ctx, store, tenantID, eid, pkg, nil); err != nil {
 		return err
 	}
 	return applyECOState(ctx, store, tenantID, eid, pkg, nil)
@@ -36,8 +35,7 @@ func ApplyPackageResultState(
 	pkg protocolasn1.EuiccPackage,
 	result *Result,
 ) error {
-	operation, iccid := packagePSMO(pkg)
-	if err := applyPSMOState(ctx, store, tenantID, eid, operation, iccid, result); err != nil {
+	if err := applyPSMOState(ctx, store, tenantID, eid, pkg, result); err != nil {
 		return err
 	}
 	return applyECOState(ctx, store, tenantID, eid, pkg, result)
@@ -68,10 +66,10 @@ func applyPSMOState(
 	store storage.Store,
 	tenantID storage.TenantID,
 	eid string,
-	operation OperationKind,
-	iccid []byte,
+	pkg protocolasn1.EuiccPackage,
 	result *Result,
 ) error {
+	operation, iccid := packagePSMO(pkg)
 	if operation == OperationNone {
 		return nil
 	}
@@ -97,6 +95,12 @@ func applyPSMOState(
 		return setProfileFallback(ctx, store, tenantID, eid, iccidHex)
 	case OperationUnsetFallbackAttribute:
 		return clearProfileFallback(ctx, store, tenantID, eid)
+	case OperationSetDefaultDPAddress:
+		address := defaultDPAddressFromPackage(pkg)
+		if address == "" {
+			return nil
+		}
+		return setEUICCDefaultSMDPAddress(ctx, store, tenantID, eid, address)
 	default:
 		return nil
 	}
@@ -200,6 +204,29 @@ func clearProfileFallback(ctx context.Context, store storage.Store, tenantID sto
 		}
 	}
 	return nil
+}
+
+func defaultDPAddressFromPackage(pkg protocolasn1.EuiccPackage) string {
+	if pkg.Kind != protocolasn1.EuiccPackagePSMO || len(pkg.PSMOs) != 1 {
+		return ""
+	}
+	psmo := pkg.PSMOs[0]
+	if psmo.Operation != protocolasn1.PsmoSetDefaultDPAddress || psmo.SetDefaultDPAddress == nil {
+		return ""
+	}
+	return psmo.SetDefaultDPAddress.DefaultDPAddress
+}
+
+func setEUICCDefaultSMDPAddress(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, address string) error {
+	state, err := store.GetEUICCState(ctx, tenantID, eid)
+	if errors.Is(err, storage.ErrNotFound) {
+		state = storage.EUICCState{EID: eid}
+	} else if err != nil {
+		return err
+	}
+	state.EID = eid
+	state.DefaultSMDPAddress = address
+	return store.SetEUICCState(ctx, tenantID, state)
 }
 
 func applyECOState(

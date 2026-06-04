@@ -161,25 +161,27 @@ type IpaEuiccDataResponseError struct {
 // IpaEuiccData is the typed subset of SGP.32 IpaEuiccData that OpenIoTRSP
 // currently consumes. Unknown data objects remain available through RawObjects.
 type IpaEuiccData struct {
-	EID                   []byte
-	NotificationsRaw      *bertlv.TLV
-	DefaultSMDPAddress    *string
-	EuiccPackageResults   []EuiccPackageResult
-	EuiccPackageResultRaw *bertlv.TLV
-	EUICCInfo1            *EUICCInfo
-	EUICCInfo1Raw         *bertlv.TLV
-	EUICCInfo2            *EUICCInfo
-	EUICCInfo2Raw         *bertlv.TLV
-	RootSMDSAddress       *string
-	AssociationToken      *int64
-	EUMCertificateRaw     *bertlv.TLV
-	EUICCCertificateRaw   *bertlv.TLV
-	EimTransactionID      []byte
-	IPACapabilities       *IPACapabilities
-	IPACapabilitiesRaw    *bertlv.TLV
-	DeviceInfoRaw         *bertlv.TLV
-	Profiles              []ProfileInfo
-	RawObjects            []*bertlv.TLV
+	EID                    []byte
+	Notifications          []PendingNotification
+	NotificationsRaw       *bertlv.TLV
+	DefaultSMDPAddress     *string
+	EuiccPackageResults    []EuiccPackageResult
+	EuiccPackageResultRaw  *bertlv.TLV
+	EUICCInfo1             *EUICCInfo
+	EUICCInfo1Raw          *bertlv.TLV
+	EUICCInfo2             *EUICCInfo
+	EUICCInfo2Raw          *bertlv.TLV
+	RootSMDSAddress        *string
+	AssociationToken       *int64
+	EUMCertificateRaw      *bertlv.TLV
+	EUICCCertificateRaw    *bertlv.TLV
+	EimTransactionID       []byte
+	IPACapabilities        *IPACapabilities
+	IPACapabilitiesRaw     *bertlv.TLV
+	DeviceInfoRaw          *bertlv.TLV
+	ProfileInfoListPresent bool
+	Profiles               []ProfileInfo
+	RawObjects             []*bertlv.TLV
 }
 
 // EUICCInfo is the consumed subset of SGP.22 EUICCInfo1/EUICCInfo2.
@@ -282,6 +284,12 @@ func (d *IpaEuiccData) marshal() (*bertlv.TLV, error) {
 	}
 	if d.NotificationsRaw != nil {
 		children = append(children, rawChild(d.NotificationsRaw))
+	} else if len(d.Notifications) > 0 {
+		list, err := (&PendingNotificationList{Notifications: d.Notifications}).MarshalBERTLV()
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, list)
 	}
 	if d.EuiccPackageResultRaw != nil {
 		children = append(children, rawChild(d.EuiccPackageResultRaw))
@@ -310,7 +318,7 @@ func (d *IpaEuiccData) marshal() (*bertlv.TLV, error) {
 	if d.EimTransactionID != nil {
 		children = append(children, octetTLV(bertlv.ContextSpecific.Primitive(7), d.EimTransactionID))
 	}
-	if len(d.Profiles) > 0 {
+	if d.ProfileInfoListPresent || len(d.Profiles) > 0 {
 		profiles, err := (&ProfileInfoListResponse{Profiles: d.Profiles}).MarshalBERTLV()
 		if err != nil {
 			return nil, err
@@ -331,6 +339,11 @@ func (d *IpaEuiccData) unmarshal(tlv *bertlv.TLV) error {
 			out.EID, err = octetValue(child)
 		case child.Tag.Equal(bertlv.ContextSpecific.Constructed(0)):
 			out.NotificationsRaw = cloneTLV(child)
+			var notifications PendingNotificationList
+			err = notifications.UnmarshalBERTLV(child)
+			if err == nil {
+				out.Notifications = notifications.Notifications
+			}
 		case child.Tag.Equal(bertlv.ContextSpecific.Primitive(1)):
 			value, valueErr := utf8Value(child)
 			err = valueErr
@@ -367,6 +380,7 @@ func (d *IpaEuiccData) unmarshal(tlv *bertlv.TLV) error {
 		case child.Tag.Equal(bertlv.ContextSpecific.Constructed(9)):
 			out.DeviceInfoRaw = cloneTLV(child)
 		case child.Tag.Equal(tagProfileInfoList):
+			out.ProfileInfoListPresent = true
 			var profiles ProfileInfoListResponse
 			err = profiles.UnmarshalBERTLV(child)
 			if err == nil {
