@@ -67,7 +67,6 @@ type Relay struct {
 
 	mu            sync.Mutex
 	byTransaction map[string]string
-	defaultSMDP   string
 }
 
 // New creates a Relay using transport.
@@ -83,7 +82,7 @@ func (r *Relay) Active() bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.defaultSMDP != "" || len(r.byTransaction) > 0
+	return len(r.byTransaction) > 0
 }
 
 // InitiateAuthentication relays ES9+.InitiateAuthentication.
@@ -96,7 +95,7 @@ func (r *Relay) InitiateAuthentication(ctx context.Context, request []byte) (Res
 	if err != nil {
 		return Response{}, err
 	}
-	r.rememberSMDP(smdpAddress)
+	r.rememberTransaction(transactionID(request), smdpAddress)
 	r.rememberTransaction(transactionID(response.Payload), smdpAddress)
 	return response, nil
 }
@@ -134,12 +133,38 @@ func (r *Relay) GetBoundProfilePackage(ctx context.Context, request []byte) (Res
 func (r *Relay) HandleNotification(ctx context.Context, request []byte) (Response, error) {
 	smdpAddress := notificationAddress(request)
 	if smdpAddress == "" {
-		smdpAddress = r.defaultAddress()
+		var err error
+		smdpAddress, err = r.smdpForTransaction(transactionID(request))
+		if err != nil {
+			return Response{}, err
+		}
 	}
 	if smdpAddress == "" {
 		return Response{}, errMissingSMDPAddress
 	}
 	return r.post(ctx, smdpAddress, EndpointHandleNotification, request)
+}
+
+// CanHandleNotification reports whether a HandleNotification payload carries
+// enough routing metadata for the relay to handle it without using a global
+// fallback.
+func (r *Relay) CanHandleNotification(request []byte) bool {
+	if r == nil {
+		return false
+	}
+	if notificationAddress(request) != "" {
+		return true
+	}
+	transactionID := transactionID(request)
+	if len(transactionID) == 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byTransaction == nil {
+		return false
+	}
+	return r.byTransaction[hex.EncodeToString(transactionID)] != ""
 }
 
 // CancelSession relays ES9+.CancelSession and forgets the transaction route on
@@ -166,15 +191,6 @@ func (r *Relay) post(ctx context.Context, smdpAddress string, endpoint Endpoint,
 		return Response{}, errMissingSMDPAddress
 	}
 	return r.Transport.Post(ctx, smdpAddress, endpoint, cloneBytes(request))
-}
-
-func (r *Relay) rememberSMDP(smdpAddress string) {
-	if r == nil || smdpAddress == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.defaultSMDP = smdpAddress
 }
 
 func (r *Relay) rememberTransaction(transactionID []byte, smdpAddress string) {
@@ -206,19 +222,7 @@ func (r *Relay) smdpForTransaction(transactionID []byte) (string, error) {
 			return smdpAddress, nil
 		}
 	}
-	if r.defaultSMDP != "" {
-		return r.defaultSMDP, nil
-	}
 	return "", errUnknownSession
-}
-
-func (r *Relay) defaultAddress() string {
-	if r == nil {
-		return ""
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.defaultSMDP
 }
 
 // HTTPTransport posts raw relay payloads using the SGP.22 ES9+ ASN.1 HTTP

@@ -137,6 +137,61 @@ func TestRelayConfiguredHandlerPersistsNotificationBeforeRelaySession(t *testing
 	}
 }
 
+func TestRelayConfiguredHandlerPersistsLocalNotificationDuringRelaySession(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x66)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	initRequest := mustRelayHex(t, "bf398110830b6578616d706c652e636f6d8101ff")
+	initResponse := mustRelayHex(t, "bf39058003010203")
+	transport := &esipaRecordingTransport{
+		responses: map[relay.Endpoint]relay.Response{
+			relay.EndpointInitiateAuthentication: {Payload: initResponse},
+		},
+	}
+	relayService := relay.New(transport)
+	if _, err := relayService.InitiateAuthentication(ctx, initRequest); err != nil {
+		t.Fatalf("InitiateAuthentication() error = %v", err)
+	}
+	transport.calls = nil
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.Relay = relayService
+	server := httptest.NewServer(handler.HTTPHandler())
+	t.Cleanup(server.Close)
+
+	payload := encode(t, &protocolasn1.ESipaMessageFromIpaToEim{
+		Raw: bertlv.NewChildren(tagHandleNotify,
+			bertlv.NewChildren(tagNotificationList, samplePendingNotification(t, eid, 24, "install")),
+		),
+	})
+	response, err := server.Client().Post(server.URL+DefaultPath, MediaType, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST notification error = %v", err)
+	}
+	defer func() {
+		_ = response.Body.Close()
+	}()
+	if response.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("response = %s body %x, want 204", response.Status, body)
+	}
+	if len(transport.calls) != 0 {
+		t.Fatalf("relay calls = %#v, want local notification persistence during relay session", transport.calls)
+	}
+	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eidKey)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 || notifications[0].SequenceNumber != 24 || notifications[0].Kind != "install" {
+		t.Fatalf("notifications = %#v, want install sequence 24", notifications)
+	}
+}
+
 type esipaRecordingTransport struct {
 	responses map[relay.Endpoint]relay.Response
 	calls     []esipaTransportCall

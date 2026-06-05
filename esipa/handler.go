@@ -186,7 +186,25 @@ func shouldRelay(tlv *bertlv.TLV, relayService *relay.Relay) bool {
 	if relayService == nil || !isRelayMessage(tlv) {
 		return false
 	}
-	return !tlv.Tag.Equal(tagHandleNotify) || relayService.Active()
+	if !tlv.Tag.Equal(tagHandleNotify) {
+		return true
+	}
+	if isLocalHandleNotification(tlv) {
+		return false
+	}
+	payload, err := tlv.MarshalBinary()
+	if err != nil {
+		return false
+	}
+	return relayService.CanHandleNotification(payload)
+}
+
+func isLocalHandleNotification(tlv *bertlv.TLV) bool {
+	if tlv == nil || !tlv.Tag.Equal(tagHandleNotify) || len(tlv.Children) != 1 {
+		return false
+	}
+	child := tlv.Children[0]
+	return child.Tag.Equal(tagNotificationList) || child.Tag.Equal(tagProvideResult)
 }
 
 func handleRelay(ctx context.Context, request Request, relayService *relay.Relay) (Response, error) {
