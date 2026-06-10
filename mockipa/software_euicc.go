@@ -1,11 +1,12 @@
 package mockipa
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	stdasn1 "encoding/asn1"
 	"errors"
 	"fmt"
 
@@ -15,8 +16,9 @@ import (
 )
 
 // SoftwareEUICC is the minimal SGP.26-backed APDU surface needed by euicc-go's
-// direct-download flow. It signs the ES10b authentication/download responses but
-// does not decrypt or apply a Bound Profile Package like real eUICC silicon.
+// direct-download flow. It signs the ES10b authentication/download/install
+// responses but does not decrypt or provision a Bound Profile Package like real
+// eUICC silicon.
 type SoftwareEUICC struct {
 	fixture     *SGP26Fixture
 	ciSubjectID []byte
@@ -24,7 +26,10 @@ type SoftwareEUICC struct {
 	euiccInfo1  *bertlv.TLV
 	euiccInfo2  *bertlv.TLV
 	euiccOtpk   []byte
+	euiccOtpkSK *ecdh.PrivateKey
 	transaction []byte
+	bpp         *bertlv.TLV
+	pir         *bertlv.TLV
 }
 
 // NewSoftwareEUICC creates a software eUICC from SGP.26 test material.
@@ -85,30 +90,88 @@ func (s *SoftwareEUICC) Transmit(request bertlv.Marshaler, response bertlv.Unmar
 	}
 }
 
-// TransmitRaw simulates ES10b.LoadBoundProfilePackage completion.
+// TransmitRaw simulates ES10b.LoadBoundProfilePackage completion for callers
+// that still route the BPP through euicc-go's APDU segment helper.
 func (s *SoftwareEUICC) TransmitRaw(_ []byte) ([]byte, error) {
+	_, _, err := s.LoadBoundProfilePackage(nil, nil, "openiotrsp.local", nil)
+	if err != nil {
+		return nil, err
+	}
+	return s.profileInstallationResultBytes()
+}
+
+// LoadBoundProfilePackage captures the BPP and returns a signed success PIR.
+//
+// The software eUICC deliberately does not provision the profile into a secure
+// element. It records the BPP for verification work and emits the same signed
+// installation result shape a real eUICC sends after a successful load.
+func (s *SoftwareEUICC) LoadBoundProfilePackage(
+	bpp *bertlv.TLV,
+	metadata *sgp22.ProfileInfo,
+	notificationAddress string,
+	smdpOID stdasn1.ObjectIdentifier,
+) (*sgp22.LoadBoundProfilePackageResponse, *sgp22.PendingNotification, error) {
+	if bpp != nil {
+		s.bpp = bpp.Clone()
+	}
 	transaction := s.transaction
 	if len(transaction) == 0 {
 		transaction = []byte{0x00}
 	}
-	result := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(55),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(39),
-			bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), cloneBytes(transaction)),
-			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(47),
-				mustIntegerTLV(bertlv.ContextSpecific.Primitive(0), int64(1)),
-				mustBitStringTLV(bertlv.ContextSpecific.Primitive(1), []bool{true}),
-				bertlv.NewValue(bertlv.Universal.Primitive(12), []byte("openiotrsp.local")),
-				bertlv.NewValue(bertlv.Application.Primitive(26), []byte{0x89, 0x10, 0x10, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0xf1}),
-			),
-			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(2),
-				bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0),
-					bertlv.NewValue(bertlv.Application.Primitive(15), []byte{0xa0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10}),
-				),
+	if notificationAddress == "" {
+		notificationAddress = "openiotrsp.local"
+	}
+	iccid := []byte{0x89, 0x10, 0x10, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0xf1}
+	isdPAID := []byte{0xa0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10}
+	if metadata != nil {
+		if len(metadata.ICCID) > 0 {
+			iccid = cloneBytes(metadata.ICCID)
+		}
+		if len(metadata.ISDPAID) > 0 {
+			isdPAID = cloneBytes(metadata.ISDPAID)
+		}
+	}
+	dataChildren := []*bertlv.TLV{
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), cloneBytes(transaction)),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(47),
+			mustIntegerTLV(bertlv.ContextSpecific.Primitive(0), int64(1)),
+			mustBitStringTLV(bertlv.ContextSpecific.Primitive(1), []bool{true}),
+			bertlv.NewValue(bertlv.Universal.Primitive(12), []byte(notificationAddress)),
+			bertlv.NewValue(bertlv.Application.Primitive(26), iccid),
+		),
+	}
+	if len(smdpOID) > 0 {
+		dataChildren = append(dataChildren, mustOIDTLV(bertlv.Universal.Primitive(6), smdpOID))
+	}
+	dataChildren = append(dataChildren,
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(2),
+			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0),
+				bertlv.NewValue(bertlv.Application.Primitive(15), isdPAID),
+				bertlv.NewValue(bertlv.Universal.Primitive(4), nil),
 			),
 		),
-		bertlv.NewValue(bertlv.Application.Primitive(55), []byte{0x30, 0x00}),
 	)
-	return result.MarshalBinary()
+	data := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(39), dataChildren...)
+	signature, err := s.sign(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	result := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(55),
+		data,
+		bertlv.NewValue(bertlv.Application.Primitive(55), signature),
+	)
+	s.pir = result.Clone()
+	var response sgp22.LoadBoundProfilePackageResponse
+	if err := response.UnmarshalBERTLV(result); err != nil {
+		return nil, nil, err
+	}
+	if err := response.Valid(); err != nil {
+		return nil, nil, err
+	}
+	return &response, &sgp22.PendingNotification{
+		PendingNotification: result.Clone(),
+		Notification:        response.Notification,
+	}, nil
 }
 
 func (s *SoftwareEUICC) authenticateServer(request bertlv.Marshaler, response bertlv.Unmarshaler) error {
@@ -161,11 +224,12 @@ func (s *SoftwareEUICC) prepareDownload(request bertlv.Marshaler, response bertl
 	}
 	transaction := cloneTLVValue(smdpSigned2.First(bertlv.ContextSpecific.Primitive(0)))
 	s.transaction = cloneBytes(transaction)
-	otpk, err := generateOTPK()
+	otpkSK, otpk, err := generateOTPK()
 	if err != nil {
 		return err
 	}
 	s.euiccOtpk = otpk
+	s.euiccOtpkSK = otpkSK
 
 	children := []*bertlv.TLV{
 		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), transaction),
@@ -219,16 +283,33 @@ func euiccInfo2(subjectKeyID []byte) *bertlv.TLV {
 	)
 }
 
-func generateOTPK() ([]byte, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
+func (s *SoftwareEUICC) BoundProfilePackage() *bertlv.TLV {
+	if s == nil || s.bpp == nil {
+		return nil
 	}
-	ecdhKey, err := key.ECDH()
-	if err != nil {
-		return nil, err
+	return s.bpp.Clone()
+}
+
+func (s *SoftwareEUICC) ProfileInstallationResult() *bertlv.TLV {
+	if s == nil || s.pir == nil {
+		return nil
 	}
-	return ecdhKey.PublicKey().Bytes(), nil
+	return s.pir.Clone()
+}
+
+func (s *SoftwareEUICC) profileInstallationResultBytes() ([]byte, error) {
+	if s.pir == nil {
+		return nil, errors.New("mockipa: missing ProfileInstallationResult")
+	}
+	return s.pir.MarshalBinary()
+}
+
+func generateOTPK() (*ecdh.PrivateKey, []byte, error) {
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	return key, key.PublicKey().Bytes(), nil
 }
 
 func mustParseTLV(data []byte) *bertlv.TLV {
@@ -253,6 +334,21 @@ func mustBitStringTLV(tag bertlv.Tag, bits []bool) *bertlv.TLV {
 		panic(err)
 	}
 	return tlv
+}
+
+func mustOIDTLV(tag bertlv.Tag, oid stdasn1.ObjectIdentifier) *bertlv.TLV {
+	encoded, err := stdasn1.Marshal(oid)
+	if err != nil {
+		panic(err)
+	}
+	tlv := new(bertlv.TLV)
+	if err := tlv.UnmarshalBinary(encoded); err != nil {
+		panic(err)
+	}
+	if !tlv.Tag.Equal(bertlv.Universal.Primitive(6)) {
+		panic("mockipa: OBJECT IDENTIFIER encoded with unexpected tag")
+	}
+	return bertlv.NewValue(tag, cloneBytes(tlv.Value))
 }
 
 func cloneTLVValue(tlv *bertlv.TLV) []byte {

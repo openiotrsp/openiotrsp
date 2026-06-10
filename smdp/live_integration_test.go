@@ -35,11 +35,10 @@ func TestLiveSysmocomSignedES9Flow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseActivationCode() error = %v", err)
 	}
-	// This drives euicc-go through ES9+ with SGP.26-signed eUICC-side
-	// AuthenticateServer/PrepareDownload responses. The software eUICC does not
-	// decrypt or apply the returned BPP like real silicon; its ES10b load result is
-	// simulated so this test proves the signed SM-DP+ handshake and binding path,
-	// not physical profile installation.
+	// This drives the software eUICC through ES9+ with SGP.26-signed
+	// AuthenticateServer/PrepareDownload/ProfileInstallationResult responses. The
+	// BPP is captured but not decrypted or provisioned like real silicon, so this
+	// proves the SM-DP+ interface path, not physical profile installation.
 	result, err := (mockipa.SysmocomDownloader{}).Download(ctx, activation)
 	if err != nil {
 		t.Fatalf("live sysmocom signed ES9+ flow failed: %v", err)
