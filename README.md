@@ -39,7 +39,22 @@ The device's IPA checks in with the eIM, the eIM tells it what to do, and profil
 
 ## Status
 
-OpenIoTRSP is under active development. The first release targets the core profile lifecycle (download, enable, disable, delete) and Direct Profile Download, where the device retrieves its profile from the SM-DP+ directly. See the roadmap for what is planned next.
+OpenIoTRSP implements the core SGP.32 eIM surface:
+
+- Profile lifecycle: enable, disable, delete
+- The remaining profile state operations, including fallback management
+- Direct profile download triggering
+- Indirect profile download relay (ES9+ via the eIM to the SM-DP+)
+- eIM configuration operations: add, update, delete, list eIM
+- IPA and eUICC data reads
+- Notification handling
+- Bootstrap configuration emission
+
+The implementation is validated against the GSMA SGP.26 test certificates: the protocol cryptography and result verification are tested against real test key material. Several less-common ASN.1 structures are currently retained as raw TLV where structured decoding is not yet required; [ROADMAP.md](ROADMAP.md) tracks the exact status.
+
+The boundary, stated plainly: full interoperability with a physical eUICC and a live SM-DP+ download is the remaining milestone, pending test hardware.
+
+Only the mandatory NIST P-256 curve is supported; brainpool is deliberately not included.
 
 ## Quickstart
 
@@ -65,4 +80,12 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started, the project structure, and how to run the tests.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started and how to run the tests.
+
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): the high-level design
+- [SECURITY.md](SECURITY.md): security policy and cryptographic posture
+- [ROADMAP.md](ROADMAP.md): planned and deferred work
+- [USAGE.md](USAGE.md): full setup and validation instructions
+- [INTERPRETATION_LOG.md](INTERPRETATION_LOG.md): specification-interpretation decisions
