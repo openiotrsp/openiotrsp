@@ -4,8 +4,7 @@ The project policy allows MIT, BSD, Apache 2.0, and ISC dependencies only.
 
 Current Go module dependencies:
 
-- `github.com/damonto/euicc-go`: replaced in `go.mod` with
-  `github.com/openiotrsp/euicc-go`; the resolved fork is MIT.
+- `github.com/damonto/euicc-go`: MIT.
 - `github.com/dsnet/golib/memfile`: BSD-3-Clause.
 - `github.com/jackc/pgerrcode`: MIT.
 - `github.com/jackc/pgpassfile`: MIT.
@@ -24,5 +23,5 @@ Current Go module dependencies:
 - `golang.org/x/sys`: BSD-3-Clause.
 - `golang.org/x/text`: BSD-3-Clause.
 
-The eUICC dependency must use the `github.com/openiotrsp/euicc-go` fork. Do not
-import `github.com/damonto/euicc-go` directly.
+The eUICC dependency is the upstream `github.com/damonto/euicc-go` module,
+required directly at the version pinned in `go.mod`.

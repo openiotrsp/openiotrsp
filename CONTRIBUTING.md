@@ -51,10 +51,9 @@ material.
 - Only MIT, BSD, Apache 2.0, and ISC dependencies are permitted. No copyleft.
 - Every new dependency must be recorded in [LICENSES.md](LICENSES.md).
 - `go-licenses check ./...` must pass (`make licenses`).
-- The eUICC dependency is consumed through the `replace` directive in
-  `go.mod`, which points `github.com/damonto/euicc-go` at the
-  `github.com/openiotrsp/euicc-go` fork. Never depend on the upstream module
-  directly.
+- The eUICC dependency is the upstream MIT-licensed
+  `github.com/damonto/euicc-go` module, required directly in `go.mod` at a
+  pinned release. No fork, no `replace` directive.
 
 ## Code standards
 
