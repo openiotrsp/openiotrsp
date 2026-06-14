@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/esipa"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	"github.com/openiotrsp/openiotrsp/mockipa"
@@ -138,6 +139,49 @@ func TestProfileLifecycleEndpointsCompleteThroughMockIPA(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotKinds, []string{"enable", "disable", "delete"}) {
 		t.Fatalf("notification kinds = %#v, want enable/disable/delete", gotKinds)
+	}
+}
+
+func TestEnableProfileQueuesRollbackFlag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		body         any
+		wantRollback bool
+	}{
+		{name: "empty body", body: nil, wantRollback: false},
+		{name: "field absent", body: map[string]any{}, wantRollback: false},
+		{name: "rollback false", body: map[string]any{"rollback": false}, wantRollback: false},
+		{name: "rollback true", body: map[string]any{"rollback": true}, wantRollback: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := memory.New()
+			server := newTestServer(t, store, DefaultTenantResolver{})
+			postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+testICCID+"/enable", tt.body, http.StatusAccepted)
+
+			pending, err := store.FetchPendingOperations(context.Background(), storage.DefaultTenantID, testEID, 1)
+			if err != nil {
+				t.Fatalf("FetchPendingOperations() error = %v", err)
+			}
+			if len(pending) != 1 {
+				t.Fatalf("pending operations = %d, want 1", len(pending))
+			}
+			var request protocolasn1.EuiccPackageRequest
+			if err := protocolasn1.Decode(pending[0].Payload, &request); err != nil {
+				t.Fatalf("Decode(EuiccPackageRequest) error = %v", err)
+			}
+			psmos := request.EuiccPackageSigned.EuiccPackage.PSMOs
+			if len(psmos) != 1 || psmos[0].Operation != protocolasn1.PsmoEnable {
+				t.Fatalf("queued PSMOs = %#v, want one enable operation", psmos)
+			}
+			if psmos[0].RollbackFlag != tt.wantRollback {
+				t.Fatalf("RollbackFlag = %v, want %v", psmos[0].RollbackFlag, tt.wantRollback)
+			}
+		})
 	}
 }
 

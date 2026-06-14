@@ -89,6 +89,10 @@ type profileDownloadRequest struct {
 	SMDSAddress    *string  `json:"smdsAddress,omitempty"`
 }
 
+type enableProfileRequest struct {
+	Rollback bool `json:"rollback,omitempty"`
+}
+
 type operationResponse struct {
 	ID             int64     `json:"id"`
 	EID            string    `json:"eid"`
@@ -257,8 +261,12 @@ func (h *Handler) triggerProfileDownload(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) enableProfile(w http.ResponseWriter, r *http.Request) {
+	var request enableProfileRequest
+	if !decodeOptionalJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
 	h.enqueueProfileOperation(w, r, func(iccid []byte) protocolasn1.EuiccPackage {
-		return euiccpkg.Enable(iccid, false)
+		return euiccpkg.Enable(iccid, request.Rollback)
 	})
 }
 

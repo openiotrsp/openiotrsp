@@ -47,6 +47,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/EID"
         - $ref: "#/components/parameters/ICCID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnableProfileRequest"
       responses:
         "202":
           description: Operation queued.
@@ -541,6 +546,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Operation"
+    EnableProfileRequest:
+      type: object
+      properties:
+        rollback:
+          type: boolean
+          default: false
+          description: Sets the SGP.32 PSMO enable rollback flag for this operation.
+      additionalProperties: false
     Operation:
       type: object
       required:
