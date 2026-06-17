@@ -11,10 +11,7 @@ import (
 func TestSGP26EUICCInfo2UsesUniversalPPVersionAndSASFields(t *testing.T) {
 	t.Parallel()
 
-	fixture, err := LoadSGP26SoftwareFixture("")
-	if err != nil {
-		t.Fatalf("LoadSGP26SoftwareFixture() error = %v", err)
-	}
+	fixture := requireSGP26SoftwareFixture(t)
 	ciSubjectKeyID, err := pki.SubjectKeyIdentifier(fixture.CICertificate)
 	if err != nil {
 		t.Fatalf("SubjectKeyIdentifier() error = %v", err)
