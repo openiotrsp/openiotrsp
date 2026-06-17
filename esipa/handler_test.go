@@ -241,6 +241,54 @@ func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *test
 	}
 }
 
+func TestIpaEuiccDataResponseErrorReturnsEmptyProvideResult(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x63)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+
+	operation, err := ipadata.EnqueueRequest(ctx, store, storage.DefaultTenantID, eidKey, ipadata.RequestInput{
+		TagList: []byte{0xbf, 0x20},
+	})
+	if err != nil {
+		t.Fatalf("EnqueueRequest() error = %v", err)
+	}
+
+	errorResponse := &protocolasn1.IpaEuiccDataResponse{
+		Error: &protocolasn1.IpaEuiccDataResponseError{
+			Code: protocolasn1.IpaEuiccDataErrorCode(1),
+		},
+	}
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, errorResponse),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(ProvideEimPackageResult IPA data error) error = %v", err)
+	}
+	response := decodeProvideResultResponse(t, encodeResponse(t, resultResponse))
+	if response.Kind != protocolasn1.ProvideResultResponseEmpty {
+		t.Fatalf("provide result kind = %v, want empty response", response.Kind)
+	}
+
+	gotOperation, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if gotOperation.Status != storage.OperationFailed {
+		t.Fatalf("operation status = %q, want failed", gotOperation.Status)
+	}
+}
+
 func TestIpaEuiccDataRequestResponsePersistsState(t *testing.T) {
 	t.Parallel()
 
@@ -295,9 +343,9 @@ func TestIpaEuiccDataRequestResponsePersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle(ProvideEimPackageResult IPA data) error = %v", err)
 	}
-	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
-	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)}) {
-		t.Fatalf("ack = %v, want operation sequence %d", ack.SequenceNumbers, operation.SequenceNumber)
+	ack := decodeProvideResultResponse(t, encodeResponse(t, resultResponse))
+	if ack.Kind != protocolasn1.ProvideResultResponseEmpty {
+		t.Fatalf("provide result kind = %v, want empty response", ack.Kind)
 	}
 
 	gotOperation, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
@@ -995,7 +1043,7 @@ func TestUnknownEimPackageResultFailsClosed(t *testing.T) {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
 
-	_, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)), nil, true)
+	_, _, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)), nil, true)
 	if err == nil {
 		t.Fatal("recordEimPackageResult() succeeded for unknown result tag, want rejection")
 	}
@@ -1259,7 +1307,7 @@ func decodeGetResponse(t *testing.T, payload []byte) protocolasn1.GetEimPackageR
 	return response
 }
 
-func decodeProvideResultAck(t *testing.T, payload []byte) protocolasn1.EimAcknowledgements {
+func decodeProvideResultResponse(t *testing.T, payload []byte) protocolasn1.ProvideEimPackageResultResponse {
 	t.Helper()
 	var message protocolasn1.ESipaMessageFromEimToIpa
 	if err := protocolasn1.Decode(payload, &message); err != nil {
@@ -1268,6 +1316,15 @@ func decodeProvideResultAck(t *testing.T, payload []byte) protocolasn1.EimAcknow
 	var response protocolasn1.ProvideEimPackageResultResponse
 	if err := response.UnmarshalBERTLV(message.Raw); err != nil {
 		t.Fatalf("UnmarshalBERTLV(ProvideEimPackageResultResponse) error = %v", err)
+	}
+	return response
+}
+
+func decodeProvideResultAck(t *testing.T, payload []byte) protocolasn1.EimAcknowledgements {
+	t.Helper()
+	response := decodeProvideResultResponse(t, payload)
+	if response.Kind != protocolasn1.ProvideResultResponseAcknowledgements {
+		t.Fatalf("provide result kind = %v, want acknowledgements", response.Kind)
 	}
 	var ack protocolasn1.EimAcknowledgements
 	if err := ack.UnmarshalBERTLV(response.Raw); err != nil {

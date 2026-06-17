@@ -144,3 +144,54 @@ Each entry must include:
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms the
   interface behavior, but byte-preserving relay handling is an implementation
   boundary.
+
+## SGP.32 EimConfigurationData X.509 CHOICE Encoding
+
+- Spec section: SGP.32 `EimConfigurationData` fields `eimPublicKeyData [5]` and
+  `trustedPublicKeyDataTls [6]`, each a CHOICE of SubjectPublicKeyInfo
+  (`eimPublicKey` / `trustedEimPkTls`, context tag `[0]`) or Certificate
+  (`eimCertificate` / `trustedCertificateTls`, context tag `[1]`).
+- Ambiguity: Whether the outer context `[5]`/`[6]` field embeds the X.509 object
+  directly as a universal SEQUENCE (`30...`) or wraps it in the inner CHOICE
+  arm tag (`A0`/`A1`).
+- Chosen reading: The inner CHOICE arm tag is mandatory on the wire. Encode and
+  decode `A5 { A1 { 30... } }` for certificates and `A5 { A0 { 30... } }` for
+  SubjectPublicKeyInfo; the same pattern applies to `[6]`.
+- Rationale: SGP.32 defines explicit CHOICE arms with distinct context tags.
+  Vendor interop hex diffs and a second eIM rejection on Add eIM ECO confirm bare
+  `30...` under `A5` is non-conformant.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 IpaEuiccDataRequest.tagList vs EID Tag 5A
+
+- Spec section: SGP.32 `IpaEuiccDataRequest.tagList` (`[APPLICATION 28]`,
+  wire tag `5C`); `IpaEuiccData` field tags (`BF20`, `BF22`, `BF2D`, `A5`, `A6`,
+  `A8`, etc.); EID as `[APPLICATION 26]` / tag `5A` on other structures.
+- Ambiguity: Whether EID tag `5A` may appear in the `tagList` OCTET STRING.
+- Chosen reading: `tagList` contains only tags of data objects returned inside
+  `IpaEuiccData`. EID (`5A`) is not a valid `tagList` entry; the IPA already
+  knows the target EID from ESipa context. `incorrectTagList (1)` covers invalid
+  lists.
+- Rationale: Vendor IPA returned `ipaEuiccDataResponseError` /
+  `incorrectTagList` when OpenIoTRSP sent `5A` as the first tagList byte.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 ProvideEimPackageResultResponse on IpaEuiccDataResponse.error
+
+- Spec section: SGP.32 `ProvideEimPackageResultResponse` CHOICE
+  (`eimAcknowledgements` / `emptyResponse` / `provideEimPackageResultError`);
+  `EimAcknowledgements` as `SEQUENCE OF SequenceNumber`; `IpaEuiccDataResponse`
+  CHOICE (`ipaEuiccData` / `ipaEuiccDataResponseError`).
+- Ambiguity: Whether the eIM should return `eimAcknowledgements` containing the
+  queued BF52 operation's internal sequence when the IPA reports
+  `ipaEuiccDataResponseError`.
+- Chosen reading: `EimAcknowledgements` sequence numbers identify pending
+  notifications delivered in `notificationsList` (and analogous notification
+  payloads bundled with eUICC package results). They are not eIM queue operation
+  IDs. On `ipaEuiccDataResponseError`, or on successful `ipaEuiccData` with no
+  `notificationsList`, return `emptyResponse`. Acknowledge only notification
+  sequence numbers when `notificationsList` is present.
+- Rationale: The spec provides `emptyResponse` for the no-acknowledgement case.
+  Acknowledging operation sequence `1` on error made a vendor IPA treat it as
+  "clear notification #1" and fail with NothingToDelete.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
