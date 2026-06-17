@@ -14,6 +14,7 @@ import (
 
 	"github.com/damonto/euicc-go/bertlv"
 	sgp22 "github.com/damonto/euicc-go/v2"
+	"github.com/openiotrsp/openiotrsp/pki"
 )
 
 func TestLoadBoundProfilePackageReturnsSignedProfileInstallationResult(t *testing.T) {
@@ -69,7 +70,11 @@ func TestLoadBoundProfilePackageReturnsSignedProfileInstallationResult(t *testin
 		t.Fatalf("MarshalBinary() error = %v", err)
 	}
 	digest := sha256.Sum256(encoded)
-	if !ecdsa.VerifyASN1(&fixture.EUICCKey.PublicKey, digest[:], signature.Value) {
+	ok, err := pki.VerifyECDSATR03111(&fixture.EUICCKey.PublicKey, digest[:], signature.Value)
+	if err != nil {
+		t.Fatalf("VerifyECDSATR03111() error = %v", err)
+	}
+	if !ok {
 		t.Fatal("PIR signature does not verify with eUICC public key")
 	}
 }

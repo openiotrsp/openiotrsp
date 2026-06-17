@@ -2,10 +2,8 @@ package mockipa
 
 import (
 	"crypto/ecdh"
-	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	stdasn1 "encoding/asn1"
 	"errors"
 	"fmt"
@@ -13,6 +11,7 @@ import (
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
 	sgp22 "github.com/damonto/euicc-go/v2"
+	"github.com/openiotrsp/openiotrsp/pki"
 )
 
 // SoftwareEUICC is the minimal SGP.26-backed APDU surface needed by euicc-go's
@@ -37,21 +36,16 @@ func NewSoftwareEUICC(fixture *SGP26Fixture) (*SoftwareEUICC, error) {
 	if fixture == nil || fixture.EUICCKey == nil {
 		return nil, errors.New("mockipa: missing SGP.26 fixture")
 	}
-	ci, err := x509.ParseCertificate(fixture.CICertificate)
+	subjectID, err := pki.SubjectKeyIdentifier(fixture.CICertificate)
 	if err != nil {
-		return nil, fmt.Errorf("mockipa: parse SGP.26 CI certificate: %w", err)
-	}
-	subjectID := ci.SubjectKeyId
-	if len(subjectID) == 0 {
-		sum := sha256.Sum256(ci.RawSubjectPublicKeyInfo)
-		subjectID = sum[:]
+		return nil, fmt.Errorf("mockipa: CI subject key id: %w", err)
 	}
 	challenge := make([]byte, 16)
 	if _, err := rand.Read(challenge); err != nil {
 		return nil, err
 	}
-	info1 := euiccInfo1(subjectID)
-	info2 := euiccInfo2(subjectID)
+	info1 := sgp26EUICCInfo1(subjectID)
+	info2 := sgp26EUICCInfo2(subjectID)
 	return &SoftwareEUICC{
 		fixture:     fixture,
 		ciSubjectID: cloneBytes(subjectID),
@@ -203,13 +197,11 @@ func (s *SoftwareEUICC) authenticateServer(request bertlv.Marshaler, response be
 	if err != nil {
 		return err
 	}
-	return response.UnmarshalBERTLV(bertlv.NewChildren(bertlv.ContextSpecific.Constructed(56),
-		bertlv.NewChildren(bertlv.Universal.Constructed(16),
-			euiccSigned1,
-			bertlv.NewValue(bertlv.Application.Primitive(55), signature),
-			mustParseTLV(s.fixture.EUICCCertificate),
-			mustParseTLV(s.fixture.EUMCertificate),
-		),
+	return response.UnmarshalBERTLV(authenticateResponseOkTLV(
+		euiccSigned1,
+		signature,
+		s.fixture.EUICCCertificate,
+		s.fixture.EUMCertificate,
 	))
 }
 
@@ -221,6 +213,10 @@ func (s *SoftwareEUICC) prepareDownload(request bertlv.Marshaler, response bertl
 	smdpSigned2 := tlv.First(bertlv.Universal.Constructed(16))
 	if smdpSigned2 == nil {
 		return errors.New("mockipa: PrepareDownloadRequest missing smdpSigned2")
+	}
+	smdpSignature2 := tlv.First(bertlv.Application.Primitive(55))
+	if smdpSignature2 == nil {
+		return errors.New("mockipa: PrepareDownloadRequest missing smdpSignature2")
 	}
 	transaction := cloneTLVValue(smdpSigned2.First(bertlv.ContextSpecific.Primitive(0)))
 	s.transaction = cloneBytes(transaction)
@@ -239,16 +235,24 @@ func (s *SoftwareEUICC) prepareDownload(request bertlv.Marshaler, response bertl
 		children = append(children, hashCC.Clone())
 	}
 	euiccSigned2 := bertlv.NewChildren(bertlv.Universal.Constructed(16), children...)
-	signature, err := s.sign(euiccSigned2)
+	signature, err := s.signPrepareDownload(euiccSigned2, smdpSignature2)
 	if err != nil {
 		return err
 	}
-	return response.UnmarshalBERTLV(bertlv.NewChildren(bertlv.ContextSpecific.Constructed(33),
-		bertlv.NewChildren(bertlv.Universal.Constructed(16),
-			euiccSigned2,
-			bertlv.NewValue(bertlv.Application.Primitive(55), signature),
-		),
-	))
+	return response.UnmarshalBERTLV(prepareDownloadResponseOkTLV(euiccSigned2, signature))
+}
+
+func (s *SoftwareEUICC) signPrepareDownload(euiccSigned2, smdpSignature2 *bertlv.TLV) ([]byte, error) {
+	euiccBytes, err := euiccSigned2.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	smdpSigBytes, err := smdpSignature2.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(append(euiccBytes, smdpSigBytes...))
+	return pki.SignECDSATR03111(rand.Reader, s.fixture.EUICCKey, digest[:])
 }
 
 func (s *SoftwareEUICC) sign(tlv *bertlv.TLV) ([]byte, error) {
@@ -257,30 +261,7 @@ func (s *SoftwareEUICC) sign(tlv *bertlv.TLV) ([]byte, error) {
 		return nil, err
 	}
 	digest := sha256.Sum256(encoded)
-	return ecdsa.SignASN1(rand.Reader, s.fixture.EUICCKey, digest[:])
-}
-
-func euiccInfo1(subjectKeyID []byte) *bertlv.TLV {
-	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(32),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x02, 0x07, 0x00}),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9), bertlv.NewValue(bertlv.Universal.Primitive(4), cloneBytes(subjectKeyID))),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10), bertlv.NewValue(bertlv.Universal.Primitive(4), cloneBytes(subjectKeyID))),
-	)
-}
-
-func euiccInfo2(subjectKeyID []byte) *bertlv.TLV {
-	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(34),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte{0x03, 0x03, 0x00}),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x02, 0x07, 0x00}),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(3), []byte{0x01, 0x00, 0x00}),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(4), []byte{0x82, 0x00, 0x00}),
-		mustBitStringTLV(bertlv.ContextSpecific.Primitive(5), []bool{true}),
-		mustBitStringTLV(bertlv.ContextSpecific.Primitive(8), []bool{true, true, false, true}),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9), bertlv.NewValue(bertlv.Universal.Primitive(4), cloneBytes(subjectKeyID))),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10), bertlv.NewValue(bertlv.Universal.Primitive(4), cloneBytes(subjectKeyID))),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(22), []byte{0x01, 0x00, 0x00}),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(23), []byte("OPENIOTRSP-DEMO")),
-	)
+	return pki.SignECDSATR03111(rand.Reader, s.fixture.EUICCKey, digest[:])
 }
 
 func (s *SoftwareEUICC) BoundProfilePackage() *bertlv.TLV {
