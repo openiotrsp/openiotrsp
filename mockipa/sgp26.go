@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/openiotrsp/openiotrsp/pki"
 )
 
 const defaultSGP26Zip = "spec/SGP.26_v3.0.2-17-July-2025.zip"
@@ -25,6 +27,7 @@ type SGP26Fixture struct {
 	EUICCCertificate []byte
 	EUMCertificate   []byte
 	EUICCKey         *ecdsa.PrivateKey
+	EID              string
 }
 
 // ValidateSGP26SoftwareFixture verifies the local material needed to build a
@@ -81,11 +84,16 @@ func LoadSGP26SoftwareFixture(path string) (*SGP26Fixture, error) {
 	if err != nil {
 		return nil, err
 	}
+	eid, err := pki.EIDHexFromCertificate(euicc)
+	if err != nil {
+		return nil, err
+	}
 	return &SGP26Fixture{
 		CICertificate:    ci,
 		EUICCCertificate: euicc,
 		EUMCertificate:   eum,
 		EUICCKey:         key,
+		EID:              eid,
 	}, nil
 }
 

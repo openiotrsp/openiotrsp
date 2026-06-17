@@ -17,6 +17,7 @@ import (
 	"github.com/openiotrsp/openiotrsp/esipa"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	appruntime "github.com/openiotrsp/openiotrsp/internal/app/runtime"
+	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 	relaypkg "github.com/openiotrsp/openiotrsp/relay"
 	filesigner "github.com/openiotrsp/openiotrsp/signing/file"
@@ -25,7 +26,6 @@ import (
 
 const (
 	defaultDatabaseURL = "postgres://admin:secretpassword@postgres:5432/openiotrsp?sslmode=disable"
-	defaultEID         = "89049032000000000000000000000001"
 )
 
 type config struct {
@@ -124,7 +124,7 @@ func loadConfig() config {
 		databaseURL:                 appruntime.Env("OPENIOTRSP_DATABASE_URL", defaultDatabaseURL),
 		migrationsDir:               appruntime.Env("OPENIOTRSP_MIGRATIONS_DIR", "migrations"),
 		listenAddr:                  appruntime.Env("OPENIOTRSP_EIM_LISTEN_ADDR", ":8080"),
-		eid:                         appruntime.Env("OPENIOTRSP_DEMO_EID", defaultEID),
+		eid:                         appruntime.Env("OPENIOTRSP_DEMO_EID", pki.DefaultSGP26VariantONISTDemoEID),
 		eimID:                       appruntime.Env("OPENIOTRSP_EIM_ID", "openiotrsp.eim"),
 		eimKeyPath:                  appruntime.Env("OPENIOTRSP_EIM_KEY_PATH", ""),
 		eimCertPath:                 appruntime.Env("OPENIOTRSP_EIM_CERT_PATH", ""),

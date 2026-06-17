@@ -14,9 +14,8 @@ import (
 
 	appruntime "github.com/openiotrsp/openiotrsp/internal/app/runtime"
 	"github.com/openiotrsp/openiotrsp/mockipa"
+	"github.com/openiotrsp/openiotrsp/pki"
 )
-
-const defaultEID = "89049032000000000000000000000001"
 
 type config struct {
 	eimEndpoint  string
@@ -38,7 +37,11 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	cfg := loadConfig()
-	eid, err := hex.DecodeString(cfg.eid)
+	eidHex, err := resolveEID(cfg)
+	if err != nil {
+		return err
+	}
+	eid, err := hex.DecodeString(eidHex)
 	if err != nil {
 		return fmt.Errorf("decode EID: %w", err)
 	}
@@ -56,14 +59,41 @@ func run(logger *slog.Logger) error {
 		Once:         cfg.once,
 		Logger:       logger,
 	}
-	logger.Info("mock IPA starting", "eid", cfg.eid, "mode", cfg.mode, "endpoint", cfg.eimEndpoint)
+	logger.Info("mock IPA starting", "eid", eidHex, "mode", cfg.mode, "endpoint", cfg.eimEndpoint)
 	return runner.Run(ctx)
+}
+
+func resolveEID(cfg config) (string, error) {
+	if isOfflineDownloadMode(cfg.mode) {
+		return cfg.eid, nil
+	}
+	fixture, err := mockipa.LoadSGP26SoftwareFixture(cfg.fixtureZip)
+	if err != nil {
+		return "", err
+	}
+	if cfg.eid != fixture.EID {
+		return "", fmt.Errorf(
+			"OPENIOTRSP_DEMO_EID %q does not match SGP.26 fixture eUICC EID %q",
+			cfg.eid,
+			fixture.EID,
+		)
+	}
+	return fixture.EID, nil
+}
+
+func isOfflineDownloadMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "offline", "offline-stub", "stub":
+		return true
+	default:
+		return false
+	}
 }
 
 func loadConfig() config {
 	return config{
 		eimEndpoint:  appruntime.Env("OPENIOTRSP_EIM_ESIPA_URL", "http://eim-server:8080/esipa"),
-		eid:          appruntime.Env("OPENIOTRSP_DEMO_EID", defaultEID),
+		eid:          appruntime.Env("OPENIOTRSP_DEMO_EID", pki.DefaultSGP26VariantONISTDemoEID),
 		mode:         appruntime.Env("OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE", "live"),
 		fixtureZip:   appruntime.Env("OPENIOTRSP_SGP26_FIXTURE_ZIP", "spec/SGP.26_v3.0.2-17-July-2025.zip"),
 		imei:         appruntime.Env("OPENIOTRSP_MOCKIPA_IMEI", "490154203237518"),
@@ -73,13 +103,11 @@ func loadConfig() config {
 }
 
 func downloader(cfg config) mockipa.Downloader {
-	switch strings.ToLower(strings.TrimSpace(cfg.mode)) {
-	case "offline", "offline-stub", "stub":
+	if isOfflineDownloadMode(cfg.mode) {
 		return mockipa.OfflineDownloader{}
-	default:
-		return mockipa.SysmocomDownloader{
-			FixtureZip: cfg.fixtureZip,
-			IMEI:       cfg.imei,
-		}
+	}
+	return mockipa.SysmocomDownloader{
+		FixtureZip: cfg.fixtureZip,
+		IMEI:       cfg.imei,
 	}
 }
