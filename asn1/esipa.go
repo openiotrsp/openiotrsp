@@ -607,6 +607,13 @@ func (r *EimPackageResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 		if err := out.Error.UnmarshalBERTLV(constructed(tagSequence, tlv.Children...)); err != nil {
 			return err
 		}
+	case hasTag(tlv, tagInteger):
+		out.Kind = EimPackageResultError
+		code, err := integerValue[EimPackageResultErrorCode](tlv)
+		if err != nil {
+			return err
+		}
+		out.Error = &EimPackageResultResponseError{Code: code}
 	}
 	*r = out
 	return nil
@@ -877,7 +884,7 @@ func isEimPackageResultTLV(tlv *bertlv.TLV) bool {
 	if tlv.Tag.Equal(tagEuiccPkg) || tlv.Tag.Equal(tagIpaEuiccData) || tlv.Tag.Equal(tagDownloadTrig) {
 		return true
 	}
-	if tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(0)) {
+	if tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(0)) || tlv.Tag.Equal(tagInteger) {
 		return true
 	}
 	if tlv.Tag.Equal(tagSequence) {

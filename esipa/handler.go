@@ -517,6 +517,16 @@ func recordEimPackageResult(
 	if tlv.Tag.Equal(tagIpaEuiccData) {
 		return recordIpaEuiccDataResponse(ctx, store, tenantID, eid, tlv, payload)
 	}
+	if tlv.Tag.Equal(bertlv.Universal.Primitive(2)) || tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(0)) {
+		var result protocolasn1.EimPackageResult
+		if err := result.UnmarshalBERTLV(tlv); err != nil {
+			return nil, err
+		}
+		if result.Kind != protocolasn1.EimPackageResultError {
+			return nil, fmt.Errorf("esipa: unexpected EimPackageResult tag %s", tlv.Tag.String())
+		}
+		return recordEimPackageResultResponseError(ctx, store, tenantID, eid, result.Error, payload)
+	}
 	resultTLV := tlv
 	var notificationList *bertlv.TLV
 	if tlv.Tag.Equal(tagSequence) {
@@ -751,8 +761,10 @@ func matchingEUICCPackageOperations(
 	eid string,
 	result *protocolasn1.EuiccPackageResult,
 ) ([]storage.Operation, error) {
-	sequenceNumbers := resultSequenceNumbers(result)
-	if len(sequenceNumbers) > 0 {
+	if result == nil {
+		return nil, storage.ErrNotFound
+	}
+	if sequenceNumbers := resultSequenceNumbers(result); len(sequenceNumbers) > 0 {
 		operations := make([]storage.Operation, 0, len(sequenceNumbers))
 		for _, sequence := range sequenceNumbers {
 			operation, err := store.GetOperationBySequence(ctx, tenantID, eid, int64(sequence))
@@ -763,9 +775,45 @@ func matchingEUICCPackageOperations(
 		}
 		return operations, nil
 	}
-	if result == nil || result.Kind != protocolasn1.EuiccPackageResultOK || result.Signed == nil {
+	switch result.Kind {
+	case protocolasn1.EuiccPackageResultOK:
+		if result.Signed == nil {
+			return nil, storage.ErrNotFound
+		}
+		data := result.Signed.Data
+		return matchPendingEuiccPackageByCorrelation(ctx, store, tenantID, eid, data.EimID, data.CounterValue, data.EimTransactionID)
+	case protocolasn1.EuiccPackageResultErrorSigned:
+		if result.ErrorSigned == nil {
+			return nil, storage.ErrNotFound
+		}
+		data := result.ErrorSigned.Data
+		return matchPendingEuiccPackageByCorrelation(ctx, store, tenantID, eid, data.EimID, data.CounterValue, data.EimTransactionID)
+	case protocolasn1.EuiccPackageResultErrorUnsigned:
+		if result.ErrorUnsigned == nil {
+			return nil, storage.ErrNotFound
+		}
+		data := result.ErrorUnsigned
+		if data.EimID != "" || len(data.EimTransactionID) > 0 {
+			operations, err := matchPendingEuiccPackageByCorrelation(ctx, store, tenantID, eid, data.EimID, 0, data.EimTransactionID)
+			if err == nil || !errors.Is(err, storage.ErrNotFound) {
+				return operations, err
+			}
+		}
+		return firstPendingEuiccPackageOperation(ctx, store, tenantID, eid)
+	default:
 		return nil, storage.ErrNotFound
 	}
+}
+
+func matchPendingEuiccPackageByCorrelation(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	eimID string,
+	counter int64,
+	transactionID []byte,
+) ([]storage.Operation, error) {
 	pending, err := store.FetchPendingOperations(ctx, tenantID, eid, 10000)
 	if err != nil {
 		return nil, err
@@ -779,14 +827,70 @@ func matchingEUICCPackageOperations(
 			return nil, err
 		}
 		signed := request.EuiccPackageSigned
-		data := result.Signed.Data
-		if signed.EimID == data.EimID &&
-			signed.CounterValue == data.CounterValue &&
-			bytes.Equal(signed.EimTransactionID, data.EimTransactionID) {
+		if eimID != "" && signed.EimID != eimID {
+			continue
+		}
+		if counter != 0 && signed.CounterValue != counter {
+			continue
+		}
+		if len(transactionID) > 0 && !bytes.Equal(signed.EimTransactionID, transactionID) {
+			continue
+		}
+		return []storage.Operation{operation}, nil
+	}
+	return nil, storage.ErrNotFound
+}
+
+func firstPendingEuiccPackageOperation(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+) ([]storage.Operation, error) {
+	pending, err := store.FetchPendingOperations(ctx, tenantID, eid, 10000)
+	if err != nil {
+		return nil, err
+	}
+	for _, operation := range pending {
+		if operation.Kind == storage.OperationEuiccPackage {
 			return []storage.Operation{operation}, nil
 		}
 	}
 	return nil, storage.ErrNotFound
+}
+
+func recordEimPackageResultResponseError(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	errData *protocolasn1.EimPackageResultResponseError,
+	payload []byte,
+) (*protocolasn1.EimAcknowledgements, error) {
+	var operations []storage.Operation
+	var err error
+	if errData != nil && len(errData.EimTransactionID) > 0 {
+		operations, err = matchPendingEuiccPackageByCorrelation(ctx, store, tenantID, eid, "", 0, errData.EimTransactionID)
+	} else {
+		operations, err = firstPendingEuiccPackageOperation(ctx, store, tenantID, eid)
+	}
+	if err != nil {
+		return nil, err
+	}
+	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
+	for _, operation := range operations {
+		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
+			EID:            eid,
+			OperationID:    operation.ID,
+			SequenceNumber: operation.SequenceNumber,
+			Status:         storage.OperationFailed,
+			Payload:        cloneBytes(payload),
+		}); err != nil {
+			return nil, err
+		}
+		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
+	}
+	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
 }
 
 func applyEUICCPackageOperationState(

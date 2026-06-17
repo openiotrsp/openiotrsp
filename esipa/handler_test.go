@@ -831,6 +831,159 @@ func TestProfileDownloadTriggerFailedInstallRecordsFailed(t *testing.T) {
 	}
 }
 
+func TestProvideEimPackageResult_BF51BareInteger(t *testing.T) {
+	t.Parallel()
+	runProvideResultVariantTest(t, provideResultVariantCase{
+		name: "BF51BareInteger",
+		buildResultTLV: func(t *testing.T) *bertlv.TLV {
+			t.Helper()
+			return bertlv.NewChildren(tagEuiccPackage,
+				mustTestIntegerTLV(t, bertlv.Universal.Primitive(2), 127),
+			)
+		},
+		wantStatus: storage.OperationFailed,
+	})
+}
+
+func TestProvideEimPackageResult_TopLevelInteger(t *testing.T) {
+	t.Parallel()
+	runProvideResultVariantTest(t, provideResultVariantCase{
+		name: "TopLevelInteger",
+		buildResultTLV: func(t *testing.T) *bertlv.TLV {
+			t.Helper()
+			return mustTestIntegerTLV(t, bertlv.Universal.Primitive(2), 127)
+		},
+		wantStatus: storage.OperationFailed,
+	})
+}
+
+func TestProvideEimPackageResult_A0Integer(t *testing.T) {
+	t.Parallel()
+	runProvideResultVariantTest(t, provideResultVariantCase{
+		name: "A0Integer",
+		buildResultTLV: func(t *testing.T) *bertlv.TLV {
+			t.Helper()
+			return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0),
+				mustTestIntegerTLV(t, bertlv.Universal.Primitive(2), 2),
+			)
+		},
+		wantStatus: storage.OperationFailed,
+	})
+}
+
+func TestEuiccPackageResultSigned_IntegerResult(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x71)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	}); err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	resultTLV := signedEuiccPackageResultIntegerList(t, request, 1, 3, 0)
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: resultTLV,
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(ProvideEimPackageResult signed integer result) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
+		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != storage.OperationDone {
+		t.Fatalf("recorded results = %#v, want one done result", results)
+	}
+}
+
+type provideResultVariantCase struct {
+	name           string
+	buildResultTLV func(t *testing.T) *bertlv.TLV
+	wantStatus     storage.OperationStatus
+}
+
+func runProvideResultVariantTest(t *testing.T, tc provideResultVariantCase) {
+	t.Helper()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x70)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)),
+	}); err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: tc.buildResultTLV(t),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(%s) error = %v", tc.name, err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
+		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != tc.wantStatus {
+		t.Fatalf("recorded results = %#v, want one %s result", results, tc.wantStatus)
+	}
+}
+
+func signedEuiccPackageResultIntegerList(
+	t *testing.T,
+	request *protocolasn1.EuiccPackageRequest,
+	sequenceNumber int64,
+	resultTag uint64,
+	resultCode int64,
+) *bertlv.TLV {
+	t.Helper()
+	result, err := protocolasn1.IntegerEuiccResult(resultTag, resultCode)
+	if err != nil {
+		t.Fatalf("IntegerEuiccResult() error = %v", err)
+	}
+	data := bertlv.NewChildren(bertlv.Universal.Constructed(16),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte(request.EuiccPackageSigned.EimID)),
+		mustTestIntegerTLV(t, bertlv.ContextSpecific.Primitive(1), request.EuiccPackageSigned.CounterValue),
+		mustTestIntegerTLV(t, bertlv.ContextSpecific.Primitive(3), sequenceNumber),
+		result.Raw,
+	)
+	signature := []byte{0x30, 0x03, 0x02, 0x01, 0x02}
+	return bertlv.NewChildren(tagEuiccPackage,
+		bertlv.NewChildren(bertlv.Universal.Constructed(16),
+			data,
+			bertlv.NewValue(bertlv.Application.Primitive(55), signature),
+		),
+	)
+}
+
 func TestUnknownEimPackageResultFailsClosed(t *testing.T) {
 	t.Parallel()
 

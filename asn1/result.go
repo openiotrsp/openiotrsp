@@ -771,6 +771,10 @@ func (r *EuiccPackageResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	return nil
 }
 
+func isEuiccPackageUnsignedErrorCodeTLV(tlv *bertlv.TLV) bool {
+	return hasTag(tlv, tagInteger) || hasTag(tlv, bertlv.ContextSpecific.Primitive(15))
+}
+
 // EuiccPackageResultSigned is SGP.32 EuiccPackageResultSigned.
 type EuiccPackageResultSigned struct {
 	Data         EuiccPackageResultDataSigned
@@ -874,16 +878,20 @@ func (d *EuiccPackageResultDataSigned) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 		return errors.New("asn1: EuiccPackageResultDataSigned is empty")
 	}
 	resultList := tlv.Children[len(tlv.Children)-1]
-	if err := expectTag(resultList, tagSequence); err != nil {
-		return err
-	}
-	out.Results = make([]EuiccResultData, 0, len(resultList.Children))
-	for _, child := range resultList.Children {
-		var result EuiccResultData
-		if err := result.UnmarshalBERTLV(child); err != nil {
-			return err
+	switch {
+	case resultList.Tag.Equal(tagSequence):
+		out.Results = make([]EuiccResultData, 0, len(resultList.Children))
+		for _, child := range resultList.Children {
+			var result EuiccResultData
+			if err := result.UnmarshalBERTLV(child); err != nil {
+				return err
+			}
+			out.Results = append(out.Results, result)
 		}
-		out.Results = append(out.Results, result)
+	case isEuiccResultDataTLV(resultList):
+		out.Results = []EuiccResultData{{Raw: cloneTLV(resultList)}}
+	default:
+		return fmt.Errorf("%w: unknown EuiccPackageResultDataSigned results tag %s", errUnexpectedTag, resultList.Tag.String())
 	}
 	*d = out
 	return nil
@@ -1099,13 +1107,26 @@ func (e *EuiccPackageErrorUnsigned) MarshalBERTLV() (*bertlv.TLV, error) {
 
 // UnmarshalBERTLV decodes EuiccPackageErrorUnsigned.
 func (e *EuiccPackageErrorUnsigned) UnmarshalBERTLV(tlv *bertlv.TLV) error {
+	if tlv == nil {
+		return errors.New("asn1: missing EuiccPackageErrorUnsigned")
+	}
+	if isEuiccPackageUnsignedErrorCodeTLV(tlv) {
+		code, err := integerValue[EuiccPackageUnsignedErrorCode](tlv)
+		if err != nil {
+			return err
+		}
+		*e = EuiccPackageErrorUnsigned{ErrorCode: &code}
+		return nil
+	}
 	if err := expectTag(tlv, tagSequence); err != nil {
 		return err
 	}
 	var out EuiccPackageErrorUnsigned
-	var err error
-	if out.EimID, err = utf8Value(tlv.First(bertlv.ContextSpecific.Primitive(0))); err != nil {
-		return err
+	if child := tlv.First(bertlv.ContextSpecific.Primitive(0)); child != nil {
+		value, err := utf8Value(child)
+		if err == nil {
+			out.EimID = value
+		}
 	}
 	if child := tlv.First(bertlv.ContextSpecific.Primitive(2)); child != nil {
 		out.EimTransactionID = copyBytes(child.Value)
