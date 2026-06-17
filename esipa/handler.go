@@ -305,12 +305,15 @@ func handleProvideEimPackageResult(ctx context.Context, store storage.Store, ten
 	if code != nil {
 		return provideResultErrorResponse(*code)
 	}
-	ack, err := recordEimPackageResult(ctx, store, tenantID, eid, request.EimPackageResult.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
+	ack, empty, err := recordEimPackageResult(ctx, store, tenantID, eid, request.EimPackageResult.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	if errors.Is(err, storage.ErrNotFound) {
 		return provideResultErrorResponse(provideResultErrorEIDNotFound)
 	}
 	if err != nil {
 		return Response{}, err
+	}
+	if empty {
+		return provideResultEmptyResponse()
 	}
 	return provideResultAckResponse(ack)
 }
@@ -329,7 +332,7 @@ func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, 
 	if code != nil {
 		return transferAckResponse(nil)
 	}
-	ack, err := recordEimPackageResult(ctx, store, tenantID, eid, request.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
+	ack, _, err := recordEimPackageResult(ctx, store, tenantID, eid, request.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
 	if err != nil {
 		return Response{}, err
 	}
@@ -503,16 +506,17 @@ func recordEimPackageResult(
 	tlv *bertlv.TLV,
 	euiccPublicKey EUICCPublicKeyResolver,
 	allowUnverifiedEUICCPackageResults bool,
-) (*protocolasn1.EimAcknowledgements, error) {
+) (*protocolasn1.EimAcknowledgements, bool, error) {
 	if tlv == nil {
-		return nil, errors.New("esipa: missing EimPackageResult")
+		return nil, false, errors.New("esipa: missing EimPackageResult")
 	}
 	payload, err := tlv.MarshalBinary()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if tlv.Tag.Equal(tagDownloadTrig) {
-		return recordProfileDownloadTriggerResult(ctx, store, tenantID, eid, tlv, payload)
+		ack, err := recordProfileDownloadTriggerResult(ctx, store, tenantID, eid, tlv, payload)
+		return ack, false, err
 	}
 	if tlv.Tag.Equal(tagIpaEuiccData) {
 		return recordIpaEuiccDataResponse(ctx, store, tenantID, eid, tlv, payload)
@@ -520,47 +524,48 @@ func recordEimPackageResult(
 	if tlv.Tag.Equal(bertlv.Universal.Primitive(2)) || tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(0)) {
 		var result protocolasn1.EimPackageResult
 		if err := result.UnmarshalBERTLV(tlv); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if result.Kind != protocolasn1.EimPackageResultError {
-			return nil, fmt.Errorf("esipa: unexpected EimPackageResult tag %s", tlv.Tag.String())
+			return nil, false, fmt.Errorf("esipa: unexpected EimPackageResult tag %s", tlv.Tag.String())
 		}
-		return recordEimPackageResultResponseError(ctx, store, tenantID, eid, result.Error, payload)
+		ack, err := recordEimPackageResultResponseError(ctx, store, tenantID, eid, result.Error, payload)
+		return ack, false, err
 	}
 	resultTLV := tlv
 	var notificationList *bertlv.TLV
 	if tlv.Tag.Equal(tagSequence) {
 		resultTLV = tlv.First(tagEuiccPackage)
 		if resultTLV == nil {
-			return nil, errors.New("esipa: EPRAndNotifications missing EuiccPackageResult")
+			return nil, false, errors.New("esipa: EPRAndNotifications missing EuiccPackageResult")
 		}
 		notificationList = tlv.First(tagNotificationList)
 	}
 
 	var result protocolasn1.EuiccPackageResult
 	if err := result.UnmarshalBERTLV(resultTLV); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	resultDER, err := resultTLV.MarshalBinary()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var publicKey crypto.PublicKey
 	if !allowUnverifiedEUICCPackageResults {
 		if euiccPublicKey == nil {
-			return nil, errMissingEUICCPublicKey
+			return nil, false, errMissingEUICCPublicKey
 		}
 		publicKey, err = euiccPublicKey(ctx, tenantID, eid)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if publicKey == nil {
-			return nil, errMissingEUICCPublicKey
+			return nil, false, errMissingEUICCPublicKey
 		}
 	}
 	operations, err := matchingEUICCPackageOperations(ctx, store, tenantID, eid, &result)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
 	for _, operation := range operations {
@@ -569,12 +574,12 @@ func recordEimPackageResult(
 		if allowUnverifiedEUICCPackageResults {
 			status, err = resultStatusForOperation(operation, &result)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		} else {
 			domain, status, err = verifiedOperationResult(operation, tenantID, eid, resultDER, publicKey, &result)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
@@ -584,7 +589,7 @@ func recordEimPackageResult(
 			Status:         status,
 			Payload:        cloneBytes(payload),
 		}); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if status == storage.OperationDone {
 			if allowUnverifiedEUICCPackageResults {
@@ -592,22 +597,22 @@ func recordEimPackageResult(
 			} else {
 				request, requestErr := signedRequestFromOperation(tenantID, eid, operation)
 				if requestErr != nil {
-					return nil, requestErr
+					return nil, false, requestErr
 				}
 				err = euiccpkg.ApplyPackageResultState(ctx, store, tenantID, eid, request.Package, domain)
 			}
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
 	notificationSequences, err := recordNotificationsFromList(ctx, store, tenantID, eid, notificationList)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sequenceNumbers = appendAckSequences(sequenceNumbers, notificationSequences...)
-	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, false, nil
 }
 
 func recordIpaEuiccDataResponse(
@@ -617,18 +622,18 @@ func recordIpaEuiccDataResponse(
 	eid string,
 	tlv *bertlv.TLV,
 	payload []byte,
-) (*protocolasn1.EimAcknowledgements, error) {
+) (*protocolasn1.EimAcknowledgements, bool, error) {
 	var response protocolasn1.IpaEuiccDataResponse
 	if err := response.UnmarshalBERTLV(tlv); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	transactionID := ipaEuiccDataTransactionID(&response)
 	operation, ok, err := pendingIpaEuiccDataOperation(ctx, store, tenantID, eid, transactionID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !ok {
-		return nil, storage.ErrNotFound
+		return nil, false, storage.ErrNotFound
 	}
 	status := storage.OperationDone
 	if response.Error != nil {
@@ -641,22 +646,28 @@ func recordIpaEuiccDataResponse(
 		Status:         status,
 		Payload:        cloneBytes(payload),
 	}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if status == storage.OperationDone {
 		if err := ipadata.ApplyResponse(ctx, store, tenantID, eid, &response, payload); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	sequenceNumbers := []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)}
+	if response.Error != nil {
+		return nil, true, nil
+	}
+	var sequenceNumbers []protocolasn1.SequenceNumber
 	if response.Data != nil {
 		notificationSequences, err := recordNotificationsFromList(ctx, store, tenantID, eid, response.Data.NotificationsRaw)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		sequenceNumbers = appendAckSequences(sequenceNumbers, notificationSequences...)
 	}
-	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+	if len(sequenceNumbers) == 0 {
+		return nil, true, nil
+	}
+	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, false, nil
 }
 
 func pendingIpaEuiccDataOperation(
@@ -1056,6 +1067,12 @@ func getEimPackageErrorResponse(code protocolasn1.EimPackageResultErrorCode) (Re
 	return responseFromMarshaler(&protocolasn1.GetEimPackageResponse{
 		Kind:  protocolasn1.GetEimPackageError,
 		Error: &code,
+	})
+}
+
+func provideResultEmptyResponse() (Response, error) {
+	return responseFromMarshaler(&protocolasn1.ProvideEimPackageResultResponse{
+		Kind: protocolasn1.ProvideResultResponseEmpty,
 	})
 }
 

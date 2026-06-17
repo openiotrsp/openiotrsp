@@ -194,17 +194,42 @@ func marshalX509Choice(tag bertlv.Tag, choice *X509Choice) (*bertlv.TLV, error) 
 	if choice == nil || choice.Data == nil {
 		return nil, errors.New("asn1: missing X.509 choice data")
 	}
-	if choice.Kind != X509SubjectPublicKeyInfo && choice.Kind != X509Certificate {
-		return nil, fmt.Errorf("asn1: unknown X.509 choice kind %d", choice.Kind)
+	innerTag, err := x509ChoiceArmTag(choice.Kind)
+	if err != nil {
+		return nil, err
 	}
-	return constructed(tag, rawChild(choice.Data)), nil
+	return constructed(tag, constructed(innerTag, rawChild(choice.Data))), nil
 }
 
 func unmarshalX509Choice(tlv *bertlv.TLV, fallback X509ChoiceKind) (*X509Choice, error) {
 	if len(tlv.Children) != 1 {
 		return nil, errors.New("asn1: X.509 choice must contain exactly one child")
 	}
-	return &X509Choice{Kind: fallback, Data: cloneTLV(tlv.Children[0])}, nil
+	child := tlv.Children[0]
+	kind := fallback
+	switch {
+	case hasTag(child, bertlv.ContextSpecific.Constructed(0)):
+		kind = X509SubjectPublicKeyInfo
+	case hasTag(child, bertlv.ContextSpecific.Constructed(1)):
+		kind = X509Certificate
+	default:
+		return nil, errors.New("asn1: X.509 choice missing A0/A1 CHOICE wrapper")
+	}
+	if len(child.Children) != 1 {
+		return nil, errors.New("asn1: X.509 CHOICE arm must contain exactly one child")
+	}
+	return &X509Choice{Kind: kind, Data: cloneTLV(child.Children[0])}, nil
+}
+
+func x509ChoiceArmTag(kind X509ChoiceKind) (bertlv.Tag, error) {
+	switch kind {
+	case X509SubjectPublicKeyInfo:
+		return bertlv.ContextSpecific.Constructed(0), nil
+	case X509Certificate:
+		return bertlv.ContextSpecific.Constructed(1), nil
+	default:
+		return bertlv.Tag{}, fmt.Errorf("asn1: unknown X.509 choice kind %d", kind)
+	}
 }
 
 // EcoOperation identifies the selected SGP.32 ECO command.

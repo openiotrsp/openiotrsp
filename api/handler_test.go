@@ -70,7 +70,7 @@ func TestEUICCDataEndpointCompletesThroughMockIPA(t *testing.T) {
 	server := newTestServer(t, store, DefaultTenantResolver{})
 
 	queued := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/euicc-data/fetch", map[string]any{
-		"tagListHex":                  "5abf20bf22bf2da8",
+		"tagListHex":                  "bf20bf22bf2da8",
 		"notificationSeqNumber":       7,
 		"euiccPackageResultSeqNumber": 9,
 	}, http.StatusAccepted)

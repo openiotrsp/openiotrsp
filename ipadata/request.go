@@ -13,9 +13,11 @@ import (
 )
 
 // DefaultTagList asks the IPA for the data objects OpenIoTRSP can currently
-// consume: EID, eUICCInfo1/2, profile inventory, certificates, and IPA
-// capabilities.
-var DefaultTagList = []byte{0x5a, 0xbf, 0x20, 0xbf, 0x22, 0xbf, 0x2d, 0xa5, 0xa6, 0xa8}
+// consume: eUICCInfo1/2, profile inventory, certificates, and IPA capabilities.
+// EID (tag 5A / application 26) is excluded: SGP.32 IpaEuiccDataRequest.tagList
+// lists data-object tags to return in IpaEuiccData, and the IPA already knows the
+// target EID from ESipa context.
+var DefaultTagList = []byte{0xbf, 0x20, 0xbf, 0x22, 0xbf, 0x2d, 0xa5, 0xa6, 0xa8}
 
 // RequestInput configures one IpaEuiccDataRequest.
 type RequestInput struct {
