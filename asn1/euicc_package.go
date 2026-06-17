@@ -157,13 +157,13 @@ func (e *EimConfigurationData) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 		out.AssociationToken = &value
 	}
 	if child := tlv.First(bertlv.ContextSpecific.Constructed(5)); child != nil {
-		out.EimPublicKeyData, err = unmarshalX509Choice(child, X509SubjectPublicKeyInfo)
+		out.EimPublicKeyData, err = unmarshalX509Choice(child)
 		if err != nil {
 			return err
 		}
 	}
 	if child := tlv.First(bertlv.ContextSpecific.Constructed(6)); child != nil {
-		out.TrustedPublicKeyDataTLS, err = unmarshalX509Choice(child, X509SubjectPublicKeyInfo)
+		out.TrustedPublicKeyDataTLS, err = unmarshalX509Choice(child)
 		if err != nil {
 			return err
 		}
@@ -201,12 +201,12 @@ func marshalX509Choice(tag bertlv.Tag, choice *X509Choice) (*bertlv.TLV, error) 
 	return constructed(tag, constructed(innerTag, rawChild(choice.Data))), nil
 }
 
-func unmarshalX509Choice(tlv *bertlv.TLV, fallback X509ChoiceKind) (*X509Choice, error) {
+func unmarshalX509Choice(tlv *bertlv.TLV) (*X509Choice, error) {
 	if len(tlv.Children) != 1 {
 		return nil, errors.New("asn1: X.509 choice must contain exactly one child")
 	}
 	child := tlv.Children[0]
-	kind := fallback
+	var kind X509ChoiceKind
 	switch {
 	case hasTag(child, bertlv.ContextSpecific.Constructed(0)):
 		kind = X509SubjectPublicKeyInfo
