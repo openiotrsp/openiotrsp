@@ -17,6 +17,7 @@ WORKDIR /app
 
 COPY --from=build /out/openiotrsp /app/openiotrsp
 COPY migrations /app/migrations
+COPY testdata /app/testdata
 COPY spec /app/spec
 
 ENTRYPOINT ["/app/openiotrsp"]

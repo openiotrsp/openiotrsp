@@ -17,8 +17,8 @@ func TestLoadSGP26SoftwareFixtureEIDMatchesDemoDefault(t *testing.T) {
 
 func requireSGP26SoftwareFixture(t *testing.T) *SGP26Fixture {
 	t.Helper()
-	if _, err := resolveFixturePath(defaultSGP26Zip); err != nil {
-		t.Skipf("SGP.26 fixture not present at %s", defaultSGP26Zip)
+	if _, err := resolveFixturePath(pki.DefaultSGP26Zip); err != nil {
+		t.Skipf("SGP.26 fixture not present at %s", pki.DefaultSGP26Zip)
 	}
 	fixture, err := LoadSGP26SoftwareFixture("")
 	if err != nil {

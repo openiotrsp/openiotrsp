@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/damonto/euicc-go/bertlv"
-	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
 )
@@ -17,14 +17,23 @@ import (
 type Runner struct {
 	Client       Client
 	Downloader   Downloader
+	Fixture      *SGP26Fixture
+	StateStore   *StateStore
 	EID          []byte
+	Device       *DeviceState
 	PollInterval time.Duration
 	Once         bool
 	Logger       *slog.Logger
 
 	NextNotificationSequence int64
 
-	pendingNotifications []pendingNotification
+	pendingNotifications          []pendingNotification
+	device                        *DeviceState
+	indirectProfileDownload       bool
+	chainPresentationRequired     bool
+	chainPresented                bool
+	deferSignedPackageWarned      bool
+	untrustedCIWarned             bool
 }
 
 type pendingNotification struct {
@@ -37,9 +46,12 @@ func (r Runner) Run(ctx context.Context) error {
 	if len(r.EID) == 0 {
 		return errors.New("mockipa: missing EID")
 	}
+	if r.Fixture == nil {
+		return errors.New("mockipa: SGP.26 fixture is required")
+	}
 	downloader := r.Downloader
 	if downloader == nil {
-		downloader = SysmocomDownloader{}
+		downloader = SysmocomDownloader{FixtureZip: "", IMEI: "490154203237518"}
 	}
 	interval := r.PollInterval
 	if interval <= 0 {
@@ -49,9 +61,24 @@ func (r Runner) Run(ctx context.Context) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if r.device == nil {
+		if r.Device != nil {
+			r.device = r.Device
+		} else {
+			r.device = newDeviceState()
+		}
+	}
+	if r.StateStore != nil {
+		if err := r.StateStore.Apply(r.device, &r.NextNotificationSequence, &r.indirectProfileDownload, &r.chainPresentationRequired, &r.chainPresented); err != nil {
+			return err
+		}
+	}
 
 	for {
 		if err := r.pollOnce(ctx, downloader, logger); err != nil {
+			return err
+		}
+		if err := r.persistState(); err != nil {
 			return err
 		}
 		if r.Once {
@@ -72,10 +99,13 @@ func (r *Runner) pollOnce(ctx context.Context, downloader Downloader, logger *sl
 	}
 	switch poll.Kind {
 	case protocolasn1.GetEimPackageEuiccPackageRequest:
+		logger.Info("eIM package received", "eid", hex.EncodeToString(r.EID), "kind", "euicc-package")
 		return r.handleEUICCPackage(ctx, logger, poll.EuiccPackageRequest)
 	case protocolasn1.GetEimPackageIpaEuiccDataRequest:
+		logger.Info("eIM package received", "eid", hex.EncodeToString(r.EID), "kind", "ipa-euicc-data")
 		return r.handleIpaEuiccDataRequest(ctx, logger, poll.IpaEuiccDataRequest)
 	case protocolasn1.GetEimPackageProfileDownloadTriggerRequest:
+		logger.Info("eIM package received", "eid", hex.EncodeToString(r.EID), "kind", "profile-download-trigger")
 		return r.handleProfileDownloadTrigger(ctx, downloader, logger, poll.ProfileDownloadTriggerRequest)
 	case protocolasn1.GetEimPackageError:
 		logger.Info("no eIM package available", "eid", hex.EncodeToString(r.EID))
@@ -95,15 +125,34 @@ func (r *Runner) handleIpaEuiccDataRequest(
 	if err := request.UnmarshalBERTLV(tlv); err != nil {
 		return err
 	}
-	response, err := IpaEuiccDataResponse(r.EID, &request)
+	response, err := buildIpaEuiccDataResponse(r.EID, r.Fixture, r.device, &request)
 	if err != nil {
 		return err
 	}
 	if err := r.Client.UploadIpaEuiccDataResponse(ctx, r.EID, response); err != nil {
 		return err
 	}
-	logger.Info("IPA eUICC data read complete", "eid", hex.EncodeToString(r.EID), "tagList", hex.EncodeToString(request.TagList))
+	r.chainPresented = true
+	r.deferSignedPackageWarned = false
+	certInfo := "none"
+	if r.Fixture != nil {
+		certInfo = fmt.Sprintf("eum=%dB euicc=%dB", len(r.Fixture.EUMCertificate), len(r.Fixture.EUICCCertificate))
+	}
+	logger.Info(
+		"IPA eUICC data read complete",
+		"eid", hex.EncodeToString(r.EID),
+		"tagList", hex.EncodeToString(request.TagList),
+		"certs", certInfo,
+	)
 	return nil
+}
+
+func (r *Runner) shouldDeferSignedPackage(logger *slog.Logger) bool {
+	if !r.chainPresentationRequired || r.chainPresented {
+		return false
+	}
+	r.warnAwaitingChainPresentation(logger)
+	return true
 }
 
 func (r *Runner) handleEUICCPackage(
@@ -111,25 +160,85 @@ func (r *Runner) handleEUICCPackage(
 	logger *slog.Logger,
 	request *protocolasn1.EuiccPackageRequest,
 ) error {
-	result, operation, err := SuccessfulEUICCPackageResult(request)
+	if r.shouldDeferSignedPackage(logger) {
+		return nil
+	}
+	result, operation, err := r.buildPackageResult(request)
 	if err != nil {
 		return err
 	}
 	if notificationKind := notificationKindForOperation(operation); notificationKind != "" {
-		r.queueNotification(notificationKind)
-		ack, err := r.Client.UploadEUICCPackageResultWithNotifications(ctx, r.EID, result, r.pendingNotificationTLVs())
-		if err != nil {
+		if _, err := r.queueNotification(notificationKind); err != nil {
 			return err
 		}
+		ack, err := r.Client.UploadEUICCPackageResultWithNotifications(ctx, r.EID, result, r.pendingNotificationTLVs())
+		if err != nil {
+			if IsRetriableESipaError(err) {
+				r.handleRetriableESipaError(logger, operation, err)
+				return nil
+			}
+			return err
+		}
+		r.applyOperationState(request, operation)
 		r.acknowledgeNotifications(ack)
 		logger.Info("eUICC package notification acknowledged", "eid", hex.EncodeToString(r.EID), "operation", operation, "acknowledged", ack.SequenceNumbers)
 	} else {
 		if err := r.Client.UploadEUICCPackageResult(ctx, r.EID, result); err != nil {
+			if IsRetriableESipaError(err) {
+				r.handleRetriableESipaError(logger, operation, err)
+				return nil
+			}
 			return err
 		}
+		r.applyOperationState(request, operation)
 	}
 	logger.Info("eUICC package operation complete", "eid", hex.EncodeToString(r.EID), "operation", operation)
 	return nil
+}
+
+func (r *Runner) handleRetriableESipaError(logger *slog.Logger, operation string, err error) {
+	if IsChainNotPresentedError(err) {
+		r.chainPresentationRequired = true
+		r.chainPresented = false
+		r.dropPendingNotifications()
+		r.warnAwaitingChainPresentation(logger)
+	} else if IsUntrustedCIError(err) {
+		r.warnUntrustedCI(logger)
+	}
+	logger.Warn(
+		"eIM rejected signed eUICC package",
+		"eid", hex.EncodeToString(r.EID),
+		"operation", operation,
+		"error", err,
+	)
+}
+
+func (r *Runner) warnUntrustedCI(logger *slog.Logger) {
+	if r.untrustedCIWarned {
+		return
+	}
+	r.untrustedCIWarned = true
+	ciPath := "testdata/sgp26_variant_o/CERT_CI_SIG_NIST.der"
+	logger.Error(
+		"eIM does not trust the SGP.26 Variant O test CI root; add CERT_CI_SIG_NIST.der from the GSMA SGP.26 fixture to the eIM trusted CI store",
+		"eid", hex.EncodeToString(r.EID),
+		"ciCert", ciPath,
+	)
+}
+
+func (r *Runner) warnAwaitingChainPresentation(logger *slog.Logger) {
+	if r.deferSignedPackageWarned {
+		return
+	}
+	r.deferSignedPackageWarned = true
+	logger.Warn(
+		"deferring signed eUICC packages: cancel pending euicc-package operations on the eIM, queue only POST /v1/devices/{eid}/euicc-data/fetch, then re-queue PSMO after IPA eUICC data completes",
+		"eid", hex.EncodeToString(r.EID),
+	)
+}
+
+func (r *Runner) dropPendingNotifications() {
+	r.pendingNotifications = nil
 }
 
 func (r *Runner) handleProfileDownloadTrigger(
@@ -148,15 +257,27 @@ func (r *Runner) handleProfileDownloadTrigger(
 	if err != nil {
 		return err
 	}
-	logger.Info("profile download trigger received", "smdp", activation.SMDPAddress, "matchingID", activation.MatchingID)
-	result, err := downloader.Download(ctx, activation)
+	activeDownloader := downloader
+	if r.indirectProfileDownload {
+		activeDownloader = IndirectDownloader{
+			Client:     r.Client,
+			FixtureZip: "",
+			IMEI:       indirectDownloaderIMEI(downloader),
+		}
+	}
+	logger.Info("profile download trigger received", "smdp", activation.SMDPAddress, "matchingID", activation.MatchingID, "indirect", r.indirectProfileDownload)
+	result, err := activeDownloader.Download(ctx, activation)
 	if err != nil {
 		return err
 	}
-	if err := r.Client.UploadProfileDownloadResult(ctx, r.EID, SuccessfulProfileDownloadResult(trigger.EimTransactionID)); err != nil {
+	if err := r.Client.UploadProfileDownloadResult(ctx, r.EID, ProfileDownloadResult(trigger.EimTransactionID, result.ProfileInstallationResult)); err != nil {
 		return err
 	}
-	notification := r.queueNotification("install")
+	r.device.recordDownload(result.ProfileID, result.SMDP)
+	notification, err := r.queueNotification("install")
+	if err != nil {
+		return err
+	}
 	if err := r.Client.SendNotification(ctx, notification.TLV); err != nil {
 		return err
 	}
@@ -172,14 +293,18 @@ func (r *Runner) handleProfileDownloadTrigger(
 	return nil
 }
 
-func (r *Runner) queueNotification(kind string) pendingNotification {
+func (r *Runner) queueNotification(kind string) (pendingNotification, error) {
 	sequenceNumber := r.nextNotificationSequence()
+	signed, err := SignedNotification(r.Fixture, r.EID, sequenceNumber, kind)
+	if err != nil {
+		return pendingNotification{}, err
+	}
 	notification := pendingNotification{
 		SequenceNumber: sequenceNumber,
-		TLV:            Notification(r.EID, sequenceNumber, kind),
+		TLV:            signed,
 	}
 	r.pendingNotifications = append(r.pendingNotifications, notification)
-	return notification
+	return notification, nil
 }
 
 func (r *Runner) pendingNotificationTLVs() []*bertlv.TLV {
@@ -224,6 +349,60 @@ func (r *Runner) nextNotificationSequence() int64 {
 	return sequenceNumber
 }
 
+func (r *Runner) buildPackageResult(request *protocolasn1.EuiccPackageRequest) (*protocolasn1.EuiccPackageResult, string, error) {
+	return SignedEUICCPackageResult(r.Fixture, r.device, request, 0)
+}
+
+func (r *Runner) persistState() error {
+	if r.StateStore == nil {
+		return nil
+	}
+	return r.StateStore.Save(r.device, r.NextNotificationSequence, r.indirectProfileDownload, r.chainPresentationRequired, r.chainPresented)
+}
+
+func (r *Runner) applyOperationState(request *protocolasn1.EuiccPackageRequest, operation string) {
+	if r.device == nil || request == nil {
+		return
+	}
+	pkg := request.EuiccPackageSigned.EuiccPackage
+	if pkg.Kind != protocolasn1.EuiccPackagePSMO || len(pkg.PSMOs) != 1 {
+		return
+	}
+	switch operation {
+	case "enable":
+		r.device.applyPSMO(pkg.PSMOs[0], true)
+	case "disable":
+		r.device.applyPSMO(pkg.PSMOs[0], false)
+	case "delete":
+		if len(pkg.PSMOs[0].ICCID) > 0 {
+			delete(r.device.Profiles, hex.EncodeToString(pkg.PSMOs[0].ICCID))
+		}
+	case "set-fallback-attribute":
+		r.device.setProfileFallback(pkg.PSMOs[0].ICCID)
+	case "unset-fallback-attribute":
+		r.device.clearProfileFallback()
+	case "add-eim":
+		if pkg.Kind == protocolasn1.EuiccPackageECO && len(pkg.ECOs) == 1 && pkg.ECOs[0].Config != nil {
+			r.indirectProfileDownload = pkg.ECOs[0].Config.IndirectProfileDownload
+		}
+	case "update-eim":
+		if pkg.Kind == protocolasn1.EuiccPackageECO && len(pkg.ECOs) == 1 && pkg.ECOs[0].Config != nil {
+			r.indirectProfileDownload = pkg.ECOs[0].Config.IndirectProfileDownload
+		}
+	}
+}
+
+func indirectDownloaderIMEI(downloader Downloader) string {
+	switch value := downloader.(type) {
+	case SysmocomDownloader:
+		return value.IMEI
+	case IndirectDownloader:
+		return value.IMEI
+	default:
+		return ""
+	}
+}
+
 func notificationKindForOperation(operation string) string {
 	switch operation {
 	case "enable", "disable", "delete":
@@ -233,69 +412,6 @@ func notificationKindForOperation(operation string) string {
 	}
 }
 
-// IpaEuiccDataResponse builds representative eUICC/IPA data for the mock IPA.
-func IpaEuiccDataResponse(eid []byte, request *protocolasn1.IpaEuiccDataRequest) (*protocolasn1.IpaEuiccDataResponse, error) {
-	state := protocolasn1.ProfileStateEnabled
-	profiles, err := (&protocolasn1.ProfileInfoListResponse{
-		Profiles: []protocolasn1.ProfileInfo{{
-			ICCID:             []byte{0x89, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55},
-			ProfileState:      &state,
-			FallbackAttribute: true,
-		}},
-	}).MarshalBERTLV()
-	if err != nil {
-		return nil, err
-	}
-	transactionID := []byte(nil)
-	if request != nil {
-		transactionID = cloneBytes(request.EimTransactionID)
-	}
-	defaultSMDP := "smdp.example"
-	rootSMDS := "smds.example"
-	return &protocolasn1.IpaEuiccDataResponse{
-		Data: &protocolasn1.IpaEuiccData{
-			RawObjects: []*bertlv.TLV{
-				bertlv.NewValue(bertlv.Application.Primitive(26), cloneBytes(eid)),
-				bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte(defaultSMDP)),
-				euiccInfo1TLV(),
-				euiccInfo2TLV(),
-				bertlv.NewValue(bertlv.ContextSpecific.Primitive(3), []byte(rootSMDS)),
-				ipaCapabilitiesTLV(),
-				profiles,
-				bertlv.NewValue(bertlv.ContextSpecific.Primitive(7), transactionID),
-			},
-		},
-	}, nil
-}
-
-func euiccInfo1TLV() *bertlv.TLV {
-	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(32),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x03, 0x02, 0x01}),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
-			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xaa, 0x01}),
-		),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10),
-			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xbb, 0x02}),
-		),
-	)
-}
-
-func euiccInfo2TLV() *bertlv.TLV {
-	category, _ := bertlv.MarshalValue(bertlv.ContextSpecific.Primitive(11), primitive.MarshalInt(int64(1)))
-	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(34),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte{0x03, 0x00, 0x00}),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{0x03, 0x02, 0x01}),
-		bertlv.NewValue(bertlv.ContextSpecific.Primitive(3), []byte{0x01, 0x00, 0x00}),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
-			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xaa, 0x01}),
-		),
-		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(10),
-			bertlv.NewValue(bertlv.Universal.Primitive(4), []byte{0xcc, 0x03}),
-		),
-		category,
-	)
-}
-
 func ipaCapabilitiesTLV() *bertlv.TLV {
 	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(8),
 		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{0x02, 0xfc}),
@@ -303,39 +419,13 @@ func ipaCapabilitiesTLV() *bertlv.TLV {
 	)
 }
 
-// SuccessfulEUICCPackageResult builds the successful PSMO/ECO result emitted by
-// the mock IPA. SeqNumber is left at zero; ESipa matches it to pending work by
-// eIM ID, counter, and transaction ID.
-func SuccessfulEUICCPackageResult(request *protocolasn1.EuiccPackageRequest) (*protocolasn1.EuiccPackageResult, string, error) {
-	if request == nil {
-		return nil, "", errors.New("mockipa: missing eUICC package request")
-	}
-	pkg := request.EuiccPackageSigned.EuiccPackage
-	resultData, operation, err := successfulResultData(pkg, request.EuiccPackageSigned.EimID)
-	if err != nil {
-		return nil, "", err
-	}
-	return &protocolasn1.EuiccPackageResult{
-		Kind: protocolasn1.EuiccPackageResultOK,
-		Signed: &protocolasn1.EuiccPackageResultSigned{
-			Data: protocolasn1.EuiccPackageResultDataSigned{
-				EimID:            request.EuiccPackageSigned.EimID,
-				CounterValue:     request.EuiccPackageSigned.CounterValue,
-				EimTransactionID: cloneBytes(request.EuiccPackageSigned.EimTransactionID),
-				Results:          []protocolasn1.EuiccResultData{resultData},
-			},
-			EuiccSignEPR: []byte{0x30, 0x00},
-		},
-	}, operation, nil
-}
-
-func successfulResultData(pkg protocolasn1.EuiccPackage, eimID string) (protocolasn1.EuiccResultData, string, error) {
+func successfulResultData(pkg protocolasn1.EuiccPackage, eimID string, device *DeviceState) (protocolasn1.EuiccResultData, string, error) {
 	switch pkg.Kind {
 	case protocolasn1.EuiccPackagePSMO:
 		if len(pkg.PSMOs) != 1 {
 			return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: only single PSMO eUICC packages are supported")
 		}
-		return psmoResultData(pkg.PSMOs[0])
+		return psmoResultData(pkg.PSMOs[0], device)
 	case protocolasn1.EuiccPackageECO:
 		if len(pkg.ECOs) != 1 {
 			return protocolasn1.EuiccResultData{}, "", errors.New("mockipa: only single ECO eUICC packages are supported")
@@ -346,7 +436,7 @@ func successfulResultData(pkg protocolasn1.EuiccPackage, eimID string) (protocol
 	}
 }
 
-func psmoResultData(psmo protocolasn1.Psmo) (protocolasn1.EuiccResultData, string, error) {
+func psmoResultData(psmo protocolasn1.Psmo, device *DeviceState) (protocolasn1.EuiccResultData, string, error) {
 	switch psmo.Operation {
 	case protocolasn1.PsmoEnable:
 		resultData, err := protocolasn1.IntegerEuiccResult(3, 0)
@@ -358,14 +448,23 @@ func psmoResultData(psmo protocolasn1.Psmo) (protocolasn1.EuiccResultData, strin
 		resultData, err := protocolasn1.IntegerEuiccResult(5, 0)
 		return resultData, "delete", err
 	case protocolasn1.PsmoListProfileInfo:
-		state := protocolasn1.ProfileStateDisabled
-		resultData, err := protocolasn1.ProfileInfoListEuiccResult(&protocolasn1.ProfileInfoListResponse{
-			Profiles: []protocolasn1.ProfileInfo{{
-				ICCID:             []byte{0x89, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55},
-				ProfileState:      &state,
-				FallbackAttribute: true,
-			}},
-		})
+		profiles := make([]protocolasn1.ProfileInfo, 0)
+		if device != nil {
+			for _, record := range device.Profiles {
+				enabled := protocolasn1.ProfileStateEnabled
+				disabled := protocolasn1.ProfileStateDisabled
+				stateValue := &disabled
+				if record.Enabled {
+					stateValue = &enabled
+				}
+				profiles = append(profiles, protocolasn1.ProfileInfo{
+					ICCID:             cloneBytes(record.ICCID),
+					ProfileState:      stateValue,
+					FallbackAttribute: record.Fallback,
+				})
+			}
+		}
+		resultData, err := protocolasn1.ProfileInfoListEuiccResult(&protocolasn1.ProfileInfoListResponse{Profiles: profiles})
 		return resultData, "list-profile-info", err
 	case protocolasn1.PsmoGetRAT:
 		return protocolasn1.EuiccResultData{Raw: bertlv.NewChildren(bertlv.ContextSpecific.Constructed(6))}, "get-rat", nil

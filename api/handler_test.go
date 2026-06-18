@@ -22,6 +22,7 @@ import (
 	"github.com/openiotrsp/openiotrsp/esipa"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	"github.com/openiotrsp/openiotrsp/mockipa"
+	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
 )
@@ -81,14 +82,14 @@ func TestEUICCDataEndpointCompletesThroughMockIPA(t *testing.T) {
 	runMockIPAOnce(t, server)
 
 	data := getJSON[euiccDataResponse](t, server, "/v1/devices/"+testEID+"/euicc-data", http.StatusOK)
-	if data.DefaultSMDPAddress != "smdp.example" || data.EUICCInfo1Base64 == "" || data.IPACapabilitiesBase64 == "" {
-		t.Fatalf("eUICC data = %#v, want SMDP, eUICCInfo1, and IPA capabilities", data)
+	if data.EUICCInfo1Base64 == "" || data.IPACapabilitiesBase64 == "" {
+		t.Fatalf("eUICC data = %#v, want eUICCInfo1 and IPA capabilities", data)
 	}
-	if len(data.CertificateIdentifiers) != 3 {
-		t.Fatalf("certificate identifiers = %#v, want CI identifiers from eUICCInfo1/2", data.CertificateIdentifiers)
+	if len(data.CertificateIdentifiers) == 0 {
+		t.Fatalf("certificate identifiers = %#v, want CI identifiers from eUICCInfo", data.CertificateIdentifiers)
 	}
-	if len(data.Profiles) != 1 || data.Profiles[0].ICCID != "89101122334455" || !data.Profiles[0].IsEnabled {
-		t.Fatalf("profiles = %#v, want enabled mock profile", data.Profiles)
+	if len(data.Profiles) != 0 {
+		t.Fatalf("profiles = %#v, want empty inventory before download", data.Profiles)
 	}
 	assertOperationDone(t, server, queued.Operations[0].ID)
 }
@@ -193,6 +194,8 @@ func TestPSMOEndpointsCompleteThroughMockIPA(t *testing.T) {
 	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: testEID}); err != nil {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
+	device := mockipa.NewDeviceState()
+	device.SeedProfile(testICCID, false, true)
 	if err := store.SetProfileState(ctx, storage.DefaultTenantID, storage.ProfileState{
 		EID:       testEID,
 		ICCID:     testICCID,
@@ -203,12 +206,12 @@ func TestPSMOEndpointsCompleteThroughMockIPA(t *testing.T) {
 	server := newTestServer(t, store, DefaultTenantResolver{})
 
 	list := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/list", nil, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, list.Operations[0].ID)
 	assertProfileFallback(t, server, testICCID, true)
 
 	setFallback := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+testICCID+"/fallback", nil, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, setFallback.Operations[0].ID)
 	assertProfileFallback(t, server, testICCID, true)
 
@@ -220,7 +223,7 @@ func TestPSMOEndpointsCompleteThroughMockIPA(t *testing.T) {
 	if err := json.NewDecoder(unsetResponse.Body).Decode(&unset); err != nil {
 		t.Fatalf("Decode(unset fallback) error = %v", err)
 	}
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, unset.Operations[0].ID)
 	assertProfileFallback(t, server, testICCID, false)
 
@@ -229,17 +232,17 @@ func TestPSMOEndpointsCompleteThroughMockIPA(t *testing.T) {
 		"defaultSmdpOid":      "1.2.840.113549",
 		"defaultSmdpAddress":  "smdp.example",
 	}, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, configure.Operations[0].ID)
 
 	getRAT := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/get-rat", nil, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, getRAT.Operations[0].ID)
 
 	setDefault := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/default-dp-address", map[string]any{
 		"defaultDpAddress": "smdp.example",
 	}, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, setDefault.Operations[0].ID)
 }
 
@@ -390,6 +393,14 @@ func TestEveryEndpointResolvesTenant(t *testing.T) {
 
 func newTestServer(t *testing.T, store storage.Store, resolver TenantResolver) *httptest.Server {
 	t.Helper()
+	fixture, err := mockipa.LoadSGP26SoftwareFixture("")
+	if err != nil {
+		t.Fatalf("LoadSGP26SoftwareFixture() error = %v", err)
+	}
+	euiccResolver, err := esipa.NewStaticEUICCCertificateResolver(fixture.CICertificate, fixture.EUMCertificate, fixture.EUICCCertificate)
+	if err != nil {
+		t.Fatalf("NewStaticEUICCCertificateResolver() error = %v", err)
+	}
 	apiHandler := NewHTTPHandler(store, resolver, &euiccpkg.Service{
 		Store:  store,
 		Signer: newTestSigner(t),
@@ -398,18 +409,42 @@ func newTestServer(t *testing.T, store storage.Store, resolver TenantResolver) *
 	root := http.NewServeMux()
 	root.Handle("/v1/", apiHandler)
 	esipaHandler := esipa.NewHandler(store, storage.DefaultTenantID)
-	esipaHandler.AllowUnverifiedEUICCPackageResults = true
+	esipaHandler.EUICCPublicKey = euiccResolver
 	root.Handle(esipa.DefaultPath, esipaHandler)
 	server := httptest.NewServer(root)
 	t.Cleanup(server.Close)
 	return server
 }
 
-func runMockIPAOnce(t *testing.T, server *httptest.Server) {
+type testProfileDownloader struct{}
+
+func (testProfileDownloader) Download(_ context.Context, activation profiledownload.ActivationCode) (mockipa.DownloadResult, error) {
+	return mockipa.DownloadResult{
+		ProfileID: activation.ProfileID(),
+		SMDP:      activation.SMDPAddress,
+		Offline:   true,
+	}, nil
+}
+
+func runMockIPAOnce(t *testing.T, server *httptest.Server, device ...*mockipa.DeviceState) {
 	t.Helper()
+	var dev *mockipa.DeviceState
+	if len(device) > 0 {
+		dev = device[0]
+	}
+	fixture, err := mockipa.LoadSGP26SoftwareFixture("")
+	if err != nil {
+		t.Fatalf("LoadSGP26SoftwareFixture() error = %v", err)
+	}
+	transport := mockipa.HTTPTransport{
+		Endpoint:   server.URL + esipa.DefaultPath,
+		HTTPClient: server.Client(),
+	}
 	runner := mockipa.Runner{
-		Client:                   mockipa.Client{Endpoint: server.URL + esipa.DefaultPath, HTTPClient: server.Client()},
-		Downloader:               mockipa.OfflineDownloader{},
+		Client:                   mockipa.Client{Transport: transport},
+		Downloader:               testProfileDownloader{},
+		Fixture:                  fixture,
+		Device:                   dev,
 		EID:                      mustEIDBytes(t, testEID),
 		Once:                     true,
 		NextNotificationSequence: nextMockNotificationSequence.Add(1),

@@ -1,23 +1,31 @@
-// Package mockipa implements a small IPA used by the local demo and tests.
+// Package mockipa implements a demo IoT Profile Assistant that polls an eIM over
+// ESipa and drives the software eUICC for local interoperability testing.
 package mockipa
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
 
 	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
-	"github.com/openiotrsp/openiotrsp/esipa"
 )
 
 // Client exchanges BER-TLV ESipa messages with an eIM.
 type Client struct {
-	Endpoint   string
-	HTTPClient *http.Client
+	Transport Transport
+}
+
+// NewHTTPClient creates a Client that uses HTTPS ESipa.
+func NewHTTPClient(endpoint string, transport HTTPTransport) Client {
+	if transport.Endpoint == "" {
+		transport.Endpoint = endpoint
+	}
+	return Client{Transport: transport}
+}
+
+// NewCoAPClient creates a Client that uses CoAP/DTLS ESipa.
+func NewCoAPClient(transport *CoAPTransport) Client {
+	return Client{Transport: transport}
 }
 
 // Poll fetches one pending eIM package for eid.
@@ -108,67 +116,33 @@ func (c Client) uploadEimPackageResultTLV(ctx context.Context, eid []byte, tlv *
 	if err := decoded.UnmarshalBERTLV(response.Raw); err != nil {
 		return nil, err
 	}
-	var ack protocolasn1.EimAcknowledgements
-	if err := ack.UnmarshalBERTLV(decoded.Raw); err != nil {
-		return &protocolasn1.EimAcknowledgements{}, nil
-	}
-	return &ack, nil
+	return decodeProvideResultAck(decoded.Raw)
 }
 
 func (c Client) exchange(ctx context.Context, payload []byte) (*protocolasn1.ESipaMessageFromEimToIpa, error) {
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+	if c.Transport == nil {
+		return nil, fmt.Errorf("mockipa: missing ESipa transport")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(payload))
+	body, noContent, err := c.Transport.Exchange(ctx, payload)
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Content-Type", esipa.MediaType)
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, err
+	if noContent {
+		return &protocolasn1.ESipaMessageFromEimToIpa{}, nil
 	}
-	defer func() {
-		_ = response.Body.Close()
-	}()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mockipa: ESipa returned %s: %s", response.Status, string(body))
-	}
-	var envelope protocolasn1.ESipaMessageFromEimToIpa
-	if err := protocolasn1.Decode(body, &envelope); err != nil {
-		return nil, err
-	}
-	return &envelope, nil
+	return decodeEimEnvelope(body)
 }
 
 func (c Client) exchangeNoContent(ctx context.Context, payload []byte) error {
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+	if c.Transport == nil {
+		return fmt.Errorf("mockipa: missing ESipa transport")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(payload))
+	_, noContent, err := c.Transport.Exchange(ctx, payload)
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Content-Type", esipa.MediaType)
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = response.Body.Close()
-	}()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode != http.StatusNoContent || len(body) != 0 {
-		return fmt.Errorf("mockipa: ESipa notification returned %s: %s", response.Status, string(body))
+	if !noContent {
+		return fmt.Errorf("mockipa: ESipa notification expected no-content response")
 	}
 	return nil
 }

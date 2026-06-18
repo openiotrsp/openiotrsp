@@ -54,6 +54,13 @@ func certificateTLV(der []byte) *bertlv.TLV {
 	return mustParseTLV(der)
 }
 
+func ipaEuiccDataCertificateTLV(tagNumber uint64, der []byte) *bertlv.TLV {
+	if len(der) == 0 {
+		return nil
+	}
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(tagNumber), mustParseTLV(der))
+}
+
 func authenticateResponseOkTLV(euiccSigned1 *bertlv.TLV, signature, euiccCertDER, eumCertDER []byte) *bertlv.TLV {
 	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(56),
 		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0),

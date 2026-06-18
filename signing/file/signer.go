@@ -37,6 +37,23 @@ func Load(keyPath, certPath string) (*Signer, error) {
 	return New(keyBytes, certBytes)
 }
 
+// NewFromECDSA creates a signer from an in-memory ECDSA key and DER certificate.
+func NewFromECDSA(key *ecdsa.PrivateKey, certDER []byte) (*Signer, error) {
+	if key == nil {
+		return nil, errors.New("missing ECDSA private key")
+	}
+	if len(certDER) == 0 {
+		return nil, errors.New("missing eIM certificate")
+	}
+	if err := certificateMatchesKey(certDER, &key.PublicKey); err != nil {
+		return nil, err
+	}
+	return &Signer{
+		key:     key,
+		certDER: append([]byte(nil), certDER...),
+	}, nil
+}
+
 // New creates a file-backed signer from PEM or DER encoded key and certificate bytes.
 func New(keyBytes, certBytes []byte) (*Signer, error) {
 	keyDER, err := decodePEMOrDER(keyBytes, "EC PRIVATE KEY", "PRIVATE KEY")

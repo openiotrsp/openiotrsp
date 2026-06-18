@@ -39,6 +39,10 @@ type config struct {
 	euiccCertPath               string
 	eumCertPath                 string
 	ciCertPath                  string
+	fixtureZip                  string
+	coapListenAddr              string
+	coapPSKIdentity             string
+	coapPSKKey                  string
 	activationCode              string
 	enqueueOnStart              bool
 	allowUnverifiedEUICCResults bool
@@ -77,6 +81,9 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if euiccPublicKey == nil && !cfg.allowUnverifiedEUICCResults {
+		return errors.New("eIM server requires eUICC certificate resolver; set OPENIOTRSP_SGP26_FIXTURE_ZIP or explicit cert paths")
+	}
 
 	started := time.Now()
 	mux := http.NewServeMux()
@@ -94,11 +101,21 @@ func run(logger *slog.Logger) error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("eIM server listening", "addr", cfg.listenAddr, "eid", cfg.eid)
 		errCh <- server.ListenAndServe()
 	}()
+	if cfg.coapListenAddr != "" {
+		go func() {
+			logger.Info("eIM CoAP/DTLS ESipa listening", "addr", cfg.coapListenAddr)
+			errCh <- handler.ListenCoAPDTLS(ctx, esipa.DTLSServerConfig{
+				ListenAddr:  cfg.coapListenAddr,
+				PSKIdentity: cfg.coapPSKIdentity,
+				PSKKey:      cfg.coapPSKKey,
+			})
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
@@ -131,6 +148,10 @@ func loadConfig() config {
 		euiccCertPath:               appruntime.Env("OPENIOTRSP_EUICC_CERT_PATH", ""),
 		eumCertPath:                 appruntime.Env("OPENIOTRSP_EUM_CERT_PATH", ""),
 		ciCertPath:                  appruntime.Env("OPENIOTRSP_CI_CERT_PATH", ""),
+		fixtureZip:                  appruntime.Env("OPENIOTRSP_SGP26_FIXTURE_ZIP", "spec/SGP.26_v3.0.2-17-July-2025.zip"),
+		coapListenAddr:              appruntime.Env("OPENIOTRSP_ESIPA_COAP_LISTEN_ADDR", ":5683"),
+		coapPSKIdentity:             appruntime.Env("OPENIOTRSP_ESIPA_DTLS_PSK_IDENTITY", esipa.DefaultDTLSPSKIdentity),
+		coapPSKKey:                  appruntime.Env("OPENIOTRSP_ESIPA_DTLS_PSK_KEY", esipa.DefaultDTLSPSKKey),
 		activationCode:              activationCode,
 		enqueueOnStart:              appruntime.EnvBool("OPENIOTRSP_DEMO_ENQUEUE_ON_START", true),
 		allowUnverifiedEUICCResults: appruntime.EnvBool("OPENIOTRSP_ALLOW_UNVERIFIED_EUICC_RESULTS", false),
@@ -138,13 +159,24 @@ func loadConfig() config {
 }
 
 func loadPackageService(cfg config) (*euiccpkg.Service, error) {
-	if cfg.eimKeyPath == "" && cfg.eimCertPath == "" {
+	if cfg.eimKeyPath != "" || cfg.eimCertPath != "" {
+		if cfg.eimKeyPath == "" || cfg.eimCertPath == "" {
+			return nil, errors.New("both OPENIOTRSP_EIM_KEY_PATH and OPENIOTRSP_EIM_CERT_PATH are required for signed eUICC package API endpoints")
+		}
+		signer, err := filesigner.Load(cfg.eimKeyPath, cfg.eimCertPath)
+		if err != nil {
+			return nil, err
+		}
+		return &euiccpkg.Service{
+			Signer: signer,
+			EimID:  cfg.eimID,
+		}, nil
+	}
+	material, err := pki.LoadSGP26VariantONISTMaterial(cfg.fixtureZip)
+	if err != nil || material.EIMKey == nil || len(material.EIMCertificate) == 0 {
 		return nil, nil
 	}
-	if cfg.eimKeyPath == "" || cfg.eimCertPath == "" {
-		return nil, errors.New("both OPENIOTRSP_EIM_KEY_PATH and OPENIOTRSP_EIM_CERT_PATH are required for signed eUICC package API endpoints")
-	}
-	signer, err := filesigner.Load(cfg.eimKeyPath, cfg.eimCertPath)
+	signer, err := filesigner.NewFromECDSA(material.EIMKey, material.EIMCertificate)
 	if err != nil {
 		return nil, err
 	}
@@ -155,25 +187,29 @@ func loadPackageService(cfg config) (*euiccpkg.Service, error) {
 }
 
 func loadEUICCPublicKeyResolver(cfg config) (esipa.EUICCPublicKeyResolver, error) {
-	if cfg.euiccCertPath == "" && cfg.eumCertPath == "" && cfg.ciCertPath == "" {
+	if cfg.euiccCertPath != "" || cfg.eumCertPath != "" || cfg.ciCertPath != "" {
+		if cfg.euiccCertPath == "" || cfg.eumCertPath == "" || cfg.ciCertPath == "" {
+			return nil, errors.New("OPENIOTRSP_EUICC_CERT_PATH, OPENIOTRSP_EUM_CERT_PATH, and OPENIOTRSP_CI_CERT_PATH are required together for ESipa eUICC result verification")
+		}
+		euiccDER, err := os.ReadFile(cfg.euiccCertPath)
+		if err != nil {
+			return nil, err
+		}
+		eumDER, err := os.ReadFile(cfg.eumCertPath)
+		if err != nil {
+			return nil, err
+		}
+		ciDER, err := os.ReadFile(cfg.ciCertPath)
+		if err != nil {
+			return nil, err
+		}
+		return esipa.NewStaticEUICCCertificateResolver(ciDER, eumDER, euiccDER)
+	}
+	material, err := pki.LoadSGP26VariantONISTMaterial(cfg.fixtureZip)
+	if err != nil {
 		return nil, nil
 	}
-	if cfg.euiccCertPath == "" || cfg.eumCertPath == "" || cfg.ciCertPath == "" {
-		return nil, errors.New("OPENIOTRSP_EUICC_CERT_PATH, OPENIOTRSP_EUM_CERT_PATH, and OPENIOTRSP_CI_CERT_PATH are required together for ESipa eUICC result verification")
-	}
-	euiccDER, err := os.ReadFile(cfg.euiccCertPath)
-	if err != nil {
-		return nil, err
-	}
-	eumDER, err := os.ReadFile(cfg.eumCertPath)
-	if err != nil {
-		return nil, err
-	}
-	ciDER, err := os.ReadFile(cfg.ciCertPath)
-	if err != nil {
-		return nil, err
-	}
-	return esipa.NewStaticEUICCCertificateResolver(ciDER, eumDER, euiccDER)
+	return esipa.NewStaticEUICCCertificateResolver(material.CICertificate, material.EUMCertificate, material.EUICCCertificate)
 }
 
 func seedDemo(ctx context.Context, store storage.Store, cfg config, logger *slog.Logger) error {

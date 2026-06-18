@@ -55,6 +55,14 @@ func NewSoftwareEUICC(fixture *SGP26Fixture) (*SoftwareEUICC, error) {
 	}, nil
 }
 
+// EUICCInfo1 returns the software eUICC EUICCInfo1 TLV.
+func (s *SoftwareEUICC) EUICCInfo1() *bertlv.TLV {
+	if s == nil || s.euiccInfo1 == nil {
+		return nil
+	}
+	return s.euiccInfo1.Clone()
+}
+
 // Transmit handles structured ES10 requests from euicc-go.
 func (s *SoftwareEUICC) Transmit(request bertlv.Marshaler, response bertlv.Unmarshaler) error {
 	switch request.(type) {

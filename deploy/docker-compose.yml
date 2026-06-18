@@ -30,8 +30,13 @@ services:
       OPENIOTRSP_DEMO_EID: ${OPENIOTRSP_DEMO_EID:-89049032123451234512345678901235}
       OPENIOTRSP_DEMO_SMDP_ADDRESS: ${OPENIOTRSP_DEMO_SMDP_ADDRESS:-smdpp.test.rsp.sysmocom.de}
       OPENIOTRSP_DEMO_MATCHING_ID: ${OPENIOTRSP_DEMO_MATCHING_ID:-TS48V1-B-UNIQUE}
+      OPENIOTRSP_SGP26_FIXTURE_ZIP: /app/spec/SGP.26_v3.0.2-17-July-2025.zip
+      OPENIOTRSP_ESIPA_COAP_LISTEN_ADDR: :5683
+      OPENIOTRSP_ESIPA_DTLS_PSK_IDENTITY: openiotrsp
+      OPENIOTRSP_ESIPA_DTLS_PSK_KEY: openiotrsp-secret
     ports:
       - "8080:8080"
+      - "5683:5683/udp"
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,8 +57,11 @@ services:
       OPENIOTRSP_DEMO_EID: ${OPENIOTRSP_DEMO_EID:-89049032123451234512345678901235}
       OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE: ${OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE:-live}
       OPENIOTRSP_SGP26_FIXTURE_ZIP: /app/spec/SGP.26_v3.0.2-17-July-2025.zip
+      OPENIOTRSP_MOCKIPA_STATE_PATH: /app/data/mockipa-state.json
       OPENIOTRSP_MOCKIPA_IMEI: ${OPENIOTRSP_MOCKIPA_IMEI:-490154203237518}
       OPENIOTRSP_MOCKIPA_ONCE: "false"
+    volumes:
+      - mockipa_data:/app/data
     depends_on:
       eim-server:
         condition: service_healthy
@@ -72,3 +80,4 @@ services:
 
 volumes:
   postgres_data:
+  mockipa_data:

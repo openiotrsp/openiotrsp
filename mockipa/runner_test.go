@@ -15,6 +15,16 @@ import (
 	"github.com/openiotrsp/openiotrsp/storage/memory"
 )
 
+type testProfileDownloader struct{}
+
+func (testProfileDownloader) Download(_ context.Context, activation profiledownload.ActivationCode) (DownloadResult, error) {
+	return DownloadResult{
+		ProfileID: activation.ProfileID(),
+		SMDP:      activation.SMDPAddress,
+		Offline:   true,
+	}, nil
+}
+
 func TestRunnerCompletesProfileDownloadTrigger(t *testing.T) {
 	t.Parallel()
 
@@ -36,12 +46,17 @@ func TestRunnerCompletesProfileDownloadTrigger(t *testing.T) {
 		t.Fatalf("EnqueueTrigger() error = %v", err)
 	}
 
+	fixture := requireSGP26SoftwareFixture(t)
 	server := httptest.NewServer(esipa.NewHTTPHandler(store, storage.DefaultTenantID))
 	defer server.Close()
 
 	runner := Runner{
-		Client:     Client{Endpoint: server.URL + esipa.DefaultPath, HTTPClient: server.Client()},
-		Downloader: OfflineDownloader{},
+		Client: Client{Transport: HTTPTransport{
+			Endpoint:   server.URL + esipa.DefaultPath,
+			HTTPClient: server.Client(),
+		}},
+		Downloader: testProfileDownloader{},
+		Fixture:    fixture,
 		EID:        eidBytes,
 		Once:       true,
 		Logger:     slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
@@ -80,9 +95,15 @@ func TestRunnerNotificationAcknowledgementClearsOnlyAckedSequences(t *testing.T)
 	if err != nil {
 		t.Fatalf("DecodeString() error = %v", err)
 	}
-	runner := Runner{EID: eidBytes}
-	first := runner.queueNotification("enable")
-	second := runner.queueNotification("disable")
+	runner := Runner{EID: eidBytes, Fixture: requireSGP26SoftwareFixture(t)}
+	first, err := runner.queueNotification("enable")
+	if err != nil {
+		t.Fatalf("queueNotification(enable) error = %v", err)
+	}
+	second, err := runner.queueNotification("disable")
+	if err != nil {
+		t.Fatalf("queueNotification(disable) error = %v", err)
+	}
 
 	pending := runner.pendingNotificationTLVs()
 	if len(pending) != 2 {
@@ -136,11 +157,16 @@ func TestRunnerCompletesIpaEuiccDataRequest(t *testing.T) {
 		t.Fatalf("EnqueueRequest() error = %v", err)
 	}
 
+	fixture := requireSGP26SoftwareFixture(t)
 	server := httptest.NewServer(esipa.NewHTTPHandler(store, storage.DefaultTenantID))
 	defer server.Close()
 
 	runner := Runner{
-		Client: Client{Endpoint: server.URL + esipa.DefaultPath, HTTPClient: server.Client()},
+		Client: Client{Transport: HTTPTransport{
+			Endpoint:   server.URL + esipa.DefaultPath,
+			HTTPClient: server.Client(),
+		}},
+		Fixture: fixture,
 		EID:    eidBytes,
 		Once:   true,
 		Logger: slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
@@ -160,15 +186,11 @@ func TestRunnerCompletesIpaEuiccDataRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetEUICCState() error = %v", err)
 	}
-	if state.DefaultSMDPAddress != "smdp.example" || len(state.CertificateIdentifiers) == 0 {
-		t.Fatalf("eUICC state = %#v, want mock IPA data", state)
+	if len(state.EUICCInfo1) == 0 {
+		t.Fatalf("eUICC state = %#v, want EUICCInfo1 from mock IPA data", state)
 	}
-	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eid, "89101122334455")
-	if err != nil {
-		t.Fatalf("GetProfileState() error = %v", err)
-	}
-	if !profile.IsEnabled {
-		t.Fatalf("profile = %#v, want enabled", profile)
+	if runner.Fixture != nil && len(state.CertificateIdentifiers) == 0 {
+		t.Fatalf("eUICC state = %#v, want certificate identifiers from fixture-backed IPA data", state)
 	}
 }
 

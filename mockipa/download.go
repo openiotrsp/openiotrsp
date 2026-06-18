@@ -23,31 +23,17 @@ import (
 
 // DownloadResult describes the device-side outcome that is reported to the eIM.
 type DownloadResult struct {
-	ProfileID string
-	SMDP      string
-	LiveSMDP  bool
-	Offline   bool
-	BPPBytes  []byte
+	ProfileID               string
+	SMDP                    string
+	LiveSMDP                bool
+	Offline                 bool
+	BPPBytes                []byte
+	ProfileInstallationResult *bertlv.TLV
 }
 
-// Downloader performs the IPA-side direct download.
+// Downloader performs the IPA-side profile download.
 type Downloader interface {
 	Download(ctx context.Context, activation profiledownload.ActivationCode) (DownloadResult, error)
-}
-
-// OfflineDownloader is the CI-only fallback. It is intentionally not a signing proof.
-type OfflineDownloader struct{}
-
-// Download returns a deterministic success result without contacting an SM-DP+.
-func (OfflineDownloader) Download(ctx context.Context, activation profiledownload.ActivationCode) (DownloadResult, error) {
-	if err := ctx.Err(); err != nil {
-		return DownloadResult{}, err
-	}
-	return DownloadResult{
-		ProfileID: activation.ProfileID(),
-		SMDP:      activation.SMDPAddress,
-		Offline:   true,
-	}, nil
 }
 
 // SysmocomDownloader validates that the public sysmocom SM-DP+ is reachable.
@@ -105,14 +91,19 @@ func (d SysmocomDownloader) Download(ctx context.Context, activation profiledown
 		profileID = result.Notification.ICCID.String()
 	}
 	var bppBytes []byte
+	var pir *bertlv.TLV
 	if bpp := euicc.BoundProfilePackage(); bpp != nil {
 		bppBytes = bpp.Bytes()
 	}
+	if pir = euicc.ProfileInstallationResult(); pir != nil {
+		pir = pir.Clone()
+	}
 	return DownloadResult{
-		ProfileID: profileID,
-		SMDP:      activation.SMDPAddress,
-		LiveSMDP:  true,
-		BPPBytes:  bppBytes,
+		ProfileID:                 profileID,
+		SMDP:                      activation.SMDPAddress,
+		LiveSMDP:                  true,
+		BPPBytes:                  bppBytes,
+		ProfileInstallationResult: pir,
 	}, nil
 }
 
