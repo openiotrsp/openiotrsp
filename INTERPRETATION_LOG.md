@@ -192,6 +192,32 @@ Each entry must include:
   `notificationsList`, return `emptyResponse`. Acknowledge only notification
   sequence numbers when `notificationsList` is present.
 - Rationale: The spec provides `emptyResponse` for the no-acknowledgement case.
-  Acknowledging operation sequence `1` on error made a vendor IPA treat it as
   "clear notification #1" and fail with NothingToDelete.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 IpaEuiccDataRequest.tagList vs BF2D ProfileInfoListResponse
+
+- Spec section: SGP.32 `IpaEuiccDataRequest.tagList` (v1.2 §5.x / p.35); `IpaEuiccData`
+  `notificationsList [0]` (tag `A0`); `ProfileInfoListResponse` (tag `BF2D`).
+- Ambiguity: Whether `BF2D` may appear in `tagList` to request profile inventory via
+  BF52 fetch.
+- Chosen reading: `tagList` entries are tags of objects returned inside
+  `IpaEuiccData`. Notifications are requested with `A0` (`notificationsList`).
+  `BF2D` is a response CHOICE for PSMO `listProfileInfo`, not a valid `tagList`
+  entry. Profile inventory is obtained via signed eUICC Package PSMO, not
+  `IpaEuiccDataRequest.tagList`.
+- Rationale: Vendor IPA returned `incorrectTagList` when OpenIoTRSP v0.2.2 sent
+  `BF2D` in the default tag list (after v0.2.1 had already removed invalid `5A`).
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 EuiccPackageErrorUnsigned CHOICE tag A2
+
+- Spec section: SGP.32 `EuiccPackageResult` CHOICE arm
+  `euiccPackageErrorUnsigned [2]`; `EuiccPackageErrorUnsigned` SEQUENCE.
+- Ambiguity: Whether the unsigned error payload under `BF51` is the bare SEQUENCE
+  or the context-specific constructed tag `A2` wrapping the SEQUENCE fields.
+- Chosen reading: Accept both universal `SEQUENCE` and `A2` (`[2] constructed`) on
+  decode. Vendor IPA sends `BF51 { A2 { ... } }` inside `ePRAndNotifications`.
+- Rationale: Strict `expectTag(SEQUENCE)` rejected vendor provideResult with HTTP
+  400 and left operations stuck pending.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

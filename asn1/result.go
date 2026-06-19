@@ -1118,6 +1118,9 @@ func (e *EuiccPackageErrorUnsigned) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 		*e = EuiccPackageErrorUnsigned{ErrorCode: &code}
 		return nil
 	}
+	if hasTag(tlv, bertlv.ContextSpecific.Constructed(2)) {
+		tlv = constructed(tagSequence, tlv.Children...)
+	}
 	if err := expectTag(tlv, tagSequence); err != nil {
 		return err
 	}

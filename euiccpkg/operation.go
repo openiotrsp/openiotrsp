@@ -123,3 +123,14 @@ func (o OperationKind) String() string {
 	}
 	return string(o)
 }
+
+// PackageOperationKind returns the domain operation for a single-operation package.
+func PackageOperationKind(pkg protocolasn1.EuiccPackage) OperationKind {
+	if op, _ := packagePSMO(pkg); op != OperationNone {
+		return op
+	}
+	if op, _ := packageECO(pkg); op != OperationNone {
+		return op
+	}
+	return OperationNone
+}

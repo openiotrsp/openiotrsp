@@ -12,12 +12,17 @@ import (
 	"github.com/openiotrsp/openiotrsp/storage"
 )
 
-// DefaultTagList asks the IPA for the data objects OpenIoTRSP can currently
-// consume: eUICCInfo1/2, profile inventory, certificates, and IPA capabilities.
-// EID (tag 5A / application 26) is excluded: SGP.32 IpaEuiccDataRequest.tagList
-// lists data-object tags to return in IpaEuiccData, and the IPA already knows the
-// target EID from ESipa context.
-var DefaultTagList = []byte{0xbf, 0x20, 0xbf, 0x22, 0xbf, 0x2d, 0xa5, 0xa6, 0xa8}
+// DefaultTagList per SGP.32 IpaEuiccDataRequest.tagList (v1.2 §5.x / p.35).
+// BF2D (ProfileInfoListResponse) is not valid in tagList; notifications use A0.
+// EID (tag 5A / application 26) is excluded — the IPA already knows the target EID.
+var DefaultTagList = []byte{
+	0xbf, 0x20, // eUICCInfo1
+	0xbf, 0x22, // eUICCInfo2
+	0xa0,       // notificationsList
+	0xa5,       // EUM certificate
+	0xa6,       // eUICC certificate
+	0xa8,       // IPA capabilities
+}
 
 // RequestInput configures one IpaEuiccDataRequest.
 type RequestInput struct {

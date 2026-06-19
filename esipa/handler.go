@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 
 	"github.com/damonto/euicc-go/bertlv"
@@ -92,6 +93,7 @@ type Handler struct {
 	// handlers must leave this false so state is not updated from unverified EPRs.
 	AllowUnverifiedEUICCPackageResults bool
 	Relay                              *relay.Relay
+	Logger                             *slog.Logger
 
 	blockwiseMu        sync.Mutex
 	blockwiseResponses map[string]coapBlockwiseResponse
@@ -127,17 +129,17 @@ func EncodeResponse(response Response) ([]byte, error) {
 // Handle applies one decoded ESipa request to the Store and returns the decoded
 // response. HTTP and CoAP/DTLS transports call this same function.
 func Handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request) (Response, error) {
-	return handle(ctx, store, tenantID, request, nil, false, nil)
+	return handle(ctx, store, tenantID, request, nil, false, nil, nil)
 }
 
 func (h *Handler) handle(ctx context.Context, request Request) (Response, error) {
 	if h == nil {
 		return Response{}, errors.New("esipa: nil Handler")
 	}
-	return handle(ctx, h.Store, h.TenantID, request, h.EUICCPublicKey, h.AllowUnverifiedEUICCPackageResults, h.Relay)
+	return handle(ctx, h.Store, h.TenantID, request, h.EUICCPublicKey, h.AllowUnverifiedEUICCPackageResults, h.Relay, h.Logger)
 }
 
-func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool, relayService *relay.Relay) (Response, error) {
+func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool, relayService *relay.Relay, logger *slog.Logger) (Response, error) {
 	if request.Message.Raw == nil {
 		return Response{}, errors.New("esipa: missing request message")
 	}
@@ -155,12 +157,12 @@ func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID,
 		if store == nil {
 			return Response{}, errors.New("esipa: nil Store")
 		}
-		return handleProvideEimPackageResult(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
+		return handleProvideEimPackageResult(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults, logger, request.Raw)
 	case request.Message.Raw.Tag.Equal(tagTransferPackage):
 		if store == nil {
 			return Response{}, errors.New("esipa: nil Store")
 		}
-		return handleTransferEimPackageResponse(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
+		return handleTransferEimPackageResponse(ctx, store, tenantID, request.Message.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults, logger)
 	case request.Message.Raw.Tag.Equal(tagHandleNotify):
 		if store == nil {
 			return Response{}, errors.New("esipa: nil Store")
@@ -296,16 +298,17 @@ func handleGetEimPackage(ctx context.Context, store storage.Store, tenantID stor
 	return responseFromMarshaler(response)
 }
 
-func handleProvideEimPackageResult(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
+func handleProvideEimPackageResult(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool, logger *slog.Logger, requestBytes []byte) (Response, error) {
 	var request protocolasn1.ProvideEimPackageResult
 	if err := request.UnmarshalBERTLV(tlv); err != nil {
+		logProvideResultDecodeFailed(logger, requestBytes, tlv, err)
 		return Response{}, err
 	}
 	eid, code := eidKey(request.EID)
 	if code != nil {
 		return provideResultErrorResponse(*code)
 	}
-	ack, empty, err := recordEimPackageResult(ctx, store, tenantID, eid, request.EimPackageResult.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
+	ack, empty, err := recordEimPackageResult(ctx, store, tenantID, eid, request.EimPackageResult.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults, logger)
 	if errors.Is(err, storage.ErrNotFound) {
 		return provideResultErrorResponse(provideResultErrorEIDNotFound)
 	}
@@ -318,7 +321,7 @@ func handleProvideEimPackageResult(ctx context.Context, store storage.Store, ten
 	return provideResultAckResponse(ack)
 }
 
-func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
+func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool, logger *slog.Logger) (Response, error) {
 	var request protocolasn1.TransferEimPackageResponse
 	if err := request.UnmarshalBERTLV(tlv); err != nil {
 		return Response{}, err
@@ -332,7 +335,7 @@ func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, 
 	if code != nil {
 		return transferAckResponse(nil)
 	}
-	ack, _, err := recordEimPackageResult(ctx, store, tenantID, eid, request.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults)
+	ack, _, err := recordEimPackageResult(ctx, store, tenantID, eid, request.Raw, euiccPublicKey, allowUnverifiedEUICCPackageResults, logger)
 	if err != nil {
 		return Response{}, err
 	}
@@ -341,7 +344,7 @@ func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, 
 
 func handleNotification(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
 	if len(tlv.Children) == 1 && tlv.Children[0].Tag.Equal(tagProvideResult) {
-		_, err := handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0], euiccPublicKey, allowUnverifiedEUICCPackageResults)
+		_, err := handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0], euiccPublicKey, allowUnverifiedEUICCPackageResults, nil, nil)
 		return Response{}, err
 	}
 	notifications, err := notificationsFromHandleNotification(tlv)
@@ -506,6 +509,7 @@ func recordEimPackageResult(
 	tlv *bertlv.TLV,
 	euiccPublicKey EUICCPublicKeyResolver,
 	allowUnverifiedEUICCPackageResults bool,
+	logger *slog.Logger,
 ) (*protocolasn1.EimAcknowledgements, bool, error) {
 	if tlv == nil {
 		return nil, false, errors.New("esipa: missing EimPackageResult")
@@ -519,7 +523,7 @@ func recordEimPackageResult(
 		return ack, false, err
 	}
 	if tlv.Tag.Equal(tagIpaEuiccData) {
-		return recordIpaEuiccDataResponse(ctx, store, tenantID, eid, tlv, payload)
+		return recordIpaEuiccDataResponse(ctx, store, tenantID, eid, tlv, payload, logger)
 	}
 	if tlv.Tag.Equal(bertlv.Universal.Primitive(2)) || tlv.Tag.Equal(bertlv.ContextSpecific.Constructed(0)) {
 		var result protocolasn1.EimPackageResult
@@ -546,6 +550,7 @@ func recordEimPackageResult(
 	if err := result.UnmarshalBERTLV(resultTLV); err != nil {
 		return nil, false, err
 	}
+	logProvideResultOutcome(logger, eid, &result)
 	resultDER, err := resultTLV.MarshalBinary()
 	if err != nil {
 		return nil, false, err
@@ -622,10 +627,14 @@ func recordIpaEuiccDataResponse(
 	eid string,
 	tlv *bertlv.TLV,
 	payload []byte,
+	logger *slog.Logger,
 ) (*protocolasn1.EimAcknowledgements, bool, error) {
 	var response protocolasn1.IpaEuiccDataResponse
 	if err := response.UnmarshalBERTLV(tlv); err != nil {
 		return nil, false, err
+	}
+	if response.Error != nil {
+		logIpaEuiccDataError(logger, eid, &response)
 	}
 	transactionID := ipaEuiccDataTransactionID(&response)
 	operation, ok, err := pendingIpaEuiccDataOperation(ctx, store, tenantID, eid, transactionID)

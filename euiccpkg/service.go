@@ -6,8 +6,10 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
@@ -21,6 +23,7 @@ type Service struct {
 	Store  storage.Store
 	Signer signing.Signer
 	EimID  string
+	Logger *slog.Logger
 }
 
 // SignInput contains the tenant/device data needed to create a signed package.
@@ -95,6 +98,8 @@ func (s *Service) Sign(ctx context.Context, input SignInput) (*SignedRequest, er
 	if err != nil {
 		return nil, err
 	}
+	logPackageSigned(s.Logger, s.EimID, input, counter, token, signatureInput)
+
 	signature, err := s.Signer.Sign(ctx, signatureInput)
 	if err != nil {
 		return nil, err
@@ -122,6 +127,27 @@ func (s *Service) Sign(ctx context.Context, input SignInput) (*SignedRequest, er
 		EimTransactionID: cloneBytes(input.EimTransactionID),
 		Package:          input.Package,
 	}, nil
+}
+
+func logPackageSigned(logger *slog.Logger, eimID string, input SignInput, counter int64, associationToken *int64, signatureInput []byte) {
+	if logger == nil {
+		return
+	}
+	attrs := []any{
+		"eid", input.EID,
+		"eim_id", eimID,
+		"counter", counter,
+		"operation", PackageOperationKind(input.Package).String(),
+		"signature_input_len", len(signatureInput),
+		"association_token_configured", associationToken != nil,
+	}
+	if len(input.EimTransactionID) > 0 {
+		attrs = append(attrs, "transaction_id_hex", hex.EncodeToString(input.EimTransactionID))
+	}
+	if associationToken != nil {
+		attrs = append(attrs, "association_token_value", *associationToken)
+	}
+	logger.Info("euicc package signed", attrs...)
 }
 
 func (s *Service) associationToken(ctx context.Context, tenantID storage.TenantID, eid string) (*int64, error) {

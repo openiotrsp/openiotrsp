@@ -1,6 +1,8 @@
 package asn1
 
 import (
+	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/damonto/euicc-go/bertlv"
@@ -148,6 +150,64 @@ func TestProvideEimPackageResultVariantPayloads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEuiccPackageErrorUnsigned_A2Structured(t *testing.T) {
+	t.Parallel()
+
+	tlv := constructed(bertlv.ContextSpecific.Constructed(2),
+		utf8TLV(bertlv.ContextSpecific.Primitive(0), "eim.symb-iot.com"),
+		octetTLV(bertlv.ContextSpecific.Primitive(2), mustDecodeHex(t, "a7438f4401a3dbd873f28404ce8758a1")),
+	)
+	var decoded EuiccPackageErrorUnsigned
+	if err := decoded.UnmarshalBERTLV(tlv); err != nil {
+		t.Fatalf("UnmarshalBERTLV() error = %v", err)
+	}
+	if decoded.EimID != "eim.symb-iot.com" {
+		t.Fatalf("eimId = %q, want eim.symb-iot.com", decoded.EimID)
+	}
+	wantTxn := mustDecodeHex(t, "a7438f4401a3dbd873f28404ce8758a1")
+	if !bytes.Equal(decoded.EimTransactionID, wantTxn) {
+		t.Fatalf("transactionId = %x, want %x", decoded.EimTransactionID, wantTxn)
+	}
+}
+
+func TestProvideEimPackageResult_VendorUnsignedErrorA2(t *testing.T) {
+	t.Parallel()
+
+	eid := mustDecodeHex(t, "89041030081106202526200000027839")
+	unsigned := constructed(bertlv.ContextSpecific.Constructed(2),
+		utf8TLV(bertlv.ContextSpecific.Primitive(0), "eim.symb-iot.com"),
+		octetTLV(bertlv.ContextSpecific.Primitive(2), mustDecodeHex(t, "a7438f4401a3dbd873f28404ce8758a1")),
+	)
+	provide := constructed(tagProvideEimResult,
+		octetTLV(tagEID, eid),
+		constructed(tagEuiccPkg, unsigned),
+	)
+	var decoded ProvideEimPackageResult
+	if err := decoded.UnmarshalBERTLV(provide); err != nil {
+		t.Fatalf("UnmarshalBERTLV(ProvideEimPackageResult) error = %v", err)
+	}
+	resultTLV := decoded.EimPackageResult.Raw
+	var result EuiccPackageResult
+	if err := result.UnmarshalBERTLV(resultTLV); err != nil {
+		t.Fatalf("UnmarshalBERTLV(EuiccPackageResult) error = %v", err)
+	}
+	if result.Kind != EuiccPackageResultErrorUnsigned || result.ErrorUnsigned == nil {
+		t.Fatalf("result = %#v, want unsigned error", result)
+	}
+	if result.ErrorUnsigned.EimID != "eim.symb-iot.com" {
+		t.Fatalf("eimId = %q, want eim.symb-iot.com", result.ErrorUnsigned.EimID)
+	}
+}
+
+func mustDecodeHex(t *testing.T, value string) []byte {
+	t.Helper()
+	out, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("hex.DecodeString(%q) error = %v", value, err)
+	}
+	return out
 }
 
 func mustIntegerTLV(t *testing.T, tag bertlv.Tag, value int64) *bertlv.TLV {

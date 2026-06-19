@@ -56,9 +56,12 @@ func mustMarshalIpaEuiccDataResponse(t *testing.T, response *protocolasn1.IpaEui
 func TestTagListContainsParsesMultiByteTags(t *testing.T) {
 	t.Parallel()
 
-	tagList := []byte{0xbf, 0x20, 0xbf, 0x22, 0xbf, 0x2d, 0xa5, 0xa6, 0xa8}
-	if !tagListContains(tagList, []byte{0xbf, 0x2d}) {
-		t.Fatal("tagListContains(BF2D) = false, want true")
+	tagList := []byte{0xbf, 0x20, 0xbf, 0x22, 0xa0, 0xa5, 0xa6, 0xa8}
+	if !tagListContains(tagList, []byte{0xa0}) {
+		t.Fatal("tagListContains(A0) = false, want true")
+	}
+	if tagListContains(tagList, []byte{0xbf, 0x2d}) {
+		t.Fatal("tagListContains(BF2D) = true, want false")
 	}
 	if tagListContains(tagList, []byte{0x2d}) {
 		t.Fatal("tagListContains(2D) = true, want false")

@@ -147,6 +147,7 @@ func buildIpaEuiccDataResponse(eid []byte, fixture *SGP26Fixture, state *DeviceS
 	if profiles := profileListTLV(state); profiles != nil {
 		appendIfRequested([]byte{0xbf, 0x2d}, profiles)
 	}
+	appendIfRequested([]byte{0xa0}, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)))
 	if fixture != nil {
 		appendIfRequested([]byte{0xa5}, ipaEuiccDataCertificateTLV(5, fixture.EUMCertificate))
 		appendIfRequested([]byte{0xa6}, ipaEuiccDataCertificateTLV(6, fixture.EUICCCertificate))

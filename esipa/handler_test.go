@@ -52,7 +52,7 @@ type scenarioObservation struct {
 }
 
 func handleUnverified(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request) (Response, error) {
-	return handle(ctx, store, tenantID, request, nil, true, nil)
+	return handle(ctx, store, tenantID, request, nil, true, nil, nil)
 }
 
 func TestSGP33ESipaTransportParity(t *testing.T) {
@@ -879,6 +879,71 @@ func TestProfileDownloadTriggerFailedInstallRecordsFailed(t *testing.T) {
 	}
 }
 
+func TestProvideEimPackageResult_VendorUnsignedErrorHandler(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid, err := hex.DecodeString("89041030081106202526200000027839")
+	if err != nil {
+		t.Fatalf("DecodeString(EID) error = %v", err)
+	}
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	transactionID, err := hex.DecodeString("a7438f4401a3dbd873f28404ce8758a1")
+	if err != nil {
+		t.Fatalf("DecodeString(transactionID) error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	request.EuiccPackageSigned.EimID = "eim.symb-iot.com"
+	request.EuiccPackageSigned.EimTransactionID = transactionID
+	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	}); err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	resultAndNotifications := bertlv.NewChildren(tagSequence,
+		bertlv.NewChildren(tagEuiccPackage,
+			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(2),
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte("eim.symb-iot.com")),
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), transactionID),
+			),
+		),
+		bertlv.NewChildren(tagNotificationList),
+	)
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: resultAndNotifications,
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(vendor unsigned error) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
+		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != storage.OperationFailed {
+		t.Fatalf("recorded results = %#v, want one failed result", results)
+	}
+	pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eidKey, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v, want queue unblocked", pending)
+	}
+}
+
 func TestProvideEimPackageResult_BF51BareInteger(t *testing.T) {
 	t.Parallel()
 	runProvideResultVariantTest(t, provideResultVariantCase{
@@ -1043,7 +1108,7 @@ func TestUnknownEimPackageResultFailsClosed(t *testing.T) {
 		t.Fatalf("RegisterDevice() error = %v", err)
 	}
 
-	_, _, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)), nil, true)
+	_, _, err := recordEimPackageResult(ctx, store, storage.DefaultTenantID, eidKey, bertlv.NewChildren(bertlv.ContextSpecific.Constructed(99)), nil, true, nil)
 	if err == nil {
 		t.Fatal("recordEimPackageResult() succeeded for unknown result tag, want rejection")
 	}
