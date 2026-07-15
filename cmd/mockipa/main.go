@@ -109,6 +109,8 @@ func loadConfig() config {
 
 func downloader(cfg config, client mockipa.Client) mockipa.Downloader {
 	switch strings.ToLower(strings.TrimSpace(cfg.mode)) {
+	case "offline", "offline-stub", "stub":
+		return mockipa.OfflineDownloader{}
 	case "indirect":
 		return mockipa.IndirectDownloader{
 			Client:     client,

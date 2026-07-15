@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,50 @@ type DownloadResult struct {
 // Downloader performs the IPA-side profile download.
 type Downloader interface {
 	Download(ctx context.Context, activation profiledownload.ActivationCode) (DownloadResult, error)
+}
+
+// OfflineDownloader satisfies profile-download triggers for local mock SM-DP+ hosts
+// without contacting ES9+. It is intentionally not a GSMA signature proof.
+type OfflineDownloader struct{}
+
+// Download returns a deterministic success result without contacting an SM-DP+.
+func (OfflineDownloader) Download(ctx context.Context, activation profiledownload.ActivationCode) (DownloadResult, error) {
+	if err := ctx.Err(); err != nil {
+		return DownloadResult{}, err
+	}
+	return DownloadResult{
+		ProfileID: activation.ProfileID(),
+		SMDP:      activation.SMDPAddress,
+		Offline:   true,
+	}, nil
+}
+
+// IsLocalMockSMDP reports whether the activation-code host is a local mock that
+// cannot be reached over ES9+.
+func IsLocalMockSMDP(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return host == "mock.smdp.local" || strings.HasSuffix(host, ".local")
+}
+
+// ProfileDownloadDownloader selects the downloader for a profile-download trigger.
+func ProfileDownloadDownloader(base Downloader, indirect bool, activation profiledownload.ActivationCode, client Client) Downloader {
+	if IsLocalMockSMDP(activation.SMDPAddress) {
+		return OfflineDownloader{}
+	}
+	if indirect {
+		return IndirectDownloader{
+			Client:     client,
+			FixtureZip: "",
+			IMEI:       indirectDownloaderIMEI(base),
+		}
+	}
+	return base
 }
 
 // SysmocomDownloader validates that the public sysmocom SM-DP+ is reachable.

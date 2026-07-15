@@ -257,15 +257,11 @@ func (r *Runner) handleProfileDownloadTrigger(
 	if err != nil {
 		return err
 	}
-	activeDownloader := downloader
-	if r.indirectProfileDownload {
-		activeDownloader = IndirectDownloader{
-			Client:     r.Client,
-			FixtureZip: "",
-			IMEI:       indirectDownloaderIMEI(downloader),
-		}
-	}
+	activeDownloader := ProfileDownloadDownloader(downloader, r.indirectProfileDownload, activation, r.Client)
 	logger.Info("profile download trigger received", "smdp", activation.SMDPAddress, "matchingID", activation.MatchingID, "indirect", r.indirectProfileDownload)
+	if IsLocalMockSMDP(activation.SMDPAddress) {
+		logger.Info("using offline downloader for local mock SM-DP+", "smdp", activation.SMDPAddress)
+	}
 	result, err := activeDownloader.Download(ctx, activation)
 	if err != nil {
 		return err

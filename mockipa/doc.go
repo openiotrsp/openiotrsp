@@ -11,6 +11,8 @@ package mockipa
 //     http://… or coaps://host:5683/esipa)
 //   - Verified EuiccPackageResult signatures (DER ECDSA)
 //   - Direct profile download (live ES9+ via SM-DP+ JSON binding)
+//   - Offline profile download for local mock SM-DP+ hosts such as mock.smdp.local
+//     (auto-detected by host suffix) or when OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE=offline
 //   - Indirect profile download when the eIM configures IndirectProfileDownload
 //     (ES9+ relayed through the eIM over ESipa BER relay arms)
 //   - IPA eUICC data reads with fixture-backed EUICCInfo and certificates

@@ -88,6 +88,70 @@ func TestRunnerCompletesProfileDownloadTrigger(t *testing.T) {
 	}
 }
 
+func TestRunnerCompletesLocalMockProfileDownloadTrigger(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := "89049032000000000000000000000004"
+	eidBytes, err := hex.DecodeString(eid)
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eid}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	const profileID = "8900d5cfec6099f3c8b6"
+	trigger, err := profiledownload.NewActivationCodeTrigger("1$mock.smdp.local$"+profileID, []byte{0x01, 0x02})
+	if err != nil {
+		t.Fatalf("NewActivationCodeTrigger() error = %v", err)
+	}
+	if _, err := profiledownload.EnqueueTrigger(ctx, store, storage.DefaultTenantID, eid, trigger); err != nil {
+		t.Fatalf("EnqueueTrigger() error = %v", err)
+	}
+
+	fixture := requireSGP26SoftwareFixture(t)
+	server := httptest.NewServer(esipa.NewHTTPHandler(store, storage.DefaultTenantID))
+	defer server.Close()
+
+	runner := Runner{
+		Client: Client{Transport: HTTPTransport{
+			Endpoint:   server.URL + esipa.DefaultPath,
+			HTTPClient: server.Client(),
+		}},
+		Downloader: SysmocomDownloader{},
+		Fixture:    fixture,
+		EID:        eidBytes,
+		Once:       true,
+		Logger:     slog.New(slog.NewTextHandler(testWriter{t: t}, nil)),
+	}
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eid, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending operations = %#v, want none", pending)
+	}
+	state, err := store.GetProfileState(ctx, storage.DefaultTenantID, eid, profileID)
+	if err != nil {
+		t.Fatalf("GetProfileState() error = %v", err)
+	}
+	if !state.IsEnabled || state.SMDPAddress != "mock.smdp.local" {
+		t.Fatalf("profile state = %#v, want enabled local mock profile", state)
+	}
+	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eid)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 || notifications[0].Kind != "install" || notifications[0].SequenceNumber != 1 {
+		t.Fatalf("notifications = %#v, want install sequence 1", notifications)
+	}
+}
+
 func TestRunnerNotificationAcknowledgementClearsOnlyAckedSequences(t *testing.T) {
 	t.Parallel()
 

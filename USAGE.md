@@ -35,7 +35,9 @@ The previously enabled profile state is stored in the Postgres volume and should
 
 By default, `mockipa` uses live mode and runs the direct ES9+ flow against the public sysmocom test SM-DP+ host. The mock IPA loads the local SGP.26 Variant O fixture ZIP from `spec/SGP.26_v3.0.2-17-July-2025.zip` and signs the eUICC-side authentication/download/install responses with that test eUICC key. Override the path with `OPENIOTRSP_SGP26_FIXTURE_ZIP` and the demo IMEI with `OPENIOTRSP_MOCKIPA_IMEI`.
 
-The software eUICC is intentionally limited: it proves the signed ES9+ authentication, BPP receipt, and installation-result notification path through the SM-DP+, but it does not decrypt or provision the Bound Profile Package like real eUICC silicon. A successful mock IPA run records the demo profile as enabled in OpenIoTRSP state; it is not a physical profile install.
+The software eUICC is intentionally limited: it proves the signed ES9+ authentication, BPP receipt, and installation-result notification path through the SM-DP+, but it does not decrypt or provision the Bound Profile Package like real eUICC silicon. A successful mock IPA run records the demo profile as enabled in OpenIoTRSP profile state; it is not a physical profile install.
+
+External mock IPA (`go run ./cmd/mockipa`) and the embedded eIM demo path differ in how they handle local mock SM-DP+ hosts such as `mock.smdp.local`. Enterprise eIM builds may generate activation codes like `1$mock.smdp.local$<hex-iccid>` for offline profile simulation. External mockipa auto-detects `.local` SM-DP+ hosts and uses the offline downloader without network access. You can also force offline mode with `OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE=offline`.
 
 For offline CI plumbing only:
 
