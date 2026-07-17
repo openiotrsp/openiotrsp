@@ -20,7 +20,7 @@ func ValidateBundle(bundlePath string, trustCert *x509.Certificate) (Manifest, e
 	if err != nil {
 		return Manifest{}, fmt.Errorf("dataact: open bundle: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	manifest, err := readManifest(reader)
 	if err != nil {
@@ -77,9 +77,10 @@ func readManifest(reader *zip.ReadCloser) (Manifest, error) {
 		if err != nil {
 			return Manifest{}, fmt.Errorf("dataact: open manifest: %w", err)
 		}
-		defer rc.Close()
 		var manifest Manifest
-		if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+		err = json.NewDecoder(rc).Decode(&manifest)
+		_ = rc.Close()
+		if err != nil {
 			return Manifest{}, fmt.Errorf("dataact: decode manifest: %w", err)
 		}
 		return manifest, nil
@@ -96,11 +97,11 @@ func digestZipEntry(reader *zip.ReadCloser, name string) (string, int, error) {
 		if err != nil {
 			return "", 0, err
 		}
-		defer rc.Close()
 		hasher := sha256.New()
 		rows := 0
 		if strings.HasSuffix(name, ".ndjson") {
 			payload, err := io.ReadAll(rc)
+			_ = rc.Close()
 			if err != nil {
 				return "", 0, err
 			}
@@ -115,7 +116,9 @@ func digestZipEntry(reader *zip.ReadCloser, name string) (string, int, error) {
 				}
 			}
 		} else {
-			if _, err := io.Copy(hasher, rc); err != nil {
+			_, err := io.Copy(hasher, rc)
+			_ = rc.Close()
+			if err != nil {
 				return "", 0, err
 			}
 			rows = 1

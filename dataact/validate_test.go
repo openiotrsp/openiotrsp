@@ -43,7 +43,7 @@ func tamperZipEntry(path, name string, payload []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	buf := new(bytes.Buffer)
 	writer := zip.NewWriter(buf)

@@ -4,6 +4,8 @@ package dataact_test
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,12 +121,27 @@ func runMigrations(t *testing.T, dsn string, fn func(*migrate.Migrate) error) {
 	if err != nil {
 		t.Fatalf("resolve migrations dir: %v", err)
 	}
-	m, err := migrate.New("file://"+filepath.ToSlash(migrationsDir), dsn)
+	m, err := migrate.New("file://"+filepath.ToSlash(migrationsDir), migrationDatabaseURL(t, dsn))
 	if err != nil {
 		t.Fatalf("migrate.New() error = %v", err)
 	}
-	defer m.Close()
-	if err := fn(m); err != nil && err != migrate.ErrNoChange {
+	defer func() {
+		sourceErr, databaseErr := m.Close()
+		if sourceErr != nil || databaseErr != nil {
+			t.Fatalf("migration close errors: source=%v database=%v", sourceErr, databaseErr)
+		}
+	}()
+	if err := fn(m); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		t.Fatalf("migration error = %v", err)
 	}
+}
+
+func migrationDatabaseURL(t *testing.T, dsn string) string {
+	t.Helper()
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse database URL error = %v", err)
+	}
+	parsed.Scheme = "pgx5"
+	return parsed.String()
 }

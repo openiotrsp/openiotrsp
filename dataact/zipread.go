@@ -13,7 +13,7 @@ func readNDJSON[T any](bundlePath, name string) ([]T, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dataact: open bundle: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	for _, file := range reader.File {
 		if file.Name != name {
