@@ -70,6 +70,22 @@ trigger->download->enable complete
 
 For offline CI plumbing, set `OPENIOTRSP_MOCKIPA_DOWNLOAD_MODE=offline`. That fallback is intentionally labelled as a stub and is not a GSMA signature proof. Full setup and validation instructions are in [USAGE.md](USAGE.md).
 
+## Data Act self-host import
+
+When exiting a hosted eIM, you receive a signed export ZIP containing tenant devices, profile state, operations, notifications, and a command-journal slice. OpenIoTRSP validates the bundle manifest (per-file SHA-256 digests, bundle digest, and ECDSA P-256 signature) and imports the entities it stores into your self-hosted Postgres database.
+
+```bash
+go run ./cmd/eim import-bundle \
+  --database-url "$OPENIOTRSP_DATABASE_URL" \
+  --tenant-id openiotrsp \
+  --bundle /path/to/export.zip \
+  --trust-cert /path/to/hosting-eim.crt
+```
+
+`--trust-cert` is optional but recommended: when set, the manifest certificate must match that PEM file. Enterprise-only export rows such as SIM inventory, fallback policy, and profile labels are validated as part of the bundle but are not imported into the open-source schema.
+
+The `dataact` package exposes `ValidateBundle` and `ImportBundle` for programmatic use. Regenerate the committed test fixture with `OPENIOTRSP_GENERATE_DATAACT_FIXTURE=1 go test ./dataact -run TestGenerateMinimalFixture`.
+
 ## Standards
 
 OpenIoTRSP implements GSMA SGP.32 (eSIM IoT Technical Specification) and interoperates with the wider eSIM RSP ecosystem (SGP.22, SGP.26 test infrastructure). Conformance to the GSMA SGP.33 test specification guides the implementation so that it works with eUICCs, IPAs, and SM-DP+ servers from other vendors.

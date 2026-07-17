@@ -73,3 +73,6 @@ jobs:
 
       - name: Test Postgres storage
         run: go test -tags=integration ./storage/postgres/...
+
+      - name: Test Data Act bundle import
+        run: go test -tags=integration ./dataact/...
