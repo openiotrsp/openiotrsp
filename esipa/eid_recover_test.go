@@ -14,6 +14,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -36,6 +38,46 @@ func TestRecoverEIDFromIpaEuiccDataCertificate(t *testing.T) {
 	got := recoverEIDFromPackageResultTLV(bf52)
 	if !bytes.Equal(got, eid) {
 		t.Fatalf("recovered EID = %x, want %x", got, eid)
+	}
+}
+
+func TestRecoverEIDFromIpaEuiccDataCertificateSiblingFields(t *testing.T) {
+	t.Parallel()
+
+	eid := testEID(0x26)
+	certDER := selfSignedEUICCCertWithEID(t, hex.EncodeToString(eid))
+	certTLV := mustParseCertTLV(t, certDER)
+	bf52 := constructed(tagIpaEuiccData,
+		constructed(bertlv.ContextSpecific.Constructed(0),
+			constructed(bertlv.ContextSpecific.Constructed(6), certTLV.Children...),
+		),
+	)
+
+	got := recoverEIDFromPackageResultTLV(bf52)
+	if !bytes.Equal(got, eid) {
+		t.Fatalf("recovered EID = %x, want %x", got, eid)
+	}
+}
+
+func TestRecoverEIDFromBF52ChoiceFixture(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("..", "testdata", "bf52_ipa_euicc_data_response_choice.der"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	tlv := new(bertlv.TLV)
+	if err := tlv.UnmarshalBinary(raw); err != nil {
+		t.Fatalf("UnmarshalBinary() error = %v", err)
+	}
+
+	want, err := hex.DecodeString("89044045930000000000002153893210")
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+	got := recoverEIDFromPackageResultTLV(tlv)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("recovered EID = %x, want %x", got, want)
 	}
 }
 

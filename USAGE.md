@@ -21,6 +21,8 @@ SGP.32 allows omitting `eidValue` on `ProvideEimPackageResult` (BF50). When GSMA
 1. Application 26 (`5A`) EID inside `ipaEuiccData`, when present
 2. eUICC certificate (`A6`) subject `serialNumber` (32-digit hex EID encoding)
 
+Decode accepts AUTOMATIC TAGS CHOICE `[0]` under BF52 (same class as BF51 / BF2D) and both A6 Certificate shapes: one nested SEQUENCE, or IMPLICIT TBS / AlgorithmIdentifier / signature siblings. EID recovery walks those data objects after CHOICE unwrap and does not require every `IpaEuiccData` field to decode successfully.
+
 The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the BER provide path). IPAs should still send `eidValue` on provide for BF52 whenever the response omits both an embedded EID and the eUICC certificate; otherwise the eIM cannot associate the result to a device.
 
 The adoption log line is:

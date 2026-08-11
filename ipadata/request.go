@@ -213,10 +213,7 @@ func certificateIdentifiers(data *protocolasn1.IpaEuiccData) []string {
 }
 
 func certificateSubjectKeyID(tlv *protocolasn1.TLV) []byte {
-	if tlv == nil || len(tlv.Children) == 0 {
-		return nil
-	}
-	der, err := tlv.Children[0].MarshalBinary()
+	der, err := protocolasn1.CertificateDERFromTagged(tlv)
 	if err != nil {
 		return nil
 	}

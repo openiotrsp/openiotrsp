@@ -203,6 +203,10 @@ type IPACapabilities struct {
 }
 
 // MarshalBERTLV encodes IpaEuiccDataResponse.
+//
+// Encode continues to emit data objects (or error fields) directly under BF52
+// for fixtures and mocks. Production IPA/silicon may wrap the AUTOMATIC TAGS
+// CHOICE arm as CONTEXT CONSTRUCTED [0]/[1]; UnmarshalBERTLV accepts both.
 func (r *IpaEuiccDataResponse) MarshalBERTLV() (*bertlv.TLV, error) {
 	if r == nil {
 		return nil, errors.New("asn1: nil IpaEuiccDataResponse")
@@ -217,25 +221,120 @@ func (r *IpaEuiccDataResponse) MarshalBERTLV() (*bertlv.TLV, error) {
 }
 
 // UnmarshalBERTLV decodes IpaEuiccDataResponse.
+//
+// SGP.32 declares IpaEuiccDataResponse as an AUTOMATIC TAGS CHOICE under BF52
+// (ipaEuiccData [0], ipaEuiccDataResponseError [1]). Production IPA/silicon
+// wraps success as CONTEXT CONSTRUCTED [0] whose children are IpaEuiccData
+// fields directly (IMPLICIT). Lab fixtures and mocks often omit that CHOICE
+// tag and place data objects (or a bare INTEGER error) under BF52. Both shapes
+// are accepted; encode continues to emit the bare form.
 func (r *IpaEuiccDataResponse) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if err := expectTag(tlv, tagIpaEuiccData); err != nil {
 		return err
 	}
-	if tlv.First(tagInteger) != nil {
+	content, isError := unwrapIpaEuiccDataResponseChoice(tlv)
+	if isError || content.First(tagInteger) != nil {
 		var out IpaEuiccDataResponse
 		out.Error = new(IpaEuiccDataResponseError)
-		if err := out.Error.unmarshal(tlv); err != nil {
+		if err := out.Error.unmarshal(content); err != nil {
 			return err
 		}
 		*r = out
 		return nil
 	}
 	data := new(IpaEuiccData)
-	if err := data.unmarshal(tlv); err != nil {
+	if err := data.unmarshal(content); err != nil {
 		return err
 	}
 	*r = IpaEuiccDataResponse{Data: data}
 	return nil
+}
+
+// unwrapIpaEuiccDataResponseChoice maps AUTOMATIC TAGS CHOICE arms [0]/[1]
+// under BF52 to a synthetic BF52 container over the arm's children. Bare data
+// objects / bare error fields (mockIPA / fixtures) are returned unchanged.
+//
+// A sole CONTEXT [0] child that is itself a PendingNotificationList (children
+// are pending-notification TLVs, with no nested notificationsList wrapper) is
+// treated as bare IpaEuiccData.notificationsList, not as a CHOICE arm.
+func unwrapIpaEuiccDataResponseChoice(tlv *bertlv.TLV) (content *bertlv.TLV, isError bool) {
+	if tlv == nil || len(tlv.Children) != 1 {
+		return tlv, false
+	}
+	child := tlv.Children[0]
+	switch {
+	case hasTag(child, bertlv.ContextSpecific.Constructed(0)) && isIpaEuiccDataSuccessChoiceArm(child):
+		return constructed(tagIpaEuiccData, child.Children...), false
+	case hasTag(child, bertlv.ContextSpecific.Constructed(1)):
+		return constructed(tagIpaEuiccData, child.Children...), true
+	default:
+		return tlv, false
+	}
+}
+
+// isIpaEuiccDataSuccessChoiceArm reports whether a sole CONTEXT [0] under BF52
+// is the AUTOMATIC TAGS ipaEuiccData arm rather than a bare notificationsList.
+func isIpaEuiccDataSuccessChoiceArm(tlv *bertlv.TLV) bool {
+	if tlv == nil {
+		return false
+	}
+	if len(tlv.Children) == 0 {
+		return true
+	}
+	for _, child := range tlv.Children {
+		// Nested A0 is IpaEuiccData.notificationsList under the CHOICE arm.
+		if hasTag(child, bertlv.ContextSpecific.Constructed(0)) {
+			return true
+		}
+		if !isPendingNotificationTLV(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// IpaEuiccDataObjects returns the BF52 children that carry IpaEuiccData fields,
+// unwrapping AUTOMATIC TAGS success CHOICE [0] when present. Returns nil for
+// error responses (CHOICE [1] or bare INTEGER error).
+func IpaEuiccDataObjects(tlv *bertlv.TLV) []*bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	content, isError := unwrapIpaEuiccDataResponseChoice(tlv)
+	if content == nil || isError || content.First(tagInteger) != nil {
+		return nil
+	}
+	return content.Children
+}
+
+// CertificateDERFromTagged reconstructs X.509 Certificate DER from an A5/A6
+// (or similar) wrapper. IMPLICIT AUTOMATIC TAGS replace Certificate's outer
+// SEQUENCE with the context tag, so production IPA/silicon places TBS,
+// AlgorithmIdentifier, and signature as three sibling TLVs. Fixtures and mocks
+// often nest one UNIVERSAL 16 Certificate SEQUENCE as the sole child. Both
+// shapes are accepted.
+func CertificateDERFromTagged(wrapper *bertlv.TLV) ([]byte, error) {
+	if wrapper == nil || len(wrapper.Children) == 0 {
+		return nil, errors.New("asn1: missing Certificate TLV")
+	}
+	if len(wrapper.Children) == 1 && hasTag(wrapper.Children[0], tagSequence) {
+		der, err := wrapper.Children[0].MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("asn1: marshal Certificate: %w", err)
+		}
+		return der, nil
+	}
+	if len(wrapper.Children) >= 3 &&
+		hasTag(wrapper.Children[0], tagSequence) &&
+		hasTag(wrapper.Children[1], tagSequence) &&
+		hasTag(wrapper.Children[2], bertlv.Universal.Primitive(3)) {
+		der, err := constructed(tagSequence, wrapper.Children[:3]...).MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("asn1: marshal IMPLICIT Certificate fields: %w", err)
+		}
+		return der, nil
+	}
+	return nil, errors.New("asn1: Certificate TLV is neither SEQUENCE nor TBS/alg/signature siblings")
 }
 
 func (e *IpaEuiccDataResponseError) marshal() (*bertlv.TLV, error) {

@@ -42,24 +42,26 @@ func recoverEIDFromPackageResultTLV(tlv *bertlv.TLV) []byte {
 }
 
 func recoverEIDFromIpaEuiccDataTLV(tlv *bertlv.TLV) []byte {
-	if child := tlv.First(tagEID); child != nil && len(child.Value) == 16 {
-		return cloneBytes(child.Value)
+	// Walk data objects after CHOICE unwrap without requiring a full
+	// IpaEuiccData decode so A6 EID recovery still works when other fields fail.
+	objects := protocolasn1.IpaEuiccDataObjects(tlv)
+	for _, child := range objects {
+		if child.Tag.Equal(tagEID) && len(child.Value) == 16 {
+			return cloneBytes(child.Value)
+		}
 	}
-	var response protocolasn1.IpaEuiccDataResponse
-	if err := response.UnmarshalBERTLV(tlv); err != nil || response.Data == nil {
-		return nil
+	for _, child := range objects {
+		if child.Tag.Equal(bertlv.ContextSpecific.Constructed(6)) {
+			if eid := eidFromEUICCCertificateTLV(child); len(eid) == 16 {
+				return eid
+			}
+		}
 	}
-	if len(response.Data.EID) == 16 {
-		return cloneBytes(response.Data.EID)
-	}
-	return eidFromEUICCCertificateTLV(response.Data.EUICCCertificateRaw)
+	return nil
 }
 
 func eidFromEUICCCertificateTLV(wrapper *bertlv.TLV) []byte {
-	if wrapper == nil || len(wrapper.Children) == 0 {
-		return nil
-	}
-	der, err := wrapper.Children[0].MarshalBinary()
+	der, err := protocolasn1.CertificateDERFromTagged(wrapper)
 	if err != nil || len(der) == 0 {
 		return nil
 	}

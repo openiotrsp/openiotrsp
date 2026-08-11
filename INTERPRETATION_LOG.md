@@ -293,6 +293,48 @@ Each entry must include:
   enterprise eIM TLV rewriting.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
 
+## SGP.32 IpaEuiccDataResponse CHOICE under BF52
+
+- Spec section: SGP.32 `IpaEuiccDataResponse ::= [82] CHOICE {
+  ipaEuiccData IpaEuiccData, ipaEuiccDataResponseError
+  IpaEuiccDataResponseError }` with AUTOMATIC TAGS (tag `BF52`).
+- Ambiguity: Whether success under `BF52` places `IpaEuiccData` fields directly
+  under `BF52` (mockIPA / fixtures) or wraps them in CONTEXT CONSTRUCTED `[0]`
+  (IMPLICIT AUTOMATIC TAGS). Whether error is a bare INTEGER under `BF52` or
+  CONTEXT CONSTRUCTED `[1]`.
+- Chosen reading: Accept both forms on decode. Unwrap success `[0]` to a
+  synthetic `BF52` over the arm's children before `IpaEuiccData` field decode.
+  Unwrap error `[1]` similarly before `IpaEuiccDataResponseError` decode. A sole
+  CONTEXT `[0]` whose children are only PendingNotification TLVs (no nested
+  notificationsList `A0` and no other `IpaEuiccData` fields) remains bare
+  `notificationsList`, not a CHOICE arm. Encode path continues to emit bare
+  data objects / bare error fields for fixtures/mocks.
+- Rationale: Production IPAd `provideEimPackageResult` payloads arrive as
+  `BF52 { A0 { A0…, BF20…, A5…, A6… } }`. Without unwrap, the sole `[0]` is
+  misread as `notificationsList` and decode fails on `BF20`
+  (`unknown PendingNotification tag [32]`). Same AUTOMATIC TAGS CHOICE class as
+  BF51 / BF2D.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 IpaEuiccData Certificate under A5/A6
+
+- Spec section: SGP.32 `IpaEuiccData` fields `eumCertificate [5] Certificate`
+  and `euiccCertificate [6] Certificate` (PKIX `Certificate` SEQUENCE) with
+  AUTOMATIC TAGS / IMPLICIT context tagging.
+- Ambiguity: Whether A5/A6 carry one UNIVERSAL 16 `Certificate` SEQUENCE child
+  (fixtures/mocks that nest a full Certificate DER) or the three Certificate
+  fields as siblings under the context tag (TBS SEQUENCE, AlgorithmIdentifier
+  SEQUENCE, BIT STRING signature) after IMPLICIT replacement of the outer
+  SEQUENCE tag.
+- Chosen reading: Accept both on decode via `CertificateDERFromTagged`. One
+  SEQUENCE child is returned as-is; three sibling fields are re-wrapped as
+  `SEQUENCE {…}` before `x509.ParseCertificate` / EID extraction.
+- Rationale: Production silicon emits the IMPLICIT three-sibling shape under
+  A6. Taking only `Children[0].MarshalBinary()` yields TBS alone and fails with
+  `x509: malformed tbs certificate`, blocking EID recovery when GSMA JSON omits
+  `eidValue`.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
 ## GSMA JSON provide without eidValue for BF52 IpaEuiccDataResponse
 
 - Spec section: SGP.32 `ProvideEimPackageResult` (`eidValue` OPTIONAL) and
@@ -301,10 +343,14 @@ Each entry must include:
   carries only `eimPackageResult` (bare BF52) and omits `eidValue`.
 - Chosen reading: Before wrapping/handling, recover EID from the payload:
   prefer Application 26 EID inside `ipaEuiccData` when present, else the eUICC
-  certificate subject `serialNumber` (32-digit hex). Fall back to matching
-  `eimTransactionId` against pending operations. Document that IPAs must send
-  `eidValue` when neither embedded EID nor eUICC certificate is present.
+  certificate subject `serialNumber` (32-digit hex). Walk data objects after
+  BF52 CHOICE unwrap without requiring every `IpaEuiccData` field to decode.
+  Fall back to matching `eimTransactionId` against pending operations. Document
+  that IPAs must send `eidValue` when neither embedded EID nor eUICC certificate
+  is present.
 - Rationale: Default BF52 `tagList` requests A5/A6 certificates and excludes
   EID (`5A`); production provides often omit JSON `eidValue`. Without recovery
-  the result cannot be keyed to a device Store row.
+  the result cannot be keyed to a device Store row. CHOICE / A6 Certificate
+  shape bugs must be fixed in OpenIoTRSP decode, not papered over in the host
+  eIM.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
