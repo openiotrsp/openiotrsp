@@ -1279,6 +1279,14 @@ func (r *ProfileInfoListResponse) MarshalBERTLV() (*bertlv.TLV, error) {
 }
 
 // UnmarshalBERTLV decodes ProfileInfoListResponse.
+//
+// SGP.22/SGP.32 declare ProfileInfoListResponse as an AUTOMATIC TAGS CHOICE
+// under BF2D (profileInfoListOk [0], profileInfoListError [1]). Production
+// IPA/silicon (e.g. Kigen) wraps success as CONTEXT CONSTRUCTED [0] whose
+// children are ProfileInfo values directly. Lab fixtures and mocks often omit
+// that CHOICE tag and place a bare UNIVERSAL 16 SEQUENCE under BF2D. Error
+// may be a bare INTEGER or CONTEXT PRIMITIVE [1]. Both success and error
+// shapes are accepted; encode continues to emit SEQUENCE / bare INTEGER.
 func (r *ProfileInfoListResponse) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if err := expectTag(tlv, tagProfileInfoList); err != nil {
 		return err
@@ -1288,18 +1296,19 @@ func (r *ProfileInfoListResponse) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	}
 	child := tlv.Children[0]
 	var out ProfileInfoListResponse
-	if hasTag(child, tagInteger) {
-		value, err := integerValue[ProfileInfoListError](child)
+	if errTLV, ok := profileInfoListErrorTLV(child); ok {
+		value, err := integerValue[ProfileInfoListError](errTLV)
 		if err != nil {
 			return err
 		}
 		out.Error = &value
 	} else {
-		if err := expectTag(child, tagSequence); err != nil {
+		profiles := unwrapProfileInfoListOk(child)
+		if err := expectTag(profiles, tagSequence); err != nil {
 			return err
 		}
-		out.Profiles = make([]ProfileInfo, 0, len(child.Children))
-		for _, profile := range child.Children {
+		out.Profiles = make([]ProfileInfo, 0, len(profiles.Children))
+		for _, profile := range profiles.Children {
 			var decoded ProfileInfo
 			if err := decoded.UnmarshalBERTLV(profile); err != nil {
 				return err
@@ -1309,6 +1318,35 @@ func (r *ProfileInfoListResponse) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	}
 	*r = out
 	return nil
+}
+
+// unwrapProfileInfoListOk maps AUTOMATIC TAGS success arm [0] to a synthetic
+// UNIVERSAL 16 SEQUENCE over the arm's ProfileInfo children. Bare SEQUENCE
+// (mockIPA / fixtures) is returned unchanged.
+func unwrapProfileInfoListOk(tlv *bertlv.TLV) *bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	if hasTag(tlv, bertlv.ContextSpecific.Constructed(0)) {
+		return constructed(tagSequence, tlv.Children...)
+	}
+	return tlv
+}
+
+// profileInfoListErrorTLV returns the INTEGER TLV for profileInfoListError.
+// Accepts bare UNIVERSAL INTEGER, CONTEXT PRIMITIVE [1] (AUTOMATIC TAGS), or
+// CONTEXT CONSTRUCTED [1] wrapping a single INTEGER.
+func profileInfoListErrorTLV(tlv *bertlv.TLV) (*bertlv.TLV, bool) {
+	if tlv == nil {
+		return nil, false
+	}
+	if hasTag(tlv, tagInteger) || hasTag(tlv, bertlv.ContextSpecific.Primitive(1)) {
+		return tlv, true
+	}
+	if hasTag(tlv, bertlv.ContextSpecific.Constructed(1)) && len(tlv.Children) == 1 && hasTag(tlv.Children[0], tagInteger) {
+		return tlv.Children[0], true
+	}
+	return nil, false
 }
 
 // ProfileInfoListEuiccResult builds the listProfileInfoResult EuiccResultData value.

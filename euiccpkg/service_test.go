@@ -889,6 +889,31 @@ func TestNewPSMOErrorResultsMap(t *testing.T) {
 	}
 }
 
+func TestParseOperationResultListProfileInfoChoiceA0(t *testing.T) {
+	t.Parallel()
+
+	enabled := protocolasn1.ProfileStateEnabled
+	sequenceForm, err := (&protocolasn1.ProfileInfoListResponse{
+		Profiles: []protocolasn1.ProfileInfo{{ICCID: []byte{0x89, 0x10}, ProfileState: &enabled}},
+	}).MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("MarshalBERTLV() error = %v", err)
+	}
+	a0Form := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(45),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0), sequenceForm.Children[0].Children...),
+	)
+	result, err := ParseOperationResult(ListProfileInfo(), []protocolasn1.EuiccResultData{{Raw: a0Form}})
+	if err != nil {
+		t.Fatalf("ParseOperationResult(A0) error = %v", err)
+	}
+	if !result.OK || result.Operation != OperationListProfileInfo || len(result.Profiles) != 1 {
+		t.Fatalf("result = %#v, want OK list with one profile", result)
+	}
+	if result.Profiles[0].ICCID != "8910" || !result.Profiles[0].IsEnabled {
+		t.Fatalf("profile = %#v, want ICCID 8910 enabled", result.Profiles[0])
+	}
+}
+
 type testSigner struct {
 	key *ecdsa.PrivateKey
 }

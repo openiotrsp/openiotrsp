@@ -290,6 +290,140 @@ func TestEuiccPackageResultChoiceArmsDecodeAndSequenceRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProfileInfoListResponseChoiceA0_SequenceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	state := ProfileStateEnabled
+	original := &ProfileInfoListResponse{
+		Profiles: []ProfileInfo{
+			{ICCID: []byte{0x89, 0x10}, ProfileState: &state, FallbackAttribute: true},
+			{ICCID: []byte{0x89, 0x20}},
+		},
+	}
+	sequenceTLV, err := original.MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("MarshalBERTLV(SEQUENCE form) error = %v", err)
+	}
+	if len(sequenceTLV.Children) != 1 || !hasTag(sequenceTLV.Children[0], tagSequence) {
+		t.Fatalf("marshal child = %v, want UNIVERSAL 16 SEQUENCE", sequenceTLV.Children)
+	}
+	var fromSequence ProfileInfoListResponse
+	if err := fromSequence.UnmarshalBERTLV(sequenceTLV); err != nil {
+		t.Fatalf("UnmarshalBERTLV(SEQUENCE form) error = %v", err)
+	}
+	if len(fromSequence.Profiles) != 2 {
+		t.Fatalf("SEQUENCE profiles = %d, want 2", len(fromSequence.Profiles))
+	}
+
+	a0TLV := constructed(tagProfileInfoList, constructed(bertlv.ContextSpecific.Constructed(0), sequenceTLV.Children[0].Children...))
+	var fromA0 ProfileInfoListResponse
+	if err := fromA0.UnmarshalBERTLV(a0TLV); err != nil {
+		t.Fatalf("UnmarshalBERTLV(A0 form) error = %v", err)
+	}
+	if len(fromA0.Profiles) != 2 {
+		t.Fatalf("A0 profiles = %d, want 2", len(fromA0.Profiles))
+	}
+	if !bytes.Equal(fromA0.Profiles[0].ICCID, original.Profiles[0].ICCID) {
+		t.Fatalf("A0 ICCID[0] = %x, want %x", fromA0.Profiles[0].ICCID, original.Profiles[0].ICCID)
+	}
+	if fromA0.Profiles[0].ProfileState == nil || *fromA0.Profiles[0].ProfileState != ProfileStateEnabled {
+		t.Fatalf("A0 ProfileState[0] = %#v, want enabled", fromA0.Profiles[0].ProfileState)
+	}
+	if !fromA0.Profiles[0].FallbackAttribute {
+		t.Fatal("A0 FallbackAttribute[0] = false, want true")
+	}
+}
+
+func TestProfileInfoListResponseErrorArms(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		tlv  *bertlv.TLV
+		want ProfileInfoListError
+	}{
+		{
+			name: "BareInteger",
+			tlv:  constructed(tagProfileInfoList, mustIntegerTLV(t, tagInteger, 127)),
+			want: 127,
+		},
+		{
+			name: "ContextPrimitive1",
+			tlv:  constructed(tagProfileInfoList, mustIntegerTLV(t, bertlv.ContextSpecific.Primitive(1), 1)),
+			want: 1,
+		},
+		{
+			name: "ContextConstructed1",
+			tlv: constructed(tagProfileInfoList, constructed(bertlv.ContextSpecific.Constructed(1),
+				mustIntegerTLV(t, tagInteger, 11),
+			)),
+			want: 11,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var decoded ProfileInfoListResponse
+			if err := decoded.UnmarshalBERTLV(tc.tlv); err != nil {
+				t.Fatalf("UnmarshalBERTLV() error = %v", err)
+			}
+			if decoded.Error == nil || *decoded.Error != tc.want {
+				t.Fatalf("error = %#v, want %d", decoded.Error, tc.want)
+			}
+			if len(decoded.Profiles) != 0 {
+				t.Fatalf("profiles = %d, want 0", len(decoded.Profiles))
+			}
+		})
+	}
+}
+
+func TestProfileInfoListResponseChoiceA0_KigenSample(t *testing.T) {
+	t.Parallel()
+
+	// Same live Kigen provide/handleNotification body as EuiccPackageResult A0
+	// sample: nested BF2D success is A0 → E3 ProfileInfo ×4 (not SEQUENCE).
+	const sample = "v1CCAblaEIkEQEWTAAAAAAAAIVOJMhC/UYIBoqCCAZ4wggFXgBBlaW0uc3ltYi1pb3QuY29tgQENghCEx2BkV1bZwxvxpFIRwcW/gwEOMIIBKb8tggEkoIIBIONNWgqYABAyVHaYEDIUTxCgAAAFWRAQ/////4kAABEAn3ABAJEFS2lnZW6SH0dTTUEgR2VuZXJpYyBlVUlDQyBUZXN0IFByb2ZpbGWVAQDjRVoKmEQFMWCBA2NAYU8QoAAABVkQEP////+JAAASAJ9wAQCRBUtpZ2VukhNLaWdlbi1UQ0EtSlQtU0dQLjMylQECn2cB/+NDWgqYU3YHYhKURBD1TxCgAAAFWRAQ/////4kAABMAn3ABAJEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDE1RpUBAuNDWgqYU3YHYhKURCDzTxCgAAAFWRAQ/////4kAABQAn3ABAZEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDIzRpUBAl83QMSTo0mj78gm7izrMLgSzjPYehfXipNGGFPevuMs1Z8Tx3s5PrHRfv6v3OPqqCj5f4FSmE32tcr0B+gjjPGdOQQ="
+	der, err := decodeTestBase64(t, sample)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	var provide ProvideEimPackageResult
+	if err := Decode(der, &provide); err != nil {
+		t.Fatalf("Decode(ProvideEimPackageResult) error = %v", err)
+	}
+	var epr EuiccPackageResult
+	if err := epr.UnmarshalBERTLV(provide.EimPackageResult.Raw); err != nil {
+		t.Fatalf("UnmarshalBERTLV(EuiccPackageResult) error = %v", err)
+	}
+	if epr.Kind != EuiccPackageResultOK || epr.Signed == nil || len(epr.Signed.Data.Results) != 1 {
+		t.Fatalf("EPR = %#v, want one signed result", epr)
+	}
+	bf2d := epr.Signed.Data.Results[0].Raw
+	if bf2d == nil || !hasTag(bf2d, tagProfileInfoList) {
+		t.Fatalf("result Raw = %#v, want BF2D", bf2d)
+	}
+	if len(bf2d.Children) != 1 || !hasTag(bf2d.Children[0], bertlv.ContextSpecific.Constructed(0)) {
+		t.Fatalf("BF2D child = %v, want A0 CHOICE arm", bf2d.Children)
+	}
+
+	var list ProfileInfoListResponse
+	if err := list.UnmarshalBERTLV(bf2d); err != nil {
+		t.Fatalf("UnmarshalBERTLV(ProfileInfoListResponse A0) error = %v", err)
+	}
+	if list.Error != nil {
+		t.Fatalf("Error = %#v, want nil", list.Error)
+	}
+	if len(list.Profiles) != 4 {
+		t.Fatalf("profiles = %d, want 4", len(list.Profiles))
+	}
+	for i, profile := range list.Profiles {
+		if len(profile.ICCID) == 0 {
+			t.Fatalf("profiles[%d].ICCID empty", i)
+		}
+	}
+}
+
 func decodeTestBase64(t *testing.T, value string) ([]byte, error) {
 	t.Helper()
 	return base64.StdEncoding.DecodeString(value)

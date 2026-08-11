@@ -271,3 +271,24 @@ Each entry must include:
   handleNotification payloads with HTTP 400 (`got [0], want [UNIVERSAL 16]`) and
   left operations stuck pending.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.22 ProfileInfoListResponse CHOICE under BF2D
+
+- Spec section: SGP.22 / SGP.32 `ProfileInfoListResponse ::= [45] CHOICE {
+  profileInfoListOk SEQUENCE OF ProfileInfo, profileInfoListError
+  ProfileInfoListError }` with AUTOMATIC TAGS (tag `BF2D`).
+- Ambiguity: Whether success under `BF2D` is a bare UNIVERSAL 16 SEQUENCE of
+  `ProfileInfo` (mockIPA / fixtures) or CONTEXT CONSTRUCTED `[0]` whose children
+  are the `ProfileInfo` values directly (IMPLICIT AUTOMATIC TAGS). Whether the
+  error arm is a bare INTEGER or CONTEXT `[1]`.
+- Chosen reading: Accept both success forms on decode. Unwrap `[0]` to a
+  synthetic SEQUENCE over its children before the existing `ProfileInfo` loop.
+  Accept bare INTEGER, CONTEXT PRIMITIVE `[1]`, and CONTEXT CONSTRUCTED `[1]`
+  wrapping a single INTEGER for the error arm. Encode path continues to emit
+  `BF2D → SEQUENCE → ProfileInfo*` / bare INTEGER for fixtures/mocks.
+- Rationale: Kigen IPAd nested `listProfileInfo` results inside signed EPR as
+  `BF2D { A0 { E3… } }`. Strict `expectTag(SEQUENCE)` failed apply of
+  provide/handleNotification with `got [0], want [UNIVERSAL 16]` after the
+  BF51 CHOICE unwrap (same class of bug). Dual-accept decode avoids requiring
+  enterprise eIM TLV rewriting.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
