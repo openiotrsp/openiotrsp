@@ -324,6 +324,66 @@ func (s *Store) FetchPendingOperations(ctx context.Context, tenantID storage.Ten
 	return pending, nil
 }
 
+// ListOperations returns operations for one tenant and EID across statuses.
+func (s *Store) ListOperations(ctx context.Context, tenantID storage.TenantID, eid string, limit int) ([]storage.Operation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tenantID = storage.NormalizeTenantID(tenantID)
+	operations := make([]storage.Operation, 0)
+	for _, stored := range s.operations {
+		operation := stored.operation
+		if stored.tenantID == tenantID && operation.EID == eid {
+			operations = append(operations, operation)
+		}
+	}
+	sortOperations(operations)
+	if len(operations) > limit {
+		operations = operations[:limit]
+	}
+	for index := range operations {
+		operations[index] = cloneOperation(operations[index])
+	}
+	return operations, nil
+}
+
+// ListPendingOperations returns pending operations for a tenant across EIDs.
+func (s *Store) ListPendingOperations(ctx context.Context, tenantID storage.TenantID, limit int) ([]storage.Operation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tenantID = storage.NormalizeTenantID(tenantID)
+	pending := make([]storage.Operation, 0)
+	for _, stored := range s.operations {
+		operation := stored.operation
+		if stored.tenantID == tenantID && operation.Status == storage.OperationPending {
+			pending = append(pending, operation)
+		}
+	}
+	sortOperations(pending)
+	if len(pending) > limit {
+		pending = pending[:limit]
+	}
+	for index := range pending {
+		pending[index] = cloneOperation(pending[index])
+	}
+	return pending, nil
+}
+
 // RecordEUICCPackageResult stores a result and marks the matching operation done
 // or failed.
 func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.TenantID, result storage.EUICCPackageResult) error {

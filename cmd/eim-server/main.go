@@ -92,6 +92,9 @@ func run(logger *slog.Logger) error {
 	handler.AllowUnverifiedEUICCPackageResults = cfg.allowUnverifiedEUICCResults
 	handler.Relay = relaypkg.New(relaypkg.HTTPTransport{})
 	mux.HandleFunc(esipa.DefaultPath, handler.ServeHTTP)
+	for _, path := range esipa.DefaultGSMAPaths {
+		mux.HandleFunc(path, handler.ServeGSMAJSON)
+	}
 	mux.Handle("/v1/", api.NewHTTPHandler(store, api.DefaultTenantResolver{}, packageService))
 	mux.Handle("/healthz", appruntime.HealthHandler("eim-server", started))
 	mux.HandleFunc("/status", statusHandler(ctx, store, cfg.eid))

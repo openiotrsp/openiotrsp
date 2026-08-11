@@ -39,7 +39,9 @@ type ProfileState struct {
 // EUICCState is the eIM's current IPA-reported observability view of one eUICC.
 // BF52 IpaEuiccDataResponse messages do not carry EuiccSignEPR signatures, so
 // this state is suitable for reporting/reconciliation but not for authorization
-// or security decisions unless a future caller adds a separate trust mechanism.
+// or security decisions unless a host adds a separate trust mechanism (for
+// example validating presented EUM/eUICC certificates against an explicit CI
+// root store, then using those certs for later EPR signature verification).
 type EUICCState struct {
 	EID                    string
 	EIDValue               []byte
@@ -91,8 +93,11 @@ type OperationRequest struct {
 	Payload []byte
 }
 
-// Operation is queued work for one device. SequenceNumber is the SGP.32
-// EimAcknowledgements sequence value for this tenant and EID.
+// Operation is queued work for one device. SequenceNumber is the eIM-local
+// per-device operation counter used for store lookup and API visibility. It is
+// not the eUICC EuiccPackageResultDataSigned.seqNumber; that card-side value is
+// correlated via eimTransactionId and returned in EimAcknowledgements for IPA
+// notification/result deletion.
 type Operation struct {
 	ID             int64
 	EID            string
@@ -163,6 +168,14 @@ type Store interface {
 	GetOperation(ctx context.Context, tenantID TenantID, operationID int64) (Operation, error)
 	GetOperationBySequence(ctx context.Context, tenantID TenantID, eid string, sequenceNumber int64) (Operation, error)
 	FetchPendingOperations(ctx context.Context, tenantID TenantID, eid string, limit int) ([]Operation, error)
+	// ListOperations returns operations for one tenant and EID, oldest sequence
+	// first, including completed ones. Used for idempotent EPR redelivery after
+	// the pending queue entry is already cleared.
+	ListOperations(ctx context.Context, tenantID TenantID, eid string, limit int) ([]Operation, error)
+	// ListPendingOperations returns pending operations for a tenant across EIDs,
+	// oldest sequence first. Used when Provide/JSON ESipa omits EID and the
+	// handler must recover the device from eimTransactionId.
+	ListPendingOperations(ctx context.Context, tenantID TenantID, limit int) ([]Operation, error)
 	RecordEUICCPackageResult(ctx context.Context, tenantID TenantID, result EUICCPackageResult) error
 	GetOperationResult(ctx context.Context, tenantID TenantID, operationID int64) (OperationResult, error)
 	StoreEIMConfig(ctx context.Context, tenantID TenantID, config EIMConfig) error

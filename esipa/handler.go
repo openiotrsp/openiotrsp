@@ -1,5 +1,10 @@
 // Package esipa implements the SGP.32 ESipa polling endpoint shared by the
 // HTTPS and CoAP/DTLS transports.
+//
+// Wire bindings:
+//   - BER-TLV on DefaultPath (/esipa) with MediaType
+//   - GSMA HTTP JSON on DefaultGSMAPaths (/gsma/rsp2/esipa/...) for IPA
+//     implementations such as Kigen IPAd
 package esipa
 
 import (
@@ -24,7 +29,7 @@ import (
 )
 
 const (
-	// DefaultPath is the transport path used by the HTTPS and CoAP handlers.
+	// DefaultPath is the BER-TLV transport path used by the HTTPS and CoAP handlers.
 	DefaultPath = "/esipa"
 
 	// MediaType is the HTTP content type used for BER-TLV encoded ESipa payloads.
@@ -304,7 +309,10 @@ func handleProvideEimPackageResult(ctx context.Context, store storage.Store, ten
 		logProvideResultDecodeFailed(logger, requestBytes, tlv, err)
 		return Response{}, err
 	}
-	eid, code := eidKey(request.EID)
+	eid, code, err := resolveProvideResultEID(ctx, store, tenantID, request.EID, request.EimPackageResult.Raw)
+	if err != nil {
+		return Response{}, err
+	}
 	if code != nil {
 		return provideResultErrorResponse(*code)
 	}
@@ -610,8 +618,8 @@ func recordEimPackageResult(
 				return nil, false, err
 			}
 		}
-		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
+	sequenceNumbers = appendAckSequences(sequenceNumbers, packageResultAckSequences(&result)...)
 	notificationSequences, err := recordNotificationsFromList(ctx, store, tenantID, eid, notificationList)
 	if err != nil {
 		return nil, false, err
@@ -784,17 +792,9 @@ func matchingEUICCPackageOperations(
 	if result == nil {
 		return nil, storage.ErrNotFound
 	}
-	if sequenceNumbers := resultSequenceNumbers(result); len(sequenceNumbers) > 0 {
-		operations := make([]storage.Operation, 0, len(sequenceNumbers))
-		for _, sequence := range sequenceNumbers {
-			operation, err := store.GetOperationBySequence(ctx, tenantID, eid, int64(sequence))
-			if err != nil {
-				return nil, err
-			}
-			operations = append(operations, operation)
-		}
-		return operations, nil
-	}
+	// Correlate by eimTransactionId (and eimId/counter) against pending
+	// euicc-package payloads. EuiccPackageResultDataSigned.seqNumber is the
+	// eUICC notification/package-result sequence, not operations.sequence_number.
 	switch result.Kind {
 	case protocolasn1.EuiccPackageResultOK:
 		if result.Signed == nil {
@@ -838,13 +838,41 @@ func matchPendingEuiccPackageByCorrelation(
 	if err != nil {
 		return nil, err
 	}
-	for _, operation := range pending {
+	if operation, ok, err := firstMatchingEuiccPackage(pending, eimID, counter, transactionID); err != nil {
+		return nil, err
+	} else if ok {
+		return []storage.Operation{operation}, nil
+	}
+	// Idempotent redelivery: IPA may resend a Provide after the operation left
+	// the pending queue. Correlate completed euicc-package rows by transaction.
+	if len(transactionID) == 0 && eimID == "" && counter == 0 {
+		return nil, storage.ErrNotFound
+	}
+	all, err := store.ListOperations(ctx, tenantID, eid, 10000)
+	if err != nil {
+		return nil, err
+	}
+	if operation, ok, err := firstMatchingEuiccPackage(all, eimID, counter, transactionID); err != nil {
+		return nil, err
+	} else if ok {
+		return []storage.Operation{operation}, nil
+	}
+	return nil, storage.ErrNotFound
+}
+
+func firstMatchingEuiccPackage(
+	operations []storage.Operation,
+	eimID string,
+	counter int64,
+	transactionID []byte,
+) (storage.Operation, bool, error) {
+	for _, operation := range operations {
 		if operation.Kind != storage.OperationEuiccPackage {
 			continue
 		}
 		var request protocolasn1.EuiccPackageRequest
 		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
-			return nil, err
+			return storage.Operation{}, false, err
 		}
 		signed := request.EuiccPackageSigned
 		if eimID != "" && signed.EimID != eimID {
@@ -856,9 +884,9 @@ func matchPendingEuiccPackageByCorrelation(
 		if len(transactionID) > 0 && !bytes.Equal(signed.EimTransactionID, transactionID) {
 			continue
 		}
-		return []storage.Operation{operation}, nil
+		return operation, true, nil
 	}
-	return nil, storage.ErrNotFound
+	return storage.Operation{}, false, nil
 }
 
 func firstPendingEuiccPackageOperation(
@@ -1053,7 +1081,10 @@ func recordDownloadedProfileState(
 	})
 }
 
-func resultSequenceNumbers(result *protocolasn1.EuiccPackageResult) []protocolasn1.SequenceNumber {
+func packageResultAckSequences(result *protocolasn1.EuiccPackageResult) []protocolasn1.SequenceNumber {
+	// EimAcknowledgements carry eUICC-side sequence numbers so the IPA can
+	// delete processed package results / notifications. Do not ACK the eIM
+	// operations.sequence_number here.
 	if result == nil || result.Kind != protocolasn1.EuiccPackageResultOK || result.Signed == nil {
 		return nil
 	}
@@ -1155,6 +1186,88 @@ func eidKey(eid []byte) (string, *protocolasn1.EimPackageResultErrorCode) {
 	default:
 		code := getEimPackageErrorInvalidEID
 		return "", &code
+	}
+}
+
+// resolveProvideResultEID prefers an explicit Provide EID, then recovers from
+// eimTransactionId against pending operation payloads when EID was omitted.
+func resolveProvideResultEID(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eidBytes []byte,
+	resultTLV *bertlv.TLV,
+) (string, *protocolasn1.EimPackageResultErrorCode, error) {
+	if len(eidBytes) != 0 {
+		eid, code := eidKey(eidBytes)
+		return eid, code, nil
+	}
+	transactionID := eimTransactionIDFromResultTLV(resultTLV)
+	if len(transactionID) == 0 {
+		code := getEimPackageErrorMissingEID
+		return "", &code, nil
+	}
+	pending, err := store.ListPendingOperations(ctx, tenantID, 10000)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, operation := range pending {
+		matched, err := operationMatchesEimTransactionID(operation, transactionID)
+		if err != nil {
+			return "", nil, err
+		}
+		if matched {
+			return operation.EID, nil, nil
+		}
+	}
+	code := provideResultErrorEIDNotFound
+	return "", &code, nil
+}
+
+func eimTransactionIDFromResultTLV(tlv *bertlv.TLV) []byte {
+	if tlv == nil {
+		return nil
+	}
+	var result protocolasn1.EuiccPackageResult
+	if err := result.UnmarshalBERTLV(tlv); err != nil {
+		return nil
+	}
+	switch result.Kind {
+	case protocolasn1.EuiccPackageResultOK:
+		if result.Signed != nil {
+			return cloneBytes(result.Signed.Data.EimTransactionID)
+		}
+	case protocolasn1.EuiccPackageResultErrorSigned:
+		if result.ErrorSigned != nil {
+			return cloneBytes(result.ErrorSigned.Data.EimTransactionID)
+		}
+	case protocolasn1.EuiccPackageResultErrorUnsigned:
+		if result.ErrorUnsigned != nil {
+			return cloneBytes(result.ErrorUnsigned.EimTransactionID)
+		}
+	}
+	return nil
+}
+
+func operationMatchesEimTransactionID(operation storage.Operation, transactionID []byte) (bool, error) {
+	if len(transactionID) == 0 {
+		return false, nil
+	}
+	switch operation.Kind {
+	case storage.OperationEuiccPackage:
+		var request protocolasn1.EuiccPackageRequest
+		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+			return false, err
+		}
+		return bytes.Equal(request.EuiccPackageSigned.EimTransactionID, transactionID), nil
+	case storage.OperationIpaEuiccData:
+		var request protocolasn1.IpaEuiccDataRequest
+		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
+			return false, err
+		}
+		return bytes.Equal(request.EimTransactionID, transactionID), nil
+	default:
+		return false, nil
 	}
 }
 

@@ -376,6 +376,82 @@ func (s *Store) FetchPendingOperations(ctx context.Context, tenantID storage.Ten
 	return operations, rows.Err()
 }
 
+// ListOperations returns operations for one tenant and EID across statuses.
+func (s *Store) ListOperations(ctx context.Context, tenantID storage.TenantID, eid string, limit int) ([]storage.Operation, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, eid, sequence_number, kind, payload, status, created_at, updated_at
+		FROM operations
+		WHERE tenant_id = $1 AND eid = $2
+		ORDER BY sequence_number
+		LIMIT $3
+	`, tenantString(tenantID), eid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	operations := make([]storage.Operation, 0)
+	for rows.Next() {
+		var operation storage.Operation
+		if err := rows.Scan(
+			&operation.ID,
+			&operation.EID,
+			&operation.SequenceNumber,
+			&operation.Kind,
+			&operation.Payload,
+			&operation.Status,
+			&operation.CreatedAt,
+			&operation.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		operations = append(operations, cloneOperation(operation))
+	}
+	return operations, rows.Err()
+}
+
+// ListPendingOperations returns pending operations for a tenant across EIDs.
+func (s *Store) ListPendingOperations(ctx context.Context, tenantID storage.TenantID, limit int) ([]storage.Operation, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, eid, sequence_number, kind, payload, status, created_at, updated_at
+		FROM operations
+		WHERE tenant_id = $1 AND status = $2
+		ORDER BY sequence_number
+		LIMIT $3
+	`, tenantString(tenantID), string(storage.OperationPending), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	operations := make([]storage.Operation, 0)
+	for rows.Next() {
+		var operation storage.Operation
+		if err := rows.Scan(
+			&operation.ID,
+			&operation.EID,
+			&operation.SequenceNumber,
+			&operation.Kind,
+			&operation.Payload,
+			&operation.Status,
+			&operation.CreatedAt,
+			&operation.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		operations = append(operations, cloneOperation(operation))
+	}
+	return operations, rows.Err()
+}
+
 // RecordEUICCPackageResult stores a result and marks the matching operation done
 // or failed.
 func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.TenantID, result storage.EUICCPackageResult) error {

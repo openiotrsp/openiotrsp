@@ -2,6 +2,7 @@ package asn1
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/hex"
 	"testing"
 
@@ -150,6 +151,148 @@ func TestProvideEimPackageResultVariantPayloads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEuiccPackageResultChoiceA0Signed_KigenSample(t *testing.T) {
+	t.Parallel()
+
+	// Live Kigen handleNotification / provideEimPackageResult body (seq 14):
+	// BF50 { 5A EID, BF51 { A0 { data SEQUENCE, 5F37 } } }
+	const sample = "v1CCAblaEIkEQEWTAAAAAAAAIVOJMhC/UYIBoqCCAZ4wggFXgBBlaW0uc3ltYi1pb3QuY29tgQENghCEx2BkV1bZwxvxpFIRwcW/gwEOMIIBKb8tggEkoIIBIONNWgqYABAyVHaYEDIUTxCgAAAFWRAQ/////4kAABEAn3ABAJEFS2lnZW6SH0dTTUEgR2VuZXJpYyBlVUlDQyBUZXN0IFByb2ZpbGWVAQDjRVoKmEQFMWCBA2NAYU8QoAAABVkQEP////+JAAASAJ9wAQCRBUtpZ2VukhNLaWdlbi1UQ0EtSlQtU0dQLjMylQECn2cB/+NDWgqYU3YHYhKURBD1TxCgAAAFWRAQ/////4kAABMAn3ABAJEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDE1RpUBAuNDWgqYU3YHYhKURCDzTxCgAAAFWRAQ/////4kAABQAn3ABAZEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDIzRpUBAl83QMSTo0mj78gm7izrMLgSzjPYehfXipNGGFPevuMs1Z8Tx3s5PrHRfv6v3OPqqCj5f4FSmE32tcr0B+gjjPGdOQQ="
+	der, err := decodeTestBase64(t, sample)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	var provide ProvideEimPackageResult
+	if err := Decode(der, &provide); err != nil {
+		t.Fatalf("Decode(ProvideEimPackageResult) error = %v", err)
+	}
+	if len(provide.EID) != 16 {
+		t.Fatalf("EID len = %d, want 16", len(provide.EID))
+	}
+	var result EuiccPackageResult
+	if err := result.UnmarshalBERTLV(provide.EimPackageResult.Raw); err != nil {
+		t.Fatalf("UnmarshalBERTLV(EuiccPackageResult CHOICE A0) error = %v", err)
+	}
+	if result.Kind != EuiccPackageResultOK || result.Signed == nil {
+		t.Fatalf("result = %#v, want signed OK", result)
+	}
+	if result.Signed.Data.EimID != "eim.symb-iot.com" {
+		t.Fatalf("eimId = %q", result.Signed.Data.EimID)
+	}
+	if result.Signed.Data.SeqNumber != 14 {
+		t.Fatalf("seqNumber = %d, want 14", result.Signed.Data.SeqNumber)
+	}
+	wantTxn := mustDecodeHex(t, "84c760645756d9c31bf1a45211c1c5bf")
+	if !bytes.Equal(result.Signed.Data.EimTransactionID, wantTxn) {
+		t.Fatalf("eimTransactionId = %x, want %x", result.Signed.Data.EimTransactionID, wantTxn)
+	}
+}
+
+func TestEuiccPackageResultChoiceArmsDecodeAndSequenceRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	signed := &EuiccPackageResult{
+		Kind: EuiccPackageResultOK,
+		Signed: &EuiccPackageResultSigned{
+			Data: EuiccPackageResultDataSigned{
+				EimID:            "testeim1",
+				CounterValue:     1,
+				EimTransactionID: []byte{0x01, 0x02},
+				SeqNumber:        7,
+				Results: []EuiccResultData{{
+					Raw: mustIntegerTLV(t, bertlv.ContextSpecific.Primitive(3), 0),
+				}},
+			},
+			EuiccSignEPR: []byte{0x30, 0x03, 0x02, 0x01, 0x02},
+		},
+	}
+	sequenceTLV, err := signed.MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("MarshalBERTLV(SEQUENCE form) error = %v", err)
+	}
+	var fromSequence EuiccPackageResult
+	if err := fromSequence.UnmarshalBERTLV(sequenceTLV); err != nil {
+		t.Fatalf("UnmarshalBERTLV(SEQUENCE form) error = %v", err)
+	}
+	if fromSequence.Kind != EuiccPackageResultOK || fromSequence.Signed == nil || fromSequence.Signed.Data.SeqNumber != 7 {
+		t.Fatalf("SEQUENCE decode = %#v", fromSequence)
+	}
+
+	cases := []struct {
+		name string
+		arm  uint64
+		wrap func(*bertlv.TLV) *bertlv.TLV
+	}{
+		{
+			name: "A0SignedOK",
+			arm:  0,
+			wrap: func(child *bertlv.TLV) *bertlv.TLV {
+				return constructed(tagEuiccPkg, constructed(bertlv.ContextSpecific.Constructed(0), child.Children...))
+			},
+		},
+		{
+			name: "A1SignedError",
+			arm:  1,
+			wrap: func(_ *bertlv.TLV) *bertlv.TLV {
+				errorSigned := &EuiccPackageResult{
+					Kind: EuiccPackageResultErrorSigned,
+					ErrorSigned: &EuiccPackageErrorSigned{
+						Data: EuiccPackageErrorDataSigned{
+							EimID:        "testeim1",
+							CounterValue: 1,
+							ErrorCode:    3,
+						},
+						EuiccSignEPE: []byte{0x30, 0x03, 0x02, 0x01, 0x02},
+					},
+				}
+				tlv, err := errorSigned.ErrorSigned.MarshalBERTLV()
+				if err != nil {
+					t.Fatalf("MarshalBERTLV(error signed) error = %v", err)
+				}
+				return constructed(tagEuiccPkg, constructed(bertlv.ContextSpecific.Constructed(1), tlv.Children...))
+			},
+		},
+		{
+			name: "A2UnsignedError",
+			arm:  2,
+			wrap: func(_ *bertlv.TLV) *bertlv.TLV {
+				return constructed(tagEuiccPkg, constructed(bertlv.ContextSpecific.Constructed(2),
+					utf8TLV(bertlv.ContextSpecific.Primitive(0), "testeim1"),
+					octetTLV(bertlv.ContextSpecific.Primitive(2), []byte{0xaa}),
+				))
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var decoded EuiccPackageResult
+			if err := decoded.UnmarshalBERTLV(tc.wrap(sequenceTLV.Children[0])); err != nil {
+				t.Fatalf("UnmarshalBERTLV([%d]) error = %v", tc.arm, err)
+			}
+			switch tc.arm {
+			case 0:
+				if decoded.Kind != EuiccPackageResultOK || decoded.Signed == nil || decoded.Signed.Data.SeqNumber != 7 {
+					t.Fatalf("decoded = %#v", decoded)
+				}
+			case 1:
+				if decoded.Kind != EuiccPackageResultErrorSigned || decoded.ErrorSigned == nil || decoded.ErrorSigned.Data.ErrorCode != 3 {
+					t.Fatalf("decoded = %#v", decoded)
+				}
+			case 2:
+				if decoded.Kind != EuiccPackageResultErrorUnsigned || decoded.ErrorUnsigned == nil || decoded.ErrorUnsigned.EimID != "testeim1" {
+					t.Fatalf("decoded = %#v", decoded)
+				}
+			}
+		})
+	}
+}
+
+func decodeTestBase64(t *testing.T, value string) ([]byte, error) {
+	t.Helper()
+	return base64.StdEncoding.DecodeString(value)
 }
 
 func TestEuiccPackageErrorUnsigned_A2Structured(t *testing.T) {

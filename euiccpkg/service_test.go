@@ -302,6 +302,15 @@ func TestRawSignedDataFromResultDERAnchorsToResultSignedData(t *testing.T) {
 		t.Fatalf("raw signed result data = %x, want %x", raw, okSignedData)
 	}
 
+	choiceWrapped := makeTLV([]byte{0xbf, 0x51}, makeTLV([]byte{0xa0}, append(cloneBytes(okSignedData), makeTLV([]byte{0x5f, 0x37}, []byte{0x30, 0x00})...)))
+	raw, err = rawSignedDataFromResultDER(choiceWrapped)
+	if err != nil {
+		t.Fatalf("rawSignedDataFromResultDER(A0) error = %v", err)
+	}
+	if !bytes.Equal(raw, okSignedData) {
+		t.Fatalf("raw signed A0 result data = %x, want %x", raw, okSignedData)
+	}
+
 	errorSignedData := encode(t, &protocolasn1.EuiccPackageErrorDataSigned{
 		EimID:        "testeim1",
 		CounterValue: 1,

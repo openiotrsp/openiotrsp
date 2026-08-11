@@ -15,10 +15,14 @@ func NewHTTPHandler(store storage.Store, tenantID storage.TenantID) http.Handler
 }
 
 // HTTPHandler returns the stdlib HTTP wrapper around the shared ESipa handler.
+// It mounts BER-TLV DefaultPath and the GSMA JSON DefaultGSMAPaths.
 func (h *Handler) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 	path := h.path()
 	mux.HandleFunc(path, h.ServeHTTP)
+	for _, gsmaPath := range DefaultGSMAPaths {
+		mux.HandleFunc(gsmaPath, h.ServeGSMAJSON)
+	}
 	return mux
 }
 

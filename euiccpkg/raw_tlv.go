@@ -41,27 +41,37 @@ func rawSignedDataFromResultDER(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(selected.tag, tagSequence) {
+	// AUTOMATIC TAGS CHOICE arms [0]/[1] (A0/A1) carry the same children as a
+	// bare SEQUENCE; [2] (A2) is unsigned and has no signature to extract.
+	if isContextConstructedTag(selected.tag, 2) {
 		return nil, nil
 	}
-	children, err := children(data, selected)
+	if !bytes.Equal(selected.tag, tagSequence) && !isContextConstructedTag(selected.tag, 0) && !isContextConstructedTag(selected.tag, 1) {
+		return nil, nil
+	}
+	childSpans, err := children(data, selected)
 	if err != nil {
 		return nil, err
 	}
-	if len(children) == 0 {
+	if len(childSpans) == 0 {
 		return nil, errors.New("euiccpkg: signed result child is empty")
 	}
-	if !hasSpanTag(children[len(children)-1], tagSignature) {
+	if !hasSpanTag(childSpans[len(childSpans)-1], tagSignature) {
 		return nil, nil
 	}
-	if len(children) != 2 {
+	if len(childSpans) != 2 {
 		return nil, errors.New("euiccpkg: signed result requires signed data and signature")
 	}
-	signedData := children[0]
+	signedData := childSpans[0]
 	if err := validateResultSignedData(data, signedData); err != nil {
 		return nil, err
 	}
 	return cloneBytes(data[signedData.tagStart:signedData.end]), nil
+}
+
+func isContextConstructedTag(tag []byte, number byte) bool {
+	// Short-form context-specific constructed tags A0/A1/A2.
+	return len(tag) == 1 && tag[0] == 0xa0+number
 }
 
 func onlyChild(data []byte, parent tlvSpan) (tlvSpan, error) {

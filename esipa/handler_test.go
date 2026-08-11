@@ -162,6 +162,119 @@ func TestSGP33ESepPackageResultsThroughESipa(t *testing.T) {
 	}
 }
 
+func TestEUICCPackageResultMatchesByTransactionIgnoresCardSeqNumber(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x5a)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+
+	transactionID := []byte{0x84, 0xc7, 0x60, 0x64, 0x57, 0x56, 0xd9, 0xc3, 0x1b, 0xf1, 0xa4, 0x52, 0x11, 0xc1, 0xc5, 0xbf}
+	otherTxn := []byte{0x11, 0x22, 0x33, 0x44}
+
+	otherRequest := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoDisable, 3)
+	otherRequest.EuiccPackageSigned.EimTransactionID = cloneBytes(otherTxn)
+	otherOp, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, otherRequest),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation(other) error = %v", err)
+	}
+
+	targetRequest := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	targetRequest.EuiccPackageSigned.EimTransactionID = cloneBytes(transactionID)
+	targetOp, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, targetRequest),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation(target) error = %v", err)
+	}
+	if targetOp.SequenceNumber == 14 {
+		t.Fatal("test setup requires eIM operation sequence != card seqNumber 14")
+	}
+
+	result := sampleEuiccPackageResultForTag(14, 3, 0)
+	result.Signed.Data.EimTransactionID = cloneBytes(transactionID)
+	result.Signed.Data.CounterValue = targetRequest.EuiccPackageSigned.CounterValue
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, result),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(ProvideEimPackageResult) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{14}) {
+		t.Fatalf("ack = %v, want card seqNumber [14]", ack.SequenceNumbers)
+	}
+
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].OperationID != targetOp.ID {
+		t.Fatalf("recorded results = %#v, want target operation %d", results, targetOp.ID)
+	}
+	otherAfter, err := store.GetOperation(ctx, storage.DefaultTenantID, otherOp.ID)
+	if err != nil {
+		t.Fatalf("GetOperation(other) error = %v", err)
+	}
+	if otherAfter.Status != storage.OperationPending {
+		t.Fatalf("other operation status = %s, want pending", otherAfter.Status)
+	}
+	targetAfter, err := store.GetOperation(ctx, storage.DefaultTenantID, targetOp.ID)
+	if err != nil {
+		t.Fatalf("GetOperation(target) error = %v", err)
+	}
+	if targetAfter.Status != storage.OperationDone {
+		t.Fatalf("target operation status = %s, want done", targetAfter.Status)
+	}
+}
+
+func TestEUICCPackageResultDoesNotMatchWrongKindByCardSeqNumber(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x5b)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	ipaOp, err := ipadata.EnqueueRequest(ctx, store, storage.DefaultTenantID, eidKey, ipadata.RequestInput{
+		TagList: []byte{0xbf, 0x20},
+	})
+	if err != nil {
+		t.Fatalf("EnqueueRequest() error = %v", err)
+	}
+	result := sampleEuiccPackageResultForTag(ipaOp.SequenceNumber, 3, 0)
+	result.Signed.Data.EimTransactionID = []byte{0xde, 0xad}
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, result),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	response := decodeProvideResultResponse(t, encodeResponse(t, resultResponse))
+	if response.Kind != protocolasn1.ProvideResultResponseError {
+		t.Fatalf("provide kind = %v, want error (must not match ipa-euicc-data by card seqNumber)", response.Kind)
+	}
+}
+
 func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *testing.T) {
 	t.Parallel()
 
@@ -213,8 +326,8 @@ func TestEUICCPackageResultWithoutSequenceMatchesByTransactionAndCounter(t *test
 		t.Fatalf("Handle(ProvideEimPackageResult) error = %v", err)
 	}
 	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
-	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(secondOperation.SequenceNumber)}) {
-		t.Fatalf("ack = %v, want [%d]", ack.SequenceNumbers, secondOperation.SequenceNumber)
+	if len(ack.SequenceNumbers) != 0 {
+		t.Fatalf("ack = %v, want empty card-side ack when SeqNumber is 0", ack.SequenceNumbers)
 	}
 
 	results := store.recordedResults()
@@ -965,8 +1078,8 @@ func TestProvideEimPackageResult_VendorUnsignedErrorHandler(t *testing.T) {
 		t.Fatalf("Handle(vendor unsigned error) error = %v", err)
 	}
 	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
-	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
-		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	if len(ack.SequenceNumbers) != 0 {
+		t.Fatalf("ack = %v, want empty card-side ack for unsigned error", ack.SequenceNumbers)
 	}
 	results := store.recordedResults()
 	if len(results) != 1 || results[0].Status != storage.OperationFailed {
@@ -992,6 +1105,7 @@ func TestProvideEimPackageResult_BF51BareInteger(t *testing.T) {
 			)
 		},
 		wantStatus: storage.OperationFailed,
+		wantAck:    []protocolasn1.SequenceNumber{},
 	})
 }
 
@@ -1004,6 +1118,7 @@ func TestProvideEimPackageResult_TopLevelInteger(t *testing.T) {
 			return mustTestIntegerTLV(t, bertlv.Universal.Primitive(2), 127)
 		},
 		wantStatus: storage.OperationFailed,
+		wantAck:    []protocolasn1.SequenceNumber{1},
 	})
 }
 
@@ -1018,6 +1133,7 @@ func TestProvideEimPackageResult_A0Integer(t *testing.T) {
 			)
 		},
 		wantStatus: storage.OperationFailed,
+		wantAck:    []protocolasn1.SequenceNumber{1},
 	})
 }
 
@@ -1066,6 +1182,7 @@ type provideResultVariantCase struct {
 	name           string
 	buildResultTLV func(t *testing.T) *bertlv.TLV
 	wantStatus     storage.OperationStatus
+	wantAck        []protocolasn1.SequenceNumber
 }
 
 func runProvideResultVariantTest(t *testing.T, tc provideResultVariantCase) {
@@ -1098,8 +1215,15 @@ func runProvideResultVariantTest(t *testing.T, tc provideResultVariantCase) {
 		t.Fatalf("Handle(%s) error = %v", tc.name, err)
 	}
 	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
-	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
-		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	gotAck := ack.SequenceNumbers
+	if gotAck == nil {
+		gotAck = []protocolasn1.SequenceNumber{}
+	}
+	if tc.wantAck == nil {
+		tc.wantAck = []protocolasn1.SequenceNumber{}
+	}
+	if !reflect.DeepEqual(gotAck, tc.wantAck) {
+		t.Fatalf("ack = %v, want %v", gotAck, tc.wantAck)
 	}
 	results := store.recordedResults()
 	if len(results) != 1 || results[0].Status != tc.wantStatus {

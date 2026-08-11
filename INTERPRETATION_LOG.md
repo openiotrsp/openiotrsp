@@ -236,14 +236,38 @@ Each entry must include:
   omitted spec-default fields and Kigen production tags.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
 
-## SGP.32 EuiccPackageErrorUnsigned CHOICE tag A2
+## SGP.32 EuiccPackageResult.seqNumber vs eIM operations.sequence_number
 
-- Spec section: SGP.32 `EuiccPackageResult` CHOICE arm
-  `euiccPackageErrorUnsigned [2]`; `EuiccPackageErrorUnsigned` SEQUENCE.
-- Ambiguity: Whether the unsigned error payload under `BF51` is the bare SEQUENCE
-  or the context-specific constructed tag `A2` wrapping the SEQUENCE fields.
-- Chosen reading: Accept both universal `SEQUENCE` and `A2` (`[2] constructed`) on
-  decode. Vendor IPA sends `BF51 { A2 { ... } }` inside `ePRAndNotifications`.
-- Rationale: Strict `expectTag(SEQUENCE)` rejected vendor provideResult with HTTP
-  400 and left operations stuck pending.
+- Spec section: SGP.32 `EuiccPackageResultDataSigned.seqNumber`; eIM local
+  operation queue `operations.sequence_number` / `EimAcknowledgements`.
+- Ambiguity: Whether `seqNumber` in a signed EPR is the same counter as the eIM
+  operation sequence used for `GetOperationBySequence`.
+- Chosen reading: They are different counters. Match signed EPR completion to
+  pending `euicc-package` operations by `(eid, eimTransactionId)` (with eimId /
+  counter as additional correlation). Use eUICC `seqNumber` only in
+  `EimAcknowledgements` for IPA/card-side notification and package-result
+  deletion. Do not treat `seqNumber` as `operations.sequence_number`.
+- Rationale: Kigen silicon reports card notification/package-result sequences
+  (e.g. 13/14) while eIM operation sequences advance independently (e.g. 18/19).
+  Matching by `seqNumber` attached results to the wrong pending op or returned
+  `ErrNotFound`.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+
+- Spec section: SGP.32 `EuiccPackageResult` CHOICE under `BF51` with AUTOMATIC
+  TAGS arms `euiccPackageResultSigned [0]`, `euiccPackageErrorSigned [1]`,
+  `euiccPackageErrorUnsigned [2]`.
+- Ambiguity: Whether the selected arm under `BF51` is a bare UNIVERSAL 16
+  SEQUENCE (or vendor bare INTEGER for unsigned error) or the context-specific
+  constructed CHOICE tag `A0`/`A1`/`A2` whose children are the SEQUENCE fields.
+- Chosen reading: Accept both forms on decode. Unwrap `A0`/`A1`/`A2` to a
+  synthetic SEQUENCE over the arm's children before signed/unsigned SEQUENCE
+  parsers run. Encode path continues to emit bare SEQUENCE children under
+  `BF51` for fixtures/mocks.
+- Child shapes: `[0]` and `[1]` are SEQUENCE `{ data, signature (5F37) }`;
+  `[2]` is the unsigned SEQUENCE (no signature). Kigen production silicon sends
+  signed OK results as `BF51 { A0 { data SEQUENCE, 5F37 } }`.
+- Rationale: Strict `expectTag(SEQUENCE)` rejected Kigen/vendor provideResult and
+  handleNotification payloads with HTTP 400 (`got [0], want [UNIVERSAL 16]`) and
+  left operations stuck pending.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

@@ -733,6 +733,12 @@ func (r *EuiccPackageResult) MarshalBERTLV() (*bertlv.TLV, error) {
 }
 
 // UnmarshalBERTLV decodes EuiccPackageResult.
+//
+// SGP.32 declares EuiccPackageResult as an AUTOMATIC TAGS CHOICE under BF51,
+// so production IPA/silicon may wrap the selected arm as CONTEXT CONSTRUCTED
+// [0]/[1], or [2] (A0/A1/A2). Lab fixtures and mocks often omit that outer
+// CHOICE tag and place a bare UNIVERSAL 16 SEQUENCE (or a vendor bare INTEGER
+// unsigned error) directly under BF51. Both shapes are accepted.
 func (r *EuiccPackageResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if err := expectTag(tlv, tagEuiccPkg); err != nil {
 		return err
@@ -740,7 +746,7 @@ func (r *EuiccPackageResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if len(tlv.Children) != 1 {
 		return errors.New("asn1: EuiccPackageResult requires one selected child")
 	}
-	child := tlv.Children[0]
+	child := unwrapEuiccPackageResultChoice(tlv.Children[0])
 	var out EuiccPackageResult
 	if child.First(tagSignature) != nil {
 		if len(child.Children) == 0 {
@@ -769,6 +775,24 @@ func (r *EuiccPackageResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	}
 	*r = out
 	return nil
+}
+
+// unwrapEuiccPackageResultChoice maps AUTOMATIC TAGS CHOICE arms [0]/[1],[2]
+// to a synthetic UNIVERSAL 16 SEQUENCE over the arm's children so signed and
+// unsigned SEQUENCE decoders can share one path. Bare SEQUENCE and other
+// vendor shapes are returned unchanged.
+func unwrapEuiccPackageResultChoice(tlv *bertlv.TLV) *bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	switch {
+	case hasTag(tlv, bertlv.ContextSpecific.Constructed(0)),
+		hasTag(tlv, bertlv.ContextSpecific.Constructed(1)),
+		hasTag(tlv, bertlv.ContextSpecific.Constructed(2)):
+		return constructed(tagSequence, tlv.Children...)
+	default:
+		return tlv
+	}
 }
 
 func isEuiccPackageUnsignedErrorCodeTLV(tlv *bertlv.TLV) bool {
