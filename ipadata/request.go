@@ -16,10 +16,10 @@ import (
 // BF2D (ProfileInfoListResponse) is not valid in tagList; notifications use A0.
 // EID (tag 5A / application 26) is excluded — the IPA already knows the target EID.
 //
-// Profile inventory is not a BF52 concern: on production IPA/silicon (including
-// Kigen), the profile list is delivered as a signed euiccPackageRequest carrying
-// listProfileInfo PSMO (BF51), not via IpaEuiccData. BF52 remains the channel for
-// EUM/eUICC certificate presentation (tagList including A5/A6), eUICCInfo, IPA
+// Profile inventory is not a BF52 concern: on production IPA/silicon the profile
+// list is delivered as a signed euiccPackageRequest carrying listProfileInfo
+// PSMO (BF51), not via IpaEuiccData. BF52 remains the channel for EUM/eUICC
+// certificate presentation (tagList including A5/A6), eUICCInfo, IPA
 // capabilities, and notifications. Hosts must not use BF52 as a substitute for
 // listProfileInfo.
 var DefaultTagList = []byte{

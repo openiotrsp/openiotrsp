@@ -14,6 +14,15 @@ The stack starts Postgres, `eim-server`, and `mockipa`. The eIM registers the de
 
 `ipadata.DefaultTagList` (BF52 `IpaEuiccDataRequest`) requests eUICCInfo, notifications, EUM/eUICC certificates, and IPA capabilities. Profile inventory on production IPA/silicon is delivered as a signed `euiccPackageRequest` with `listProfileInfo` PSMO (BF51), not BF52. Hosts must not treat BF52 as a substitute for `listProfileInfo`. Presented EUM/eUICC certificates in `storage.EUICCState` remain observational unless the host validates them against an explicit CI root store before using them as EPR trust material.
 
+### GSMA JSON `provideEimPackageResult` without `eidValue`
+
+SGP.32 allows omitting `eidValue` on `ProvideEimPackageResult` (BF50). When GSMA JSON posts only `eimPackageResult` (for example a bare BF52 `ipaEuiccDataResponse`), OpenIoTRSP recovers the device EID before wrapping/handling:
+
+1. Application 26 (`5A`) EID inside `ipaEuiccData`, when present
+2. eUICC certificate (`A6`) subject `serialNumber` (32-digit hex EID encoding)
+
+The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the BER provide path). IPAs should still send `eidValue` on provide for BF52 whenever the response omits both an embedded EID and the eUICC certificate; otherwise the eIM cannot associate the result to a device.
+
 The adoption log line is:
 
 ```text

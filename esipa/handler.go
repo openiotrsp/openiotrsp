@@ -4,7 +4,7 @@
 // Wire bindings:
 //   - BER-TLV on DefaultPath (/esipa) with MediaType
 //   - GSMA HTTP JSON on DefaultGSMAPaths (/gsma/rsp2/esipa/...) for IPA
-//     implementations such as Kigen IPAd
+//     implementations that speak HTTP JSON ESipa
 package esipa
 
 import (
@@ -1190,7 +1190,8 @@ func eidKey(eid []byte) (string, *protocolasn1.EimPackageResultErrorCode) {
 }
 
 // resolveProvideResultEID prefers an explicit Provide EID, then recovers from
-// eimTransactionId against pending operation payloads when EID was omitted.
+// the result payload (BF52 EID / eUICC certificate), then from eimTransactionId
+// against pending operation payloads when EID was omitted.
 func resolveProvideResultEID(
 	ctx context.Context,
 	store storage.Store,
@@ -1200,6 +1201,10 @@ func resolveProvideResultEID(
 ) (string, *protocolasn1.EimPackageResultErrorCode, error) {
 	if len(eidBytes) != 0 {
 		eid, code := eidKey(eidBytes)
+		return eid, code, nil
+	}
+	if recovered := recoverEIDFromPackageResultTLV(resultTLV); len(recovered) == 16 {
+		eid, code := eidKey(recovered)
 		return eid, code, nil
 	}
 	transactionID := eimTransactionIDFromResultTLV(resultTLV)
@@ -1226,6 +1231,19 @@ func resolveProvideResultEID(
 
 func eimTransactionIDFromResultTLV(tlv *bertlv.TLV) []byte {
 	if tlv == nil {
+		return nil
+	}
+	if tlv.Tag.Equal(tagIpaEuiccData) {
+		var response protocolasn1.IpaEuiccDataResponse
+		if err := response.UnmarshalBERTLV(tlv); err != nil {
+			return nil
+		}
+		if response.Error != nil {
+			return cloneBytes(response.Error.EimTransactionID)
+		}
+		if response.Data != nil {
+			return cloneBytes(response.Data.EimTransactionID)
+		}
 		return nil
 	}
 	var result protocolasn1.EuiccPackageResult

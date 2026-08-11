@@ -227,13 +227,13 @@ Each entry must include:
   operations are pending, `getEimPackage` prefers the earliest pending
   euicc-package so profile-list work is not blocked behind a stuck ipa-euicc-data
   op. `ProfileInfoListRequest.tagList` uses SGP.32 section 5.9.14 defaults
-  (`DefaultProfileInfoListTagList` in `euiccpkg/constructors.go`); Kigen IPA on
-  a real card served profile list only after the eIM delivered BF51
+  (`DefaultProfileInfoListTagList` in `euiccpkg/constructors.go`); production IPA
+  on a real card served profile list only after the eIM delivered BF51
   listProfileInfo, not BF52.
-- Rationale: Production debugging with Kigen showed ipa-euicc-data ops queued
-  ahead of profile-list euicc-packages blocked delivery; the IPA rejected BF52
-  on the profile-list workflow. The prior minimal four-tag list (`5A 9F70 9F26`)
-  omitted spec-default fields and Kigen production tags.
+- Rationale: Production debugging showed ipa-euicc-data ops queued ahead of
+  profile-list euicc-packages blocked delivery; the IPA rejected BF52 on the
+  profile-list workflow. The prior minimal four-tag list (`5A 9F70 9F26`)
+  omitted spec-default fields and production IPA tags.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
 
 ## SGP.32 EuiccPackageResult.seqNumber vs eIM operations.sequence_number
@@ -247,10 +247,10 @@ Each entry must include:
   counter as additional correlation). Use eUICC `seqNumber` only in
   `EimAcknowledgements` for IPA/card-side notification and package-result
   deletion. Do not treat `seqNumber` as `operations.sequence_number`.
-- Rationale: Kigen silicon reports card notification/package-result sequences
-  (e.g. 13/14) while eIM operation sequences advance independently (e.g. 18/19).
-  Matching by `seqNumber` attached results to the wrong pending op or returned
-  `ErrNotFound`.
+- Rationale: Production silicon reports card notification/package-result
+  sequences (e.g. 13/14) while eIM operation sequences advance independently
+  (e.g. 18/19). Matching by `seqNumber` attached results to the wrong pending
+  op or returned `ErrNotFound`.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
 
 
@@ -265,11 +265,11 @@ Each entry must include:
   parsers run. Encode path continues to emit bare SEQUENCE children under
   `BF51` for fixtures/mocks.
 - Child shapes: `[0]` and `[1]` are SEQUENCE `{ data, signature (5F37) }`;
-  `[2]` is the unsigned SEQUENCE (no signature). Kigen production silicon sends
+  `[2]` is the unsigned SEQUENCE (no signature). Production silicon sends
   signed OK results as `BF51 { A0 { data SEQUENCE, 5F37 } }`.
-- Rationale: Strict `expectTag(SEQUENCE)` rejected Kigen/vendor provideResult and
-  handleNotification payloads with HTTP 400 (`got [0], want [UNIVERSAL 16]`) and
-  left operations stuck pending.
+- Rationale: Strict `expectTag(SEQUENCE)` rejected production IPA provideResult
+  and handleNotification payloads with HTTP 400
+  (`got [0], want [UNIVERSAL 16]`) and left operations stuck pending.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
 
 ## SGP.22 ProfileInfoListResponse CHOICE under BF2D
@@ -286,9 +286,25 @@ Each entry must include:
   Accept bare INTEGER, CONTEXT PRIMITIVE `[1]`, and CONTEXT CONSTRUCTED `[1]`
   wrapping a single INTEGER for the error arm. Encode path continues to emit
   `BF2D → SEQUENCE → ProfileInfo*` / bare INTEGER for fixtures/mocks.
-- Rationale: Kigen IPAd nested `listProfileInfo` results inside signed EPR as
-  `BF2D { A0 { E3… } }`. Strict `expectTag(SEQUENCE)` failed apply of
+- Rationale: Production IPAd nested `listProfileInfo` results inside signed EPR
+  as `BF2D { A0 { E3… } }`. Strict `expectTag(SEQUENCE)` failed apply of
   provide/handleNotification with `got [0], want [UNIVERSAL 16]` after the
   BF51 CHOICE unwrap (same class of bug). Dual-accept decode avoids requiring
   enterprise eIM TLV rewriting.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## GSMA JSON provide without eidValue for BF52 IpaEuiccDataResponse
+
+- Spec section: SGP.32 `ProvideEimPackageResult` (`eidValue` OPTIONAL) and
+  `IpaEuiccData` (no EID field; eUICC certificate at tag A6).
+- Ambiguity: How the eIM associates a GSMA JSON `provideEimPackageResult` that
+  carries only `eimPackageResult` (bare BF52) and omits `eidValue`.
+- Chosen reading: Before wrapping/handling, recover EID from the payload:
+  prefer Application 26 EID inside `ipaEuiccData` when present, else the eUICC
+  certificate subject `serialNumber` (32-digit hex). Fall back to matching
+  `eimTransactionId` against pending operations. Document that IPAs must send
+  `eidValue` when neither embedded EID nor eUICC certificate is present.
+- Rationale: Default BF52 `tagList` requests A5/A6 certificates and excludes
+  EID (`5A`); production provides often omit JSON `eidValue`. Without recovery
+  the result cannot be keyed to a device Store row.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

@@ -15,12 +15,12 @@ import (
 
 const (
 	// GSMAPathGetEimPackage is the SGP.32 HTTP JSON path used by GSMA IPA
-	// implementations such as Kigen IPAd.
+	// implementations that speak HTTP JSON ESipa.
 	GSMAPathGetEimPackage = "/gsma/rsp2/esipa/getEimPackage"
 	// GSMAPathProvideEimPackageResult is the JSON provideResult path.
 	GSMAPathProvideEimPackageResult = "/gsma/rsp2/esipa/provideEimPackageResult"
-	// GSMAPathHandleNotification is the JSON handleNotification path. Kigen also
-	// delivers stuck ProvideEimPackageResult payloads on this path.
+	// GSMAPathHandleNotification is the JSON handleNotification path. Some IPAs
+	// also deliver ProvideEimPackageResult payloads on this path.
 	GSMAPathHandleNotification = "/gsma/rsp2/esipa/handleNotification"
 
 	// GSMAJSONMediaType is the Content-Type used by GSMA HTTP JSON ESipa.
@@ -233,6 +233,9 @@ func parseGSMAProvideOrResultTLV(eid []byte, der []byte) (*bertlv.TLV, error) {
 	tlv, err := parseRawTLV(der)
 	if err != nil {
 		return nil, err
+	}
+	if len(eid) == 0 {
+		eid = recoverEIDFromPackageResultTLV(tlv)
 	}
 	if tlv.Tag.Equal(tagProvideResult) {
 		if len(eid) == 0 || tlv.First(tagEID) != nil {

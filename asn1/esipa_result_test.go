@@ -153,10 +153,10 @@ func TestProvideEimPackageResultVariantPayloads(t *testing.T) {
 	}
 }
 
-func TestEuiccPackageResultChoiceA0Signed_KigenSample(t *testing.T) {
+func TestEuiccPackageResultChoiceA0Signed_ProductionSample(t *testing.T) {
 	t.Parallel()
 
-	// Live Kigen handleNotification / provideEimPackageResult body (seq 14):
+	// Live production IPA handleNotification / provideEimPackageResult body (seq 14):
 	// BF50 { 5A EID, BF51 { A0 { data SEQUENCE, 5F37 } } }
 	const sample = "v1CCAblaEIkEQEWTAAAAAAAAIVOJMhC/UYIBoqCCAZ4wggFXgBBlaW0uc3ltYi1pb3QuY29tgQENghCEx2BkV1bZwxvxpFIRwcW/gwEOMIIBKb8tggEkoIIBIONNWgqYABAyVHaYEDIUTxCgAAAFWRAQ/////4kAABEAn3ABAJEFS2lnZW6SH0dTTUEgR2VuZXJpYyBlVUlDQyBUZXN0IFByb2ZpbGWVAQDjRVoKmEQFMWCBA2NAYU8QoAAABVkQEP////+JAAASAJ9wAQCRBUtpZ2VukhNLaWdlbi1UQ0EtSlQtU0dQLjMylQECn2cB/+NDWgqYU3YHYhKURBD1TxCgAAAFWRAQ/////4kAABMAn3ABAJEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDE1RpUBAuNDWgqYU3YHYhKURCDzTxCgAAAFWRAQ/////4kAABQAn3ABAZEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDIzRpUBAl83QMSTo0mj78gm7izrMLgSzjPYehfXipNGGFPevuMs1Z8Tx3s5PrHRfv6v3OPqqCj5f4FSmE32tcr0B+gjjPGdOQQ="
 	der, err := decodeTestBase64(t, sample)
@@ -378,10 +378,10 @@ func TestProfileInfoListResponseErrorArms(t *testing.T) {
 	}
 }
 
-func TestProfileInfoListResponseChoiceA0_KigenSample(t *testing.T) {
+func TestProfileInfoListResponseChoiceA0_ProductionSample(t *testing.T) {
 	t.Parallel()
 
-	// Same live Kigen provide/handleNotification body as EuiccPackageResult A0
+	// Same live production IPA provide/handleNotification body as EuiccPackageResult A0
 	// sample: nested BF2D success is A0 → E3 ProfileInfo ×4 (not SEQUENCE).
 	const sample = "v1CCAblaEIkEQEWTAAAAAAAAIVOJMhC/UYIBoqCCAZ4wggFXgBBlaW0uc3ltYi1pb3QuY29tgQENghCEx2BkV1bZwxvxpFIRwcW/gwEOMIIBKb8tggEkoIIBIONNWgqYABAyVHaYEDIUTxCgAAAFWRAQ/////4kAABEAn3ABAJEFS2lnZW6SH0dTTUEgR2VuZXJpYyBlVUlDQyBUZXN0IFByb2ZpbGWVAQDjRVoKmEQFMWCBA2NAYU8QoAAABVkQEP////+JAAASAJ9wAQCRBUtpZ2VukhNLaWdlbi1UQ0EtSlQtU0dQLjMylQECn2cB/+NDWgqYU3YHYhKURBD1TxCgAAAFWRAQ/////4kAABMAn3ABAJEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDE1RpUBAuNDWgqYU3YHYhKURCDzTxCgAAAFWRAQ/////4kAABQAn3ABAZEGTWVsaXRhkhQ4OTM1Njc3MDI2MjE0OTQ0MDIzRpUBAl83QMSTo0mj78gm7izrMLgSzjPYehfXipNGGFPevuMs1Z8Tx3s5PrHRfv6v3OPqqCj5f4FSmE32tcr0B+gjjPGdOQQ="
 	der, err := decodeTestBase64(t, sample)

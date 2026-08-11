@@ -1282,7 +1282,7 @@ func (r *ProfileInfoListResponse) MarshalBERTLV() (*bertlv.TLV, error) {
 //
 // SGP.22/SGP.32 declare ProfileInfoListResponse as an AUTOMATIC TAGS CHOICE
 // under BF2D (profileInfoListOk [0], profileInfoListError [1]). Production
-// IPA/silicon (e.g. Kigen) wraps success as CONTEXT CONSTRUCTED [0] whose
+// Production IPA/silicon wraps success as CONTEXT CONSTRUCTED [0] whose
 // children are ProfileInfo values directly. Lab fixtures and mocks often omit
 // that CHOICE tag and place a bare UNIVERSAL 16 SEQUENCE under BF2D. Error
 // may be a bare INTEGER or CONTEXT PRIMITIVE [1]. Both success and error
