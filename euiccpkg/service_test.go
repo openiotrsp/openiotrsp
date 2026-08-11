@@ -17,6 +17,7 @@ import (
 
 	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
 )
@@ -167,6 +168,113 @@ func TestConcurrentCounterConstruction(t *testing.T) {
 	}
 	if len(seen) != count {
 		t.Fatalf("saw %d counters, want %d", len(seen), count)
+	}
+}
+
+func TestVerifySignedBytesAcceptsASN1AndTR03111(t *testing.T) {
+	t.Parallel()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	signedData := []byte("euicc-package-result-data-signed")
+	digest := sha256.Sum256(signedData)
+
+	asn1Sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatalf("SignASN1() error = %v", err)
+	}
+	trSig, err := pki.SignECDSATR03111(rand.Reader, key, digest[:])
+	if err != nil {
+		t.Fatalf("SignECDSATR03111() error = %v", err)
+	}
+	if len(trSig) != 64 {
+		t.Fatalf("TR-03111 signature length = %d, want 64", len(trSig))
+	}
+	if trSig[0] == 0x30 {
+		t.Fatalf("TR-03111 signature unexpectedly starts with ASN.1 SEQUENCE tag")
+	}
+
+	cases := []struct {
+		name      string
+		signature []byte
+		wantErr   error
+	}{
+		{name: "asn1_der", signature: asn1Sig},
+		{name: "tr03111_r_s", signature: trSig},
+		{name: "invalid", signature: bytes.Repeat([]byte{0x11}, 64), wantErr: ErrSignatureInvalid},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := verifySignedBytes(&key.PublicKey, signedData, tc.signature)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("verifySignedBytes() error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestVerifyAndApplyResultAcceptsTR03111EuiccSignEPR(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := "eid-tr03111-epr"
+	iccid := []byte{0x89, 0x10, 0x31}
+	registerWithState(t, store, eid, storage.ProfileState{
+		EID:       eid,
+		ICCID:     hex.EncodeToString(iccid),
+		IsEnabled: false,
+	})
+	eimSigner := newTestSigner(t)
+	euiccSigner := newTestSigner(t)
+	service := &Service{Store: store, Signer: eimSigner, EimID: "eim.example"}
+
+	request := signPackage(t, ctx, service, eid, testEID(0x31), []byte{0x31}, Enable(iccid, false))
+	resultDER := signedResultDERWithEncoding(t, euiccSigner, request, 1, 3, 0, request.CounterValue, true)
+
+	result, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        request,
+		ResultDER:      resultDER,
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 1,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult() error = %v", err)
+	}
+	if !result.OK || result.ResultCode != ResultOK {
+		t.Fatalf("result = %#v, want ok", result)
+	}
+	enabled := true
+	assertProfileEnabled(t, store, eid, iccid, &enabled)
+}
+
+func TestVerifyPackageResultAcceptsTR03111EuiccSignEPE(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := "eid-tr03111-epe"
+	registerWithState(t, store, eid)
+	service := &Service{Store: store, Signer: newTestSigner(t), EimID: "eim.example"}
+	euiccSigner := newTestSigner(t)
+
+	request := signPackage(t, ctx, service, eid, testEID(0x32), []byte{0x32}, Enable([]byte{0x89, 0x10}, false))
+	resultDER := signedPackageErrorDERWithEncoding(t, euiccSigner, request, 1, true)
+
+	result, err := VerifyPackageResult(ResultInput{
+		Request:        request,
+		ResultDER:      resultDER,
+		EUICCPublicKey: euiccSigner.PublicKey(),
+	})
+	if err != nil {
+		t.Fatalf("VerifyPackageResult() error = %v", err)
+	}
+	if result.OK || result.RawPackageError != 1 {
+		t.Fatalf("result = %#v, want signed package error code 1", result)
 	}
 }
 
@@ -988,11 +1096,40 @@ func signedResultDERWithCounter(
 	counter int64,
 ) []byte {
 	t.Helper()
+	return signedResultDERWithEncoding(t, signer, request, sequenceNumber, resultTag, resultCode, counter, false)
+}
+
+func signedResultDERWithEncoding(
+	t *testing.T,
+	signer *testSigner,
+	request *SignedRequest,
+	sequenceNumber int64,
+	resultTag uint64,
+	resultCode int64,
+	counter int64,
+	tr03111 bool,
+) []byte {
+	t.Helper()
 	resultData, err := protocolasn1.IntegerEuiccResult(resultTag, resultCode)
 	if err != nil {
 		t.Fatalf("IntegerEuiccResult() error = %v", err)
 	}
-	return signedResultDataDER(t, signer, request, sequenceNumber, []protocolasn1.EuiccResultData{resultData}, counter)
+	data := protocolasn1.EuiccPackageResultDataSigned{
+		EimID:            request.EimID,
+		CounterValue:     counter,
+		EimTransactionID: cloneBytes(request.EimTransactionID),
+		SeqNumber:        sequenceNumber,
+		Results:          []protocolasn1.EuiccResultData{resultData},
+	}
+	signature := signMarshalerWithEncoding(t, signer, &data, tr03111)
+	result := &protocolasn1.EuiccPackageResult{
+		Kind: protocolasn1.EuiccPackageResultOK,
+		Signed: &protocolasn1.EuiccPackageResultSigned{
+			Data:         data,
+			EuiccSignEPR: signature,
+		},
+	}
+	return encode(t, result)
 }
 
 func signedResultDataDER(
@@ -1024,13 +1161,18 @@ func signedResultDataDER(
 
 func signedPackageErrorDER(t *testing.T, signer *testSigner, request *SignedRequest, code int64) []byte {
 	t.Helper()
+	return signedPackageErrorDERWithEncoding(t, signer, request, code, false)
+}
+
+func signedPackageErrorDERWithEncoding(t *testing.T, signer *testSigner, request *SignedRequest, code int64, tr03111 bool) []byte {
+	t.Helper()
 	data := protocolasn1.EuiccPackageErrorDataSigned{
 		EimID:            request.EimID,
 		CounterValue:     request.CounterValue,
 		EimTransactionID: cloneBytes(request.EimTransactionID),
 		ErrorCode:        protocolasn1.EuiccPackageErrorCode(code),
 	}
-	signature := signMarshaler(t, signer, &data)
+	signature := signMarshalerWithEncoding(t, signer, &data, tr03111)
 	result := &protocolasn1.EuiccPackageResult{
 		Kind: protocolasn1.EuiccPackageResultErrorSigned,
 		ErrorSigned: &protocolasn1.EuiccPackageErrorSigned{
@@ -1057,8 +1199,20 @@ func unsignedPackageErrorDER(t *testing.T, request *SignedRequest, code int64) [
 
 func signMarshaler(t *testing.T, signer *testSigner, value protocolasn1.Marshaler) []byte {
 	t.Helper()
+	return signMarshalerWithEncoding(t, signer, value, false)
+}
+
+func signMarshalerWithEncoding(t *testing.T, signer *testSigner, value protocolasn1.Marshaler, tr03111 bool) []byte {
+	t.Helper()
 	payload := encode(t, value)
-	signature := signRawBytes(t, signer, payload)
+	if !tr03111 {
+		return signRawBytes(t, signer, payload)
+	}
+	digest := sha256.Sum256(payload)
+	signature, err := pki.SignECDSATR03111(rand.Reader, signer.key, digest[:])
+	if err != nil {
+		t.Fatalf("SignECDSATR03111() error = %v", err)
+	}
 	return signature
 }
 

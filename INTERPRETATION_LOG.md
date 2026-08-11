@@ -354,3 +354,19 @@ Each entry must include:
   shape bugs must be fixed in OpenIoTRSP decode, not papered over in the host
   eIM.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## eUICC Package Result signature encoding (euiccSignEPR / euiccSignEPE)
+
+- Spec section: SGP.32 `EuiccPackageResultSigned.euiccSignEPR` and
+  `EuiccPackageErrorSigned.euiccSignEPE` (both `[APPLICATION 55]` OCTET STRING,
+  tag `5F37`); related SGP.22 eUICC ECDSA signature conventions.
+- Ambiguity: The ASN.1 module types the signature as an opaque OCTET STRING and
+  does not state whether the bytes are ASN.1 DER ECDSA (`SEQUENCE` of INTEGER
+  `r`, `s`) or BSI TR-03111 fixed-width `r||s` (64 octets on P-256).
+- Chosen reading: Verify SHA-256(raw signed data) against either encoding: try
+  ASN.1 DER first (`ecdsa.VerifyASN1`), then TR-03111
+  (`pki.VerifyECDSATR03111`) when DER fails. Reject only if both fail.
+- Rationale: Lab and production eUICC Package Results commonly emit TR-03111
+  `r||s` under `5F37`. Accepting only DER rejects valid silicon results while
+  ASN.1 DER remains useful for software fixtures and interoperability tests.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

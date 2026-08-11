@@ -14,6 +14,7 @@ import (
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/signing"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
@@ -364,10 +365,16 @@ func verifySignedBytes(publicKey crypto.PublicKey, signedData []byte, signature 
 		return errors.New("euiccpkg: missing raw signed data")
 	}
 	digest := sha256.Sum256(signedData)
-	if !ecdsa.VerifyASN1(ecdsaKey, digest[:], signature) {
-		return ErrSignatureInvalid
+	// Accept ASN.1 DER ECDSA (SEQUENCE of INTEGER r, s) and BSI TR-03111
+	// fixed-width r||s. Production eUICC Package Results commonly use TR-03111
+	// for euiccSignEPR / euiccSignEPE (64 bytes on P-256).
+	if ecdsa.VerifyASN1(ecdsaKey, digest[:], signature) {
+		return nil
 	}
-	return nil
+	if ok, err := pki.VerifyECDSATR03111(ecdsaKey, digest[:], signature); err == nil && ok {
+		return nil
+	}
+	return ErrSignatureInvalid
 }
 
 func matchSignedResult(request *SignedRequest, wantSequence int64, eimID string, counter int64, transactionID []byte, sequence int64) error {

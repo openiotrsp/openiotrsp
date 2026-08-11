@@ -25,6 +25,10 @@ Decode accepts AUTOMATIC TAGS CHOICE `[0]` under BF52 (same class as BF51 / BF2D
 
 The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the BER provide path). IPAs should still send `eidValue` on provide for BF52 whenever the response omits both an embedded EID and the eUICC certificate; otherwise the eIM cannot associate the result to a device.
 
+### eUICC Package Result signatures (`euiccSignEPR` / `euiccSignEPE`)
+
+Strict verify accepts both ASN.1 DER ECDSA and BSI TR-03111 fixed-width `r||s` (64 octets on P-256) under tag `5F37`. DER is tried first; TR-03111 is the common encoding from production eUICC silicon.
+
 The adoption log line is:
 
 ```text
