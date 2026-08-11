@@ -55,7 +55,7 @@ func TestGSMAJSONGetProvideAndHandleNotification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getEimPackage error = %v", err)
 	}
-	defer getResp.Body.Close()
+	defer func() { _ = getResp.Body.Close() }()
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("getEimPackage status = %d", getResp.StatusCode)
 	}
@@ -110,7 +110,7 @@ func TestGSMAJSONGetProvideAndHandleNotification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provideEimPackageResult error = %v", err)
 	}
-	defer provideResp.Body.Close()
+	defer func() { _ = provideResp.Body.Close() }()
 	if provideResp.StatusCode != http.StatusOK {
 		t.Fatalf("provide status = %d", provideResp.StatusCode)
 	}
@@ -171,7 +171,7 @@ func TestGSMAJSONHandleNotificationProvideWithoutEIDValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleNotification error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", resp.StatusCode)
 	}
@@ -214,7 +214,7 @@ func TestGSMAJSONGetIpaEuiccDataRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getEimPackage error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var getJSON gsmaGetEimPackageResponse
 	if err := json.NewDecoder(resp.Body).Decode(&getJSON); err != nil {
 		t.Fatalf("decode JSON error = %v", err)
@@ -266,7 +266,7 @@ func TestGSMAJSONProvideRecoversEIDFromTransactionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provide error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
