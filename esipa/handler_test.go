@@ -371,6 +371,43 @@ func TestIpaEuiccDataRequestResponsePersistsState(t *testing.T) {
 	}
 }
 
+func TestGetEimPackagePrefersEuiccPackageOverIpaEuiccData(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x63)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if _, err := ipadata.EnqueueRequest(ctx, store, storage.DefaultTenantID, eidKey, ipadata.RequestInput{}); err != nil {
+		t.Fatalf("EnqueueRequest(ipa-euicc-data) error = %v", err)
+	}
+	request := sampleEuiccPackageRequest(eid, 3)
+	requestDER := encode(t, request)
+	euiccOperation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: requestDER,
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation(euicc-package) error = %v", err)
+	}
+
+	pollResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	if err != nil {
+		t.Fatalf("Handle(GetEimPackageRequest) error = %v", err)
+	}
+	poll := decodeGetResponse(t, encodeResponse(t, pollResponse))
+	if poll.Kind != protocolasn1.GetEimPackageEuiccPackageRequest {
+		t.Fatalf("poll kind = %v, want eUICC package despite earlier ipa-euicc-data op", poll.Kind)
+	}
+	if !bytes.Equal(encode(t, poll.EuiccPackageRequest), requestDER) {
+		t.Fatalf("poll package mismatch, want euicc-package operation %d", euiccOperation.ID)
+	}
+}
+
 func TestDefaultHandlerRequiresEUICCPublicKeyResolver(t *testing.T) {
 	t.Parallel()
 

@@ -186,6 +186,33 @@ func TestEnableProfileQueuesRollbackFlag(t *testing.T) {
 	}
 }
 
+func TestListProfileInfoEnqueuesEuiccPackage(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/list", nil, http.StatusAccepted)
+
+	pending, err := store.FetchPendingOperations(context.Background(), storage.DefaultTenantID, testEID, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending operations = %d, want 1", len(pending))
+	}
+	if pending[0].Kind != storage.OperationEuiccPackage {
+		t.Fatalf("operation kind = %q, want euicc-package", pending[0].Kind)
+	}
+	var request protocolasn1.EuiccPackageRequest
+	if err := protocolasn1.Decode(pending[0].Payload, &request); err != nil {
+		t.Fatalf("Decode(EuiccPackageRequest) error = %v", err)
+	}
+	psmos := request.EuiccPackageSigned.EuiccPackage.PSMOs
+	if len(psmos) != 1 || psmos[0].Operation != protocolasn1.PsmoListProfileInfo {
+		t.Fatalf("queued PSMOs = %#v, want one listProfileInfo operation", psmos)
+	}
+}
+
 func TestPSMOEndpointsCompleteThroughMockIPA(t *testing.T) {
 	t.Parallel()
 

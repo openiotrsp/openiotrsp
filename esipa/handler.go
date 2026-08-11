@@ -280,18 +280,18 @@ func handleGetEimPackage(ctx context.Context, store storage.Store, tenantID stor
 	} else if err != nil {
 		return Response{}, err
 	}
-	operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 1)
+	operation, err := selectOperationForGetEimPackage(ctx, store, tenantID, eid)
 	if errors.Is(err, storage.ErrNotFound) {
 		return getEimPackageErrorResponse(getEimPackageErrorEIDNotFound)
 	}
 	if err != nil {
 		return Response{}, err
 	}
-	if len(operations) == 0 {
+	if operation.ID == 0 {
 		return getEimPackageErrorResponse(getEimPackageErrorNoPackage)
 	}
 
-	response, err := getEimPackageOperationResponse(operations[0])
+	response, err := getEimPackageOperationResponse(operation)
 	if err != nil {
 		return Response{}, err
 	}
@@ -877,6 +877,31 @@ func firstPendingEuiccPackageOperation(
 		}
 	}
 	return nil, storage.ErrNotFound
+}
+
+// selectOperationForGetEimPackage returns the next operation to deliver on
+// getEimPackage. When both ipa-euicc-data and euicc-package operations are
+// pending, the earliest euicc-package is preferred so profile-list and other
+// signed PSMO work is not blocked behind a stuck BF52 fetch.
+func selectOperationForGetEimPackage(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+) (storage.Operation, error) {
+	pending, err := store.FetchPendingOperations(ctx, tenantID, eid, 100)
+	if err != nil {
+		return storage.Operation{}, err
+	}
+	if len(pending) == 0 {
+		return storage.Operation{}, nil
+	}
+	for _, operation := range pending {
+		if operation.Kind == storage.OperationEuiccPackage {
+			return operation, nil
+		}
+	}
+	return pending[0], nil
 }
 
 func recordEimPackageResultResponseError(

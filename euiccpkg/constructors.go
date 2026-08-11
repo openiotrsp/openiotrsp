@@ -40,6 +40,15 @@ func Delete(iccid []byte) protocolasn1.EuiccPackage {
 	})
 }
 
+// DefaultProfileInfoListTagList is the ProfileInfoListRequest.tagList used when the
+// caller does not supply search criteria. Tags follow SGP.32 v1.3 section 5.9.14
+// defaults: ICCID (5A), ISD-P AID (4F), profileState (9F70), serviceProviderName
+// (91), profileName (92), profileClass (95), ecallIndication (9F7B),
+// fallbackAttribute (9F26), and fallbackAllowed (9F67).
+var DefaultProfileInfoListTagList = []byte{
+	0x5a, 0x4f, 0x9f, 0x70, 0x91, 0x92, 0x95, 0x9f, 0x7b, 0x9f, 0x26, 0x9f, 0x67,
+}
+
 // ListProfileInfo builds a EuiccPackage containing one PSMO listProfileInfo operation.
 func ListProfileInfo() protocolasn1.EuiccPackage {
 	return psmoPackage(protocolasn1.Psmo{
@@ -211,7 +220,7 @@ func ecoPackage(eco protocolasn1.Eco) protocolasn1.EuiccPackage {
 
 func profileInfoListRequest() *bertlv.TLV {
 	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(45),
-		bertlv.NewValue(bertlv.Application.Primitive(28), []byte{0x5a, 0x9f, 0x70, 0x9f, 0x26}),
+		bertlv.NewValue(bertlv.Application.Primitive(28), cloneBytes(DefaultProfileInfoListTagList)),
 	)
 }
 

@@ -232,7 +232,7 @@ func (r *Runner) warnAwaitingChainPresentation(logger *slog.Logger) {
 	}
 	r.deferSignedPackageWarned = true
 	logger.Warn(
-		"deferring signed eUICC packages: cancel pending euicc-package operations on the eIM, queue only POST /v1/devices/{eid}/euicc-data/fetch, then re-queue PSMO after IPA eUICC data completes",
+		"deferring signed eUICC packages: cancel pending euicc-package operations on the eIM, queue only POST /v1/devices/{eid}/euicc-data/fetch for BF52 IPA eUICC data, then re-queue PSMO euicc-packages (including listProfileInfo via POST /v1/devices/{eid}/profiles/list) after IPA eUICC data completes",
 		"eid", hex.EncodeToString(r.EID),
 	)
 }

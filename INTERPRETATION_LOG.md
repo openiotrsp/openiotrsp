@@ -210,6 +210,32 @@ Each entry must include:
   `BF2D` in the default tag list (after v0.2.1 had already removed invalid `5A`).
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
 
+## SGP.32 Profile List via Signed EuiccPackage listProfileInfo
+
+- Spec section: SGP.32 PSMO `listProfileInfo` (`ProfileInfoListRequest`, tag
+  `BF2D`); ESipa `getEimPackage` delivery of `euiccPackageRequest` (`BF51`) vs
+  `ipaEuiccDataRequest` (`BF52`); SGP.32 v1.3 section 5.9.14
+  `ProfileInfoListRequest.tagList` defaults.
+- Ambiguity: Whether fleet profile inventory should be fetched with
+  `IpaEuiccDataRequest.tagList` (BF52) or a signed eUICC Package PSMO
+  `listProfileInfo` operation (BF51).
+- Chosen reading: Profile list belongs exclusively on the signed euicc-package
+  path. OpenIoTRSP maps `POST /v1/devices/{eid}/profiles/list` to PSMO
+  `listProfileInfo` inside `EuiccPackageRequest`. `IpaEuiccDataRequest`
+  (`DefaultTagList` in `ipadata/request.go`) is for device data such as certs,
+  `eUICCInfo`, and notifications—not profile inventory. When both BF52 and BF51
+  operations are pending, `getEimPackage` prefers the earliest pending
+  euicc-package so profile-list work is not blocked behind a stuck ipa-euicc-data
+  op. `ProfileInfoListRequest.tagList` uses SGP.32 section 5.9.14 defaults
+  (`DefaultProfileInfoListTagList` in `euiccpkg/constructors.go`); Kigen IPA on
+  a real card served profile list only after the eIM delivered BF51
+  listProfileInfo, not BF52.
+- Rationale: Production debugging with Kigen showed ipa-euicc-data ops queued
+  ahead of profile-list euicc-packages blocked delivery; the IPA rejected BF52
+  on the profile-list workflow. The prior minimal four-tag list (`5A 9F70 9F26`)
+  omitted spec-default fields and Kigen production tags.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
 ## SGP.32 EuiccPackageErrorUnsigned CHOICE tag A2
 
 - Spec section: SGP.32 `EuiccPackageResult` CHOICE arm
