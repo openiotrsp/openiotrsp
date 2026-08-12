@@ -26,9 +26,10 @@ type ProfileRecord struct {
 
 // DeviceState is the mock IPA's view of on-device profile inventory.
 type DeviceState struct {
-	DefaultSMDP string
-	RootSMDS    string
-	Profiles    map[string]profileRecord
+	DefaultSMDP       string
+	RootSMDS          string
+	Profiles          map[string]profileRecord
+	AssociationTokens map[string]int64
 }
 
 // NewDeviceState returns an empty emulated eUICC inventory.
@@ -54,9 +55,42 @@ func (s *DeviceState) SeedProfile(iccidHex string, enabled, fallback bool) {
 
 func newDeviceState() *DeviceState {
 	return &DeviceState{
-		RootSMDS: "smds.example",
-		Profiles: make(map[string]profileRecord),
+		RootSMDS:          "smds.example",
+		Profiles:          make(map[string]profileRecord),
+		AssociationTokens: make(map[string]int64),
 	}
+}
+
+func (s *DeviceState) associationToken(eimID string) *int64 {
+	if s == nil || eimID == "" {
+		return nil
+	}
+	if s.AssociationTokens == nil {
+		return nil
+	}
+	value, ok := s.AssociationTokens[eimID]
+	if !ok {
+		return nil
+	}
+	token := value
+	return &token
+}
+
+func (s *DeviceState) setAssociationToken(eimID string, token int64) {
+	if s == nil || eimID == "" {
+		return
+	}
+	if s.AssociationTokens == nil {
+		s.AssociationTokens = make(map[string]int64)
+	}
+	s.AssociationTokens[eimID] = token
+}
+
+func (s *DeviceState) clearAssociationToken(eimID string) {
+	if s == nil || s.AssociationTokens == nil || eimID == "" {
+		return
+	}
+	delete(s.AssociationTokens, eimID)
 }
 
 func (s *DeviceState) recordDownload(profileID, smdp string) {

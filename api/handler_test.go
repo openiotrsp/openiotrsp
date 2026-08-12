@@ -278,12 +278,13 @@ func TestEIMConfigurationEndpointsCompleteThroughMockIPA(t *testing.T) {
 
 	store := memory.New()
 	server := newTestServer(t, store, DefaultTenantResolver{})
+	device := mockipa.NewDeviceState()
 
 	add := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims", map[string]any{
 		"eimFqdn":      "test.eim",
 		"counterValue": 1,
 	}, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, add.Operations[0].ID)
 	assertAssociatedEIMState(t, server, "test.eim", 1, 1)
 
@@ -291,12 +292,12 @@ func TestEIMConfigurationEndpointsCompleteThroughMockIPA(t *testing.T) {
 		"eimFqdn":      "test.eim",
 		"counterValue": 2,
 	}, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, update.Operations[0].ID)
 	assertAssociatedEIMState(t, server, "test.eim", 2, 1)
 
 	list := postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/eims/list", nil, http.StatusAccepted)
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, list.Operations[0].ID)
 
 	deleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/eims/test.eim", nil)
@@ -307,7 +308,7 @@ func TestEIMConfigurationEndpointsCompleteThroughMockIPA(t *testing.T) {
 	if err := json.NewDecoder(deleteResponse.Body).Decode(&deleted); err != nil {
 		t.Fatalf("Decode(delete eIM) error = %v", err)
 	}
-	runMockIPAOnce(t, server)
+	runMockIPAOnce(t, server, device)
 	assertOperationDone(t, server, deleted.Operations[0].ID)
 	status := getJSON[eimStatusResponse](t, server, "/v1/devices/"+testEID+"/eims", http.StatusOK)
 	if len(status.EIMs) != 0 {

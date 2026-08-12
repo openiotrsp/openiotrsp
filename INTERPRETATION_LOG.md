@@ -370,3 +370,28 @@ Each entry must include:
   `r||s` under `5F37`. Accepting only DER rejects valid silicon results while
   ASN.1 DER remains useful for software fixtures and interoperability tests.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## eUICC Package Result signature input (associationToken)
+
+- Spec section: SGP.32 §2.11.1.2 — `euiccSignEPR` / `euiccSignEPE` SHALL apply
+  on the concatenated data objects `euiccPackageResultDataSigned` (or
+  `euiccPackageErrorDataSigned`) and `associationToken`. If no association
+  token is configured for the eIM, the token data object SHALL be used with
+  value zero (`84 01 00`). Same concatenation rule as `eimSignature` over
+  `euiccPackageSigned` (§2.11.1.1).
+- Ambiguity: Whether AUTOMATIC TAGS BF51 CHOICE `[0]` changes which TLV bytes
+  are hashed (outer `A0`, full `BF51`, SEQUENCE value only, or children
+  concat).
+- Chosen reading: Hash the wire encoding of the signed data object SEQUENCE
+  (first child under bare SEQUENCE or under CHOICE `[0]`/`[1]`), concatenated
+  with `associationToken` `[4] INTEGER`. Do not include `BF51`, `A0`/`A1`, or
+  `5F37`. Nil / missing configured token means zero. Use CERT.EUICC
+  (`PK.EUICC.ECDSA`) for verify.
+- Rationale: Production silicon TR-03111 `euiccSignEPR` over BF51/`A0` fails
+  ECDSA verify when only `euiccPackageResultDataSigned` is hashed, and succeeds
+  when `|| 84 01 00` (or the configured token TLV) is appended. Confirmed with
+  a lab IPA handleNotification / provideEimPackageResult capture (BF51 CHOICE
+  `[0]` + CERT.EUICC from BF52 A6) and covered by
+  `TestEuiccSignEPRRequiresAssociationTokenBinding`.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No (prose in SGP.32
+  is explicit).

@@ -125,7 +125,11 @@ func sgp26SignedResultDER(
 func signSGP26Marshaler(t *testing.T, key *ecdsa.PrivateKey, value protocolasn1.Marshaler) []byte {
 	t.Helper()
 	payload := encode(t, value)
-	digest := sha256.Sum256(payload)
+	signaturePayload, err := signatureInput(payload, nil)
+	if err != nil {
+		t.Fatalf("signatureInput() error = %v", err)
+	}
+	digest := sha256.Sum256(signaturePayload)
 	signature, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
 	if err != nil {
 		t.Fatalf("SignASN1() error = %v", err)

@@ -332,8 +332,17 @@ func TestVerifyUsesRawSignedResultBytes(t *testing.T) {
 	}
 	canonicalSignedData := encode(t, &data)
 	wireSignedData := withLongFormLength(t, canonicalSignedData)
-	signature := signRawBytes(t, euiccSigner, wireSignedData)
+	wireSignatureInput, err := signatureInput(wireSignedData, nil)
+	if err != nil {
+		t.Fatalf("signatureInput() error = %v", err)
+	}
+	signature := signRawBytes(t, euiccSigner, wireSignatureInput)
 	assertSignatureRejected(t, euiccSigner.PublicKey(), canonicalSignedData, signature)
+	canonicalSignatureInput, err := signatureInput(canonicalSignedData, nil)
+	if err != nil {
+		t.Fatalf("signatureInput(canonical) error = %v", err)
+	}
+	assertSignatureRejected(t, euiccSigner.PublicKey(), canonicalSignatureInput, signature)
 	resultDER := wrapSignedResultTLV(wireSignedData, signature)
 
 	result, err := service.VerifyAndApplyResult(ctx, ResultInput{
@@ -1205,10 +1214,14 @@ func signMarshaler(t *testing.T, signer *testSigner, value protocolasn1.Marshale
 func signMarshalerWithEncoding(t *testing.T, signer *testSigner, value protocolasn1.Marshaler, tr03111 bool) []byte {
 	t.Helper()
 	payload := encode(t, value)
-	if !tr03111 {
-		return signRawBytes(t, signer, payload)
+	signaturePayload, err := signatureInput(payload, nil)
+	if err != nil {
+		t.Fatalf("signatureInput() error = %v", err)
 	}
-	digest := sha256.Sum256(payload)
+	if !tr03111 {
+		return signRawBytes(t, signer, signaturePayload)
+	}
+	digest := sha256.Sum256(signaturePayload)
 	signature, err := pki.SignECDSATR03111(rand.Reader, signer.key, digest[:])
 	if err != nil {
 		t.Fatalf("SignECDSATR03111() error = %v", err)

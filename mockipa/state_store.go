@@ -17,13 +17,14 @@ type StateStore struct {
 }
 
 type persistedState struct {
-	DefaultSMDP             string                       `json:"defaultSmdp,omitempty"`
-	RootSMDS                string                       `json:"rootSmds,omitempty"`
-	Profiles                map[string]persistedProfile  `json:"profiles,omitempty"`
-	NextNotificationSeq     int64                        `json:"nextNotificationSeq,omitempty"`
-	IndirectProfileDownload   bool                         `json:"indirectProfileDownload,omitempty"`
-	ChainPresentationRequired bool                         `json:"chainPresentationRequired,omitempty"`
-	ChainPresented            bool                         `json:"chainPresented,omitempty"`
+	DefaultSMDP               string                      `json:"defaultSmdp,omitempty"`
+	RootSMDS                  string                      `json:"rootSmds,omitempty"`
+	Profiles                  map[string]persistedProfile `json:"profiles,omitempty"`
+	AssociationTokens         map[string]int64            `json:"associationTokens,omitempty"`
+	NextNotificationSeq       int64                       `json:"nextNotificationSeq,omitempty"`
+	IndirectProfileDownload   bool                        `json:"indirectProfileDownload,omitempty"`
+	ChainPresentationRequired bool                        `json:"chainPresentationRequired,omitempty"`
+	ChainPresented            bool                        `json:"chainPresented,omitempty"`
 }
 
 type persistedProfile struct {
@@ -97,6 +98,12 @@ func (s *StateStore) Apply(device *DeviceState, nextSeq *int64, indirect *bool, 
 				Fallback: record.Fallback,
 			}
 		}
+		if len(state.AssociationTokens) > 0 {
+			device.AssociationTokens = make(map[string]int64, len(state.AssociationTokens))
+			for eimID, token := range state.AssociationTokens {
+				device.AssociationTokens[eimID] = token
+			}
+		}
 	}
 	if nextSeq != nil && state.NextNotificationSeq > 0 {
 		*nextSeq = state.NextNotificationSeq
@@ -119,10 +126,10 @@ func (s *StateStore) Save(device *DeviceState, nextSeq int64, indirect bool, cha
 		return nil
 	}
 	state := persistedState{
-		DefaultSMDP:             "",
-		RootSMDS:                "smds.example",
-		Profiles:                map[string]persistedProfile{},
-		NextNotificationSeq:     nextSeq,
+		DefaultSMDP:               "",
+		RootSMDS:                  "smds.example",
+		Profiles:                  map[string]persistedProfile{},
+		NextNotificationSeq:       nextSeq,
 		IndirectProfileDownload:   indirect,
 		ChainPresentationRequired: chainPresentationRequired,
 		ChainPresented:            chainPresented,
@@ -138,6 +145,12 @@ func (s *StateStore) Save(device *DeviceState, nextSeq int64, indirect bool, cha
 				SMDP:     record.SMDP,
 				Enabled:  record.Enabled,
 				Fallback: record.Fallback,
+			}
+		}
+		if len(device.AssociationTokens) > 0 {
+			state.AssociationTokens = make(map[string]int64, len(device.AssociationTokens))
+			for eimID, token := range device.AssociationTokens {
+				state.AssociationTokens[eimID] = token
 			}
 		}
 	}

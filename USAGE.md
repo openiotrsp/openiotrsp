@@ -29,6 +29,8 @@ The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the BER pr
 
 Strict verify accepts both ASN.1 DER ECDSA and BSI TR-03111 fixed-width `r||s` (64 octets on P-256) under tag `5F37`. DER is tried first; TR-03111 is the common encoding from production eUICC silicon.
 
+Per SGP.32, the signed input is the wire `euiccPackageResultDataSigned` (or error) SEQUENCE concatenated with `associationToken` (`[4] INTEGER`). When no token is configured for the Associated eIM, the token value is zero (`84 01 00`). AUTOMATIC TAGS BF51 CHOICE `[0]`/`[1]` do not change the covered bytes: still the inner data SEQUENCE, not `BF51`/`A0`/`5F37`.
+
 The adoption log line is:
 
 ```text

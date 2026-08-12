@@ -590,7 +590,7 @@ func recordEimPackageResult(
 				return nil, false, err
 			}
 		} else {
-			domain, status, err = verifiedOperationResult(operation, tenantID, eid, resultDER, publicKey, &result)
+			domain, status, err = verifiedOperationResult(ctx, store, operation, tenantID, eid, resultDER, publicKey, &result)
 			if err != nil {
 				return nil, false, err
 			}
@@ -730,6 +730,8 @@ func ipaEuiccDataTransactionID(response *protocolasn1.IpaEuiccDataResponse) []by
 }
 
 func verifiedOperationResult(
+	ctx context.Context,
+	store storage.Store,
 	operation storage.Operation,
 	tenantID storage.TenantID,
 	eid string,
@@ -745,11 +747,16 @@ func verifiedOperationResult(
 	if result != nil && result.Kind == protocolasn1.EuiccPackageResultOK && result.Signed != nil && result.Signed.Data.SeqNumber != 0 {
 		sequenceNumber = operation.SequenceNumber
 	}
+	token, err := euiccpkg.AssociationTokenForEIM(ctx, store, tenantID, eid, request.EimID)
+	if err != nil {
+		return nil, storage.OperationFailed, err
+	}
 	domain, err := euiccpkg.VerifyPackageResult(euiccpkg.ResultInput{
-		Request:        request,
-		ResultDER:      resultDER,
-		EUICCPublicKey: publicKey,
-		SequenceNumber: sequenceNumber,
+		Request:          request,
+		ResultDER:        resultDER,
+		EUICCPublicKey:   publicKey,
+		AssociationToken: token,
+		SequenceNumber:   sequenceNumber,
 	})
 	if err != nil {
 		return nil, storage.OperationFailed, err

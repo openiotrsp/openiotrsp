@@ -27,6 +27,7 @@ import (
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	"github.com/openiotrsp/openiotrsp/ipadata"
 	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/profiledownload"
@@ -1786,7 +1787,11 @@ func signedEUICCPackageResult(t *testing.T, key *ecdsa.PrivateKey, request *prot
 		Results:          []protocolasn1.EuiccResultData{result},
 	}
 	dataDER := encode(t, &data)
-	digest := sha256.Sum256(dataDER)
+	signatureInput, err := euiccpkg.SignatureInput(dataDER, nil)
+	if err != nil {
+		t.Fatalf("SignatureInput() error = %v", err)
+	}
+	digest := sha256.Sum256(signatureInput)
 	signature, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
 	if err != nil {
 		t.Fatalf("SignASN1() error = %v", err)

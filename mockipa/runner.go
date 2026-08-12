@@ -27,13 +27,13 @@ type Runner struct {
 
 	NextNotificationSequence int64
 
-	pendingNotifications          []pendingNotification
-	device                        *DeviceState
-	indirectProfileDownload       bool
-	chainPresentationRequired     bool
-	chainPresented                bool
-	deferSignedPackageWarned      bool
-	untrustedCIWarned             bool
+	pendingNotifications      []pendingNotification
+	device                    *DeviceState
+	indirectProfileDownload   bool
+	chainPresentationRequired bool
+	chainPresented            bool
+	deferSignedPackageWarned  bool
+	untrustedCIWarned         bool
 }
 
 type pendingNotification struct {
@@ -361,29 +361,43 @@ func (r *Runner) applyOperationState(request *protocolasn1.EuiccPackageRequest, 
 		return
 	}
 	pkg := request.EuiccPackageSigned.EuiccPackage
-	if pkg.Kind != protocolasn1.EuiccPackagePSMO || len(pkg.PSMOs) != 1 {
-		return
-	}
-	switch operation {
-	case "enable":
-		r.device.applyPSMO(pkg.PSMOs[0], true)
-	case "disable":
-		r.device.applyPSMO(pkg.PSMOs[0], false)
-	case "delete":
-		if len(pkg.PSMOs[0].ICCID) > 0 {
-			delete(r.device.Profiles, hex.EncodeToString(pkg.PSMOs[0].ICCID))
+	switch {
+	case pkg.Kind == protocolasn1.EuiccPackagePSMO && len(pkg.PSMOs) == 1:
+		switch operation {
+		case "enable":
+			r.device.applyPSMO(pkg.PSMOs[0], true)
+		case "disable":
+			r.device.applyPSMO(pkg.PSMOs[0], false)
+		case "delete":
+			if len(pkg.PSMOs[0].ICCID) > 0 {
+				delete(r.device.Profiles, hex.EncodeToString(pkg.PSMOs[0].ICCID))
+			}
+		case "set-fallback-attribute":
+			r.device.setProfileFallback(pkg.PSMOs[0].ICCID)
+		case "unset-fallback-attribute":
+			r.device.clearProfileFallback()
 		}
-	case "set-fallback-attribute":
-		r.device.setProfileFallback(pkg.PSMOs[0].ICCID)
-	case "unset-fallback-attribute":
-		r.device.clearProfileFallback()
-	case "add-eim":
-		if pkg.Kind == protocolasn1.EuiccPackageECO && len(pkg.ECOs) == 1 && pkg.ECOs[0].Config != nil {
-			r.indirectProfileDownload = pkg.ECOs[0].Config.IndirectProfileDownload
-		}
-	case "update-eim":
-		if pkg.Kind == protocolasn1.EuiccPackageECO && len(pkg.ECOs) == 1 && pkg.ECOs[0].Config != nil {
-			r.indirectProfileDownload = pkg.ECOs[0].Config.IndirectProfileDownload
+	case pkg.Kind == protocolasn1.EuiccPackageECO && len(pkg.ECOs) == 1:
+		eco := pkg.ECOs[0]
+		switch operation {
+		case "add-eim":
+			if eco.Config != nil {
+				r.indirectProfileDownload = eco.Config.IndirectProfileDownload
+				token := int64(1)
+				if eco.Config.AssociationToken != nil {
+					token = *eco.Config.AssociationToken
+				}
+				r.device.setAssociationToken(eco.Config.EimID, token)
+			}
+		case "update-eim":
+			if eco.Config != nil {
+				r.indirectProfileDownload = eco.Config.IndirectProfileDownload
+				if eco.Config.AssociationToken != nil {
+					r.device.setAssociationToken(eco.Config.EimID, *eco.Config.AssociationToken)
+				}
+			}
+		case "delete-eim":
+			r.device.clearAssociationToken(eco.EimID)
 		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/euiccpkg"
 )
 
 // SignedEUICCPackageResult builds a verifiable SGP.32 EuiccPackageResult using the
@@ -30,7 +31,7 @@ func SignedEUICCPackageResult(fixture *SGP26Fixture, device *DeviceState, reques
 		SeqNumber:        sequenceNumber,
 		Results:          []protocolasn1.EuiccResultData{resultData},
 	}
-	signature, err := signSGP32Marshaler(fixture.EUICCKey, &signed)
+	signature, err := signSGP32Marshaler(fixture.EUICCKey, &signed, device.associationToken(request.EuiccPackageSigned.EimID))
 	if err != nil {
 		return nil, "", err
 	}
@@ -43,7 +44,7 @@ func SignedEUICCPackageResult(fixture *SGP26Fixture, device *DeviceState, reques
 	}, operation, nil
 }
 
-func signSGP32Marshaler(key *ecdsa.PrivateKey, value protocolasn1.Marshaler) ([]byte, error) {
+func signSGP32Marshaler(key *ecdsa.PrivateKey, value protocolasn1.Marshaler, associationToken *int64) ([]byte, error) {
 	tlv, err := value.MarshalBERTLV()
 	if err != nil {
 		return nil, err
@@ -52,6 +53,10 @@ func signSGP32Marshaler(key *ecdsa.PrivateKey, value protocolasn1.Marshaler) ([]
 	if err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256(payload)
+	signatureInput, err := euiccpkg.SignatureInput(payload, associationToken)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(signatureInput)
 	return ecdsa.SignASN1(rand.Reader, key, digest[:])
 }

@@ -152,7 +152,17 @@ func logPackageSigned(logger *slog.Logger, eimID string, input SignInput, counte
 }
 
 func (s *Service) associationToken(ctx context.Context, tenantID storage.TenantID, eid string) (*int64, error) {
-	associated, err := s.Store.GetAssociatedEIM(ctx, tenantID, eid, s.EimID)
+	return AssociationTokenForEIM(ctx, s.Store, tenantID, eid, s.EimID)
+}
+
+// AssociationTokenForEIM returns the associationToken from stored eIM Configuration
+// Data for eimID, or nil when the eIM is not associated or no token is configured.
+// Callers that build SGP.32 signature input treat nil as zero ('84 01 00').
+func AssociationTokenForEIM(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid, eimID string) (*int64, error) {
+	if store == nil {
+		return nil, errors.New("euiccpkg: nil Store")
+	}
+	associated, err := store.GetAssociatedEIM(ctx, tenantID, eid, eimID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return nil, nil
 	}
@@ -168,6 +178,14 @@ func (s *Service) associationToken(ctx context.Context, tenantID storage.TenantI
 	}
 	value := *config.AssociationToken
 	return &value, nil
+}
+
+// SignatureInput returns the SGP.32 bytes covered by eimSignature, euiccSignEPR,
+// and euiccSignEPE: the signed data object DER concatenated with the
+// associationToken data object ([4] INTEGER). When associationToken is nil, the
+// token value is zero ('84 01 00').
+func SignatureInput(signedDER []byte, associationToken *int64) ([]byte, error) {
+	return signatureInput(signedDER, associationToken)
 }
 
 func signatureInput(signedDER []byte, associationToken *int64) ([]byte, error) {
@@ -198,8 +216,11 @@ type ResultInput struct {
 	Request        *SignedRequest
 	ResultDER      []byte
 	EUICCPublicKey crypto.PublicKey
-	OperationID    int64
-	SequenceNumber int64
+	// AssociationToken is the SGP.32 associationToken concatenated under
+	// euiccSignEPR / euiccSignEPE. Nil means zero ('84 01 00').
+	AssociationToken *int64
+	OperationID      int64
+	SequenceNumber   int64
 }
 
 // Result is the verified domain result.
@@ -270,6 +291,13 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 	if input.Request == nil {
 		return nil, errors.New("euiccpkg: missing signed request")
 	}
+	if input.AssociationToken == nil {
+		token, err := s.associationToken(ctx, input.Request.TenantID, input.Request.EID)
+		if err != nil {
+			return nil, err
+		}
+		input.AssociationToken = token
+	}
 
 	result, err := VerifyPackageResult(input)
 	if err != nil {
@@ -301,12 +329,16 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 }
 
 func verifyResult(decoded *protocolasn1.EuiccPackageResult, input ResultInput, rawSignedData []byte) (*Result, error) {
+	signedInput, err := signatureInput(rawSignedData, input.AssociationToken)
+	if err != nil {
+		return nil, err
+	}
 	switch decoded.Kind {
 	case protocolasn1.EuiccPackageResultOK:
 		if decoded.Signed == nil {
 			return nil, errors.New("euiccpkg: missing signed result")
 		}
-		if err := verifySignedBytes(input.EUICCPublicKey, rawSignedData, decoded.Signed.EuiccSignEPR); err != nil {
+		if err := verifySignedBytes(input.EUICCPublicKey, signedInput, decoded.Signed.EuiccSignEPR); err != nil {
 			return nil, err
 		}
 		data := decoded.Signed.Data
@@ -318,7 +350,7 @@ func verifyResult(decoded *protocolasn1.EuiccPackageResult, input ResultInput, r
 		if decoded.ErrorSigned == nil {
 			return nil, errors.New("euiccpkg: missing signed package error")
 		}
-		if err := verifySignedBytes(input.EUICCPublicKey, rawSignedData, decoded.ErrorSigned.EuiccSignEPE); err != nil {
+		if err := verifySignedBytes(input.EUICCPublicKey, signedInput, decoded.ErrorSigned.EuiccSignEPE); err != nil {
 			return nil, err
 		}
 		data := decoded.ErrorSigned.Data
