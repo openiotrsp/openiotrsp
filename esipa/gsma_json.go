@@ -67,6 +67,7 @@ type gsmaProvideEimPackageResultRequest struct {
 
 type gsmaHandleNotificationRequest struct {
 	ProvideEimPackageResult string `json:"provideEimPackageResult"`
+	PendingNotification     string `json:"pendingNotification"`
 }
 
 type gsmaProvideResponse struct {
@@ -176,21 +177,56 @@ func (h *Handler) serveGSMAHandleNotification(w http.ResponseWriter, r *http.Req
 		http.Error(w, fmt.Sprintf("decode handleNotification JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(request.ProvideEimPackageResult) == "" {
-		http.Error(w, "handleNotification requires provideEimPackageResult", http.StatusBadRequest)
+	hasProvide := strings.TrimSpace(request.ProvideEimPackageResult) != ""
+	hasPending := strings.TrimSpace(request.PendingNotification) != ""
+	if hasProvide && hasPending {
+		http.Error(w, "handleNotification accepts provideEimPackageResult or pendingNotification, not both", http.StatusBadRequest)
 		return
 	}
-	provideDER, err := decodeGSMABase64(request.ProvideEimPackageResult)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("decode provideEimPackageResult: %v", err), http.StatusBadRequest)
+	if !hasProvide && !hasPending {
+		http.Error(w, "handleNotification requires provideEimPackageResult or pendingNotification", http.StatusBadRequest)
 		return
 	}
-	provideTLV, err := parseGSMAProvideOrResultTLV(nil, provideDER)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+
+	var notifyTLV *bertlv.TLV
+	if hasProvide {
+		provideDER, err := decodeGSMABase64(request.ProvideEimPackageResult)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("decode provideEimPackageResult: %v", err), http.StatusBadRequest)
+			return
+		}
+		provideTLV, err := parseGSMAProvideOrResultTLV(nil, provideDER)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		notifyTLV = constructed(tagHandleNotify, provideTLV)
+	} else {
+		notificationDER, err := decodeGSMABase64(request.PendingNotification)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("decode pendingNotification: %v", err), http.StatusBadRequest)
+			return
+		}
+		notificationTLV, err := parseRawTLV(notificationDER)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var pending protocolasn1.PendingNotification
+		if err := pending.UnmarshalBERTLV(notificationTLV); err != nil {
+			http.Error(w, fmt.Sprintf("parse pendingNotification: %v", err), http.StatusBadRequest)
+			return
+		}
+		if _, err := pending.SequenceNumber(); err != nil {
+			http.Error(w, fmt.Sprintf("pendingNotification: %v", err), http.StatusBadRequest)
+			return
+		}
+		if len(pending.EID()) != 16 {
+			http.Error(w, "pendingNotification does not identify an EID", http.StatusBadRequest)
+			return
+		}
+		notifyTLV = constructed(tagHandleNotify, notificationTLV)
 	}
-	notifyTLV := constructed(tagHandleNotify, provideTLV)
 	berRequest, err := protocolasn1.Encode(&protocolasn1.ESipaMessageFromIpaToEim{Raw: notifyTLV})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("encode handleNotification: %v", err), http.StatusInternalServerError)

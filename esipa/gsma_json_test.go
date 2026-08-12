@@ -184,6 +184,83 @@ func TestGSMAJSONHandleNotificationProvideWithoutEIDValue(t *testing.T) {
 	}
 }
 
+func TestGSMAJSONHandleNotificationPendingNotification(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eidKey := "89044045930000000000002153893210"
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+
+	handler := NewHandler(store, storage.DefaultTenantID)
+	server := httptest.NewServer(handler.HTTPHandler())
+	t.Cleanup(server.Close)
+
+	body, _ := json.Marshal(map[string]string{
+		"pendingNotification": "oYGMWhCJBEBFkwAAAAAAACFTiTIQvy80gAETgQIEEAwfc20tdjQtMDcyLWFnLWd0bS5wci5nby1lc2ltLmNvbVoKmFN2B2ISlEQQ9V83QLWYaXd4B0vzcPryuzVZyrjzyBmEYGMCZ/zbcXBcwL096JLcyx/adYW9C+q7ZvY7r5i9h8lFDC3ljLHfdQnTd1Q=",
+	})
+	req, err := http.NewRequest(http.MethodPost, server.URL+GSMAPathHandleNotification, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", GSMAJSONMediaType+";charset=UTF-8")
+	req.Header.Set(adminProtocolHeader, "gsma/rsp/v2.1.0")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("handleNotification error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusNoContent || len(respBody) != 0 {
+		t.Fatalf("response = %s body %q, want empty 204", resp.Status, respBody)
+	}
+
+	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eidKey)
+	if err != nil {
+		t.Fatalf("ListNotifications() error = %v", err)
+	}
+	if len(notifications) != 1 {
+		t.Fatalf("notifications = %#v, want one record", notifications)
+	}
+	if notifications[0].SequenceNumber != 19 {
+		t.Fatalf("SequenceNumber = %d, want 19", notifications[0].SequenceNumber)
+	}
+	if notifications[0].EID != eidKey {
+		t.Fatalf("EID = %q, want %q", notifications[0].EID, eidKey)
+	}
+}
+
+func TestGSMAJSONHandleNotificationRejectsBothFields(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler(memory.New(), storage.DefaultTenantID)
+	server := httptest.NewServer(handler.HTTPHandler())
+	t.Cleanup(server.Close)
+
+	body, _ := json.Marshal(map[string]string{
+		"provideEimPackageResult": "AQID",
+		"pendingNotification":     "AQID",
+	})
+	req, err := http.NewRequest(http.MethodPost, server.URL+GSMAPathHandleNotification, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", GSMAJSONMediaType)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("handleNotification error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestGSMAJSONGetIpaEuiccDataRequest(t *testing.T) {
 	t.Parallel()
 
