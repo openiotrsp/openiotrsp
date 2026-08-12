@@ -590,7 +590,7 @@ func recordEimPackageResult(
 				return nil, false, err
 			}
 		} else {
-			domain, status, err = verifiedOperationResult(ctx, store, operation, tenantID, eid, resultDER, publicKey, &result)
+			domain, status, err = verifiedOperationResult(ctx, store, operation, tenantID, eid, resultDER, publicKey)
 			if err != nil {
 				return nil, false, err
 			}
@@ -737,16 +737,15 @@ func verifiedOperationResult(
 	eid string,
 	resultDER []byte,
 	publicKey crypto.PublicKey,
-	result *protocolasn1.EuiccPackageResult,
 ) (*euiccpkg.Result, storage.OperationStatus, error) {
 	request, err := signedRequestFromOperation(tenantID, eid, operation)
 	if err != nil {
 		return nil, storage.OperationFailed, err
 	}
-	sequenceNumber := int64(0)
-	if result != nil && result.Kind == protocolasn1.EuiccPackageResultOK && result.Signed != nil && result.Signed.Data.SeqNumber != 0 {
-		sequenceNumber = operation.SequenceNumber
-	}
+	// Correlation is by eimId / counter / eimTransactionId (already matched when
+	// selecting this operation). Do not pass operations.sequence_number as
+	// ResultInput.SequenceNumber; that field is the expected eUICC
+	// EuiccPackageResultDataSigned.seqNumber (0 skips the check).
 	token, err := euiccpkg.AssociationTokenForEIM(ctx, store, tenantID, eid, request.EimID)
 	if err != nil {
 		return nil, storage.OperationFailed, err
@@ -756,7 +755,6 @@ func verifiedOperationResult(
 		ResultDER:        resultDER,
 		EUICCPublicKey:   publicKey,
 		AssociationToken: token,
-		SequenceNumber:   sequenceNumber,
 	})
 	if err != nil {
 		return nil, storage.OperationFailed, err

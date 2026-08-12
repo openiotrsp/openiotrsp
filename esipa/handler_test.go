@@ -620,7 +620,11 @@ func TestDefaultHandlerVerifiesSGP26SignedEUICCPackageResultBeforeApplyingState(
 	handler := NewHandler(store, storage.DefaultTenantID)
 	handler.EUICCPublicKey = resolver
 
-	result := signedEUICCPackageResult(t, fixture.euiccKey, request, operation.SequenceNumber, 3, 0)
+	const cardSeqNumber int64 = 16
+	if operation.SequenceNumber == cardSeqNumber {
+		t.Fatal("test setup requires eIM operation sequence != card seqNumber 16")
+	}
+	result := signedEUICCPackageResult(t, fixture.euiccKey, request, cardSeqNumber, 3, 0)
 	resultResponse, err := handler.handle(ctx, envelopeRequest(t,
 		&protocolasn1.ProvideEimPackageResult{
 			EID: eid,
@@ -633,8 +637,8 @@ func TestDefaultHandlerVerifiesSGP26SignedEUICCPackageResultBeforeApplyingState(
 		t.Fatalf("handle(valid signed result) error = %v", err)
 	}
 	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
-	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)}) {
-		t.Fatalf("ack = %v, want [%d]", ack.SequenceNumbers, operation.SequenceNumber)
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(cardSeqNumber)}) {
+		t.Fatalf("ack = %v, want card seqNumber [%d]", ack.SequenceNumbers, cardSeqNumber)
 	}
 	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eidKey, hex.EncodeToString(iccid))
 	if err != nil {
@@ -642,6 +646,13 @@ func TestDefaultHandlerVerifiesSGP26SignedEUICCPackageResultBeforeApplyingState(
 	}
 	if !profile.IsEnabled {
 		t.Fatalf("profile state = %#v, want enabled after verified result", profile)
+	}
+	opAfter, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if opAfter.Status != storage.OperationDone {
+		t.Fatalf("operation status = %s, want done", opAfter.Status)
 	}
 }
 

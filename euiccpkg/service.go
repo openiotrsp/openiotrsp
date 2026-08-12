@@ -220,7 +220,11 @@ type ResultInput struct {
 	// euiccSignEPR / euiccSignEPE. Nil means zero ('84 01 00').
 	AssociationToken *int64
 	OperationID      int64
-	SequenceNumber   int64
+	// SequenceNumber, when non-zero, is the expected eUICC
+	// EuiccPackageResultDataSigned.seqNumber checked by matchSignedResult.
+	// Use 0 to skip that check when correlating by eimId / counter /
+	// eimTransactionId. It is not operations.sequence_number.
+	SequenceNumber int64
 }
 
 // Result is the verified domain result.
