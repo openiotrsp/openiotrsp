@@ -996,6 +996,55 @@ func TestProfileDownloadTriggerPoll(t *testing.T) {
 	}
 }
 
+func TestProfileDownloadTriggerProvideWithoutEID(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x35)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	transactionID := []byte{0x05, 0x06}
+	trigger, err := profiledownload.NewActivationCodeTrigger("1$example.com$ACT", transactionID)
+	if err != nil {
+		t.Fatalf("NewActivationCodeTrigger() error = %v", err)
+	}
+	if _, err := profiledownload.EnqueueTrigger(ctx, store, storage.DefaultTenantID, eidKey, trigger); err != nil {
+		t.Fatalf("EnqueueTrigger() error = %v", err)
+	}
+
+	_, err = handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t, &protocolasn1.GetEimPackageRequest{EID: eid}))
+	if err != nil {
+		t.Fatalf("Handle(get) error = %v", err)
+	}
+
+	resultResponse, err := handleUnverified(ctx, store, storage.DefaultTenantID, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLV(t, &protocolasn1.ProfileDownloadTriggerResult{
+					EimTransactionID: transactionID,
+					ProfileInstallationRaw: profileInstallationResultTLV(
+						bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)),
+					),
+				}),
+			},
+		},
+	))
+	if err != nil {
+		t.Fatalf("Handle(provide without EID) error = %v", err)
+	}
+	ack := decodeProvideResultAck(t, encodeResponse(t, resultResponse))
+	if !reflect.DeepEqual(ack.SequenceNumbers, []protocolasn1.SequenceNumber{1}) {
+		t.Fatalf("ack = %v, want [1]", ack.SequenceNumbers)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != storage.OperationDone {
+		t.Fatalf("recorded results = %#v, want one done result", results)
+	}
+}
+
 func TestProfileDownloadTriggerFailedInstallRecordsFailed(t *testing.T) {
 	t.Parallel()
 

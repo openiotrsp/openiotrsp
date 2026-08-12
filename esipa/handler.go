@@ -309,7 +309,7 @@ func handleProvideEimPackageResult(ctx context.Context, store storage.Store, ten
 		logProvideResultDecodeFailed(logger, requestBytes, tlv, err)
 		return Response{}, err
 	}
-	eid, code, err := resolveProvideResultEID(ctx, store, tenantID, request.EID, request.EimPackageResult.Raw)
+	eid, code, err := ResolveProvideResultEID(ctx, store, tenantID, request.EID, request.EimPackageResult.Raw)
 	if err != nil {
 		return Response{}, err
 	}
@@ -1191,106 +1191,6 @@ func eidKey(eid []byte) (string, *protocolasn1.EimPackageResultErrorCode) {
 	default:
 		code := getEimPackageErrorInvalidEID
 		return "", &code
-	}
-}
-
-// resolveProvideResultEID prefers an explicit Provide EID, then recovers from
-// the result payload (BF52 EID / eUICC certificate), then from eimTransactionId
-// against pending operation payloads when EID was omitted.
-func resolveProvideResultEID(
-	ctx context.Context,
-	store storage.Store,
-	tenantID storage.TenantID,
-	eidBytes []byte,
-	resultTLV *bertlv.TLV,
-) (string, *protocolasn1.EimPackageResultErrorCode, error) {
-	if len(eidBytes) != 0 {
-		eid, code := eidKey(eidBytes)
-		return eid, code, nil
-	}
-	if recovered := recoverEIDFromPackageResultTLV(resultTLV); len(recovered) == 16 {
-		eid, code := eidKey(recovered)
-		return eid, code, nil
-	}
-	transactionID := eimTransactionIDFromResultTLV(resultTLV)
-	if len(transactionID) == 0 {
-		code := getEimPackageErrorMissingEID
-		return "", &code, nil
-	}
-	pending, err := store.ListPendingOperations(ctx, tenantID, 10000)
-	if err != nil {
-		return "", nil, err
-	}
-	for _, operation := range pending {
-		matched, err := operationMatchesEimTransactionID(operation, transactionID)
-		if err != nil {
-			return "", nil, err
-		}
-		if matched {
-			return operation.EID, nil, nil
-		}
-	}
-	code := provideResultErrorEIDNotFound
-	return "", &code, nil
-}
-
-func eimTransactionIDFromResultTLV(tlv *bertlv.TLV) []byte {
-	if tlv == nil {
-		return nil
-	}
-	if tlv.Tag.Equal(tagIpaEuiccData) {
-		var response protocolasn1.IpaEuiccDataResponse
-		if err := response.UnmarshalBERTLV(tlv); err != nil {
-			return nil
-		}
-		if response.Error != nil {
-			return cloneBytes(response.Error.EimTransactionID)
-		}
-		if response.Data != nil {
-			return cloneBytes(response.Data.EimTransactionID)
-		}
-		return nil
-	}
-	var result protocolasn1.EuiccPackageResult
-	if err := result.UnmarshalBERTLV(tlv); err != nil {
-		return nil
-	}
-	switch result.Kind {
-	case protocolasn1.EuiccPackageResultOK:
-		if result.Signed != nil {
-			return cloneBytes(result.Signed.Data.EimTransactionID)
-		}
-	case protocolasn1.EuiccPackageResultErrorSigned:
-		if result.ErrorSigned != nil {
-			return cloneBytes(result.ErrorSigned.Data.EimTransactionID)
-		}
-	case protocolasn1.EuiccPackageResultErrorUnsigned:
-		if result.ErrorUnsigned != nil {
-			return cloneBytes(result.ErrorUnsigned.EimTransactionID)
-		}
-	}
-	return nil
-}
-
-func operationMatchesEimTransactionID(operation storage.Operation, transactionID []byte) (bool, error) {
-	if len(transactionID) == 0 {
-		return false, nil
-	}
-	switch operation.Kind {
-	case storage.OperationEuiccPackage:
-		var request protocolasn1.EuiccPackageRequest
-		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
-			return false, err
-		}
-		return bytes.Equal(request.EuiccPackageSigned.EimTransactionID, transactionID), nil
-	case storage.OperationIpaEuiccData:
-		var request protocolasn1.IpaEuiccDataRequest
-		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
-			return false, err
-		}
-		return bytes.Equal(request.EimTransactionID, transactionID), nil
-	default:
-		return false, nil
 	}
 }
 

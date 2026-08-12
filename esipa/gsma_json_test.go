@@ -14,6 +14,7 @@ import (
 	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/ipadata"
+	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
 )
@@ -353,6 +354,96 @@ func TestGSMAJSONProvideRecoversEIDFromTransactionID(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("pending = %#v, want empty after EID recovery", pending)
+	}
+}
+
+func TestGSMAJSONProvideProfileDownloadTriggerWithoutEIDValue(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := &recordingStore{Store: memory.New()}
+	eid := testEID(0x66)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	transactionID := []byte{0x07, 0x08}
+	trigger, err := profiledownload.NewActivationCodeTrigger("1$example.com$ACT", transactionID)
+	if err != nil {
+		t.Fatalf("NewActivationCodeTrigger() error = %v", err)
+	}
+	if _, err := profiledownload.EnqueueTrigger(ctx, store, storage.DefaultTenantID, eidKey, trigger); err != nil {
+		t.Fatalf("EnqueueTrigger() error = %v", err)
+	}
+
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.AllowUnverifiedEUICCPackageResults = true
+	server := httptest.NewServer(handler.HTTPHandler())
+	t.Cleanup(server.Close)
+
+	getBody, _ := json.Marshal(map[string]string{"eidValue": eidKey})
+	getReq, err := http.NewRequest(http.MethodPost, server.URL+GSMAPathGetEimPackage, bytes.NewReader(getBody))
+	if err != nil {
+		t.Fatalf("NewRequest(get) error = %v", err)
+	}
+	getReq.Header.Set("Content-Type", GSMAJSONMediaType)
+	getResp, err := server.Client().Do(getReq)
+	if err != nil {
+		t.Fatalf("getEimPackage error = %v", err)
+	}
+	defer func() { _ = getResp.Body.Close() }()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("getEimPackage status = %d", getResp.StatusCode)
+	}
+
+	resultDER := encode(t, &protocolasn1.ProfileDownloadTriggerResult{
+		EimTransactionID: transactionID,
+		ProfileInstallationRaw: profileInstallationResultTLV(
+			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0)),
+		),
+	})
+	body, _ := json.Marshal(map[string]string{
+		"eimPackageResult": base64.StdEncoding.EncodeToString(resultDER),
+	})
+	req, err := http.NewRequest(http.MethodPost, server.URL+GSMAPathProvideEimPackageResult, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest(provide) error = %v", err)
+	}
+	req.Header.Set("Content-Type", GSMAJSONMediaType)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("provide error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body %q, want 200", resp.StatusCode, body)
+	}
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	var provideJSON gsmaProvideResponse
+	if err := json.Unmarshal(respBody, &provideJSON); err != nil {
+		t.Fatalf("decode provide JSON error = %v", err)
+	}
+	if provideJSON.Header.FunctionExecutionStatus.Status != "Executed-Success" {
+		t.Fatalf("provide header status = %q", provideJSON.Header.FunctionExecutionStatus.Status)
+	}
+	ackDER, err := base64.StdEncoding.DecodeString(provideJSON.EimAcknowledgements)
+	if err != nil {
+		t.Fatalf("DecodeString(eimAcknowledgements) error = %v", err)
+	}
+	var ack protocolasn1.EimAcknowledgements
+	if err := protocolasn1.Decode(ackDER, &ack); err != nil {
+		t.Fatalf("Decode(EimAcknowledgements) error = %v", err)
+	}
+	if len(ack.SequenceNumbers) != 1 || ack.SequenceNumbers[0] != 1 {
+		t.Fatalf("sequenceNumbers = %v, want [1]", ack.SequenceNumbers)
+	}
+	results := store.recordedResults()
+	if len(results) != 1 || results[0].Status != storage.OperationDone {
+		t.Fatalf("recorded results = %#v, want one done result", results)
 	}
 }
 
