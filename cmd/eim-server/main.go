@@ -91,6 +91,7 @@ func run(logger *slog.Logger) error {
 	handler.EUICCPublicKey = euiccPublicKey
 	handler.AllowUnverifiedEUICCPackageResults = cfg.allowUnverifiedEUICCResults
 	handler.Relay = relaypkg.New(relaypkg.HTTPTransport{})
+	mux.HandleFunc(esipa.GSMAPathASN1, handler.ServeHTTP)
 	mux.HandleFunc(esipa.DefaultPath, handler.ServeHTTP)
 	for _, path := range esipa.DefaultGSMAPaths {
 		mux.HandleFunc(path, handler.ServeGSMAJSON)

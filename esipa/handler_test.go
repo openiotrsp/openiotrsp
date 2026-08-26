@@ -1432,7 +1432,7 @@ func newHTTPTransportClient(t *testing.T, h *Handler) transportClient {
 		if err != nil {
 			t.Fatalf("NewRequest() error = %v", err)
 		}
-		request.Header.Set("Content-Type", MediaType)
+		request.Header.Set("Content-Type", ASN1MediaType)
 		response, err := client.Do(request)
 		if err != nil {
 			t.Fatalf("HTTP POST error = %v", err)
@@ -1443,8 +1443,10 @@ func newHTTPTransportClient(t *testing.T, h *Handler) transportClient {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("HTTP status = %s", response.Status)
 		}
-		if !response.Close {
-			t.Fatalf("HTTP response Close = false, want connection close for poll request")
+		// SGP.32 never asks for Connection: close, and a constrained IPA pays a
+		// full TLS handshake per ESipa message when the eIM forces it.
+		if response.Close {
+			t.Fatalf("HTTP response Close = true, want a reusable keep-alive connection")
 		}
 		out, err := io.ReadAll(response.Body)
 		if err != nil {

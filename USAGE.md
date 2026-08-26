@@ -8,7 +8,34 @@ Run the default demo from the repository root:
 docker compose up
 ```
 
-The stack starts Postgres, `eim-server`, and `mockipa`. The eIM registers the demo EID, queues a direct profile download trigger for `1$smdpp.test.rsp.sysmocom.de$TS48V1-B-UNIQUE`, and serves ESipa BER-TLV on `http://localhost:8080/esipa` plus GSMA HTTP JSON on `/gsma/rsp2/esipa/{getEimPackage,provideEimPackageResult,handleNotification}`. The mock IPA polls ESipa, handles the trigger, and uploads a profile download result. Override the demo profile with `OPENIOTRSP_DEMO_SMDP_ADDRESS` and `OPENIOTRSP_DEMO_MATCHING_ID`.
+The stack starts Postgres, `eim-server`, and `mockipa`. The eIM registers the demo EID, queues a direct profile download trigger for `1$smdpp.test.rsp.sysmocom.de$TS48V1-B-UNIQUE`, and serves the SGP.32 ASN.1 binding on `http://localhost:8080/gsma/rsp2/asn1`, the GSMA HTTP JSON binding on `/gsma/rsp2/esipa/{getEimPackage,provideEimPackageResult,handleNotification}`, and the same BER-TLV messages on the legacy `/esipa` path. The mock IPA polls ESipa, handles the trigger, and uploads a profile download result. Override the demo profile with `OPENIOTRSP_DEMO_SMDP_ADDRESS` and `OPENIOTRSP_DEMO_MATCHING_ID`.
+
+### ESipa bindings and HTTP headers
+
+`esipa.Handler.HTTPHandler()` mounts all three HTTP surfaces, so one handler serves an IPAe and an IPAd:
+
+| Path | Binding | Response `Content-Type` |
+| --- | --- | --- |
+| `/gsma/rsp2/asn1` (`esipa.GSMAPathASN1`) | SGP.32 §6.1.1 ASN.1 | `application/x-gsma-rsp-asn1` |
+| `/gsma/rsp2/esipa/{getEimPackage,provideEimPackageResult,handleNotification}` | SGP.32 §6.1.2 JSON | `application/json;charset=UTF-8` |
+| `/esipa` (`esipa.DefaultPath`) | same ASN.1 messages, legacy path | `application/x-gsma-rsp-asn1` |
+
+Every response carries `X-Admin-Protocol`. The requester's value is echoed when it names a `gsma/rsp/` protocol, otherwise `esipa.DefaultAdminProtocol` (`gsma/rsp/v2.1.0`) is sent. Responses do not force `Connection: close`, so a constrained device can reuse one TLS session across a `getEimPackage` / `provideEimPackageResult` / `getEimPackage` exchange.
+
+The request `Content-Type` is not inspected; the binding is chosen by path. Probe a running eIM with a `getEimPackageRequest` for an EID that has nothing queued:
+
+```bash
+printf '\xbf\x4f\x12\x5a\x10\x89\x04\x40\x45\x93\x00\x00\x00\x00\x00\x00\x21\x53\x89\x32\x10' > getpkg.ber
+curl -s -D - -o resp.ber -X POST --data-binary @getpkg.ber \
+  -H 'Content-Type: application/x-gsma-rsp-asn1' \
+  -H 'X-Admin-Protocol: gsma/rsp/v2.1.0' \
+  -H 'User-Agent: gsma-rsp-ipae' \
+  http://127.0.0.1:8080/gsma/rsp2/asn1
+```
+
+The response headers must include `X-Admin-Protocol: gsma/rsp/v2.1.0` and `Content-Type: application/x-gsma-rsp-asn1`, and `resp.ber` must be one `EsipaMessageFromEimToIpa`: `bf4f 03 02 01 01`, a `getEimPackageResponse` of `eimPackageError(1)`.
+
+A `handleNotificationEsipa` request answers `204` with an empty body and no `Content-Type`, per SGP.32 §6.1.1.
 
 ### BF52 vs profile inventory
 
@@ -20,10 +47,11 @@ SGP.32 allows omitting `eidValue` on `ProvideEimPackageResult` (BF50). When GSMA
 
 1. Application 26 (`5A`) EID inside `ipaEuiccData`, when present
 2. eUICC certificate (`A6`) subject `serialNumber` (32-digit hex EID encoding)
+3. `eimTransactionId`, matched against the outstanding operations for the tenant
 
 Decode accepts AUTOMATIC TAGS CHOICE `[0]` under BF52 (same class as BF51 / BF2D) and both A6 Certificate shapes: one nested SEQUENCE, or IMPLICIT TBS / AlgorithmIdentifier / signature siblings. EID recovery walks those data objects after CHOICE unwrap and does not require every `IpaEuiccData` field to decode successfully.
 
-The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the BER provide path). IPAs should still send `eidValue` on provide for BF52 whenever the response omits both an embedded EID and the eUICC certificate; otherwise the eIM cannot associate the result to a device.
+The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the ASN.1 provide path), so a consumer does not need its own `eimTransactionId`-to-EID adapter in front of the handler. Step 3 covers a bare BF51 `euiccPackageResult` that carries neither an embedded EID nor an eUICC certificate, which is what Kigen's IPA sends. It resolves only while the correlated operation is still outstanding: an IPA that omits `eidValue` on a redelivery after the operation completed cannot be associated to a device, so IPAs should still send `eidValue` whenever they have it.
 
 ### eUICC Package Result signatures (`euiccSignEPR` / `euiccSignEPE`)
 

@@ -31,8 +31,9 @@ The codebase has three layers.
   message set.
 - `euiccpkg` — eUICC Package construction, signing, result verification, and
   the state transitions that follow a verified result.
-- `esipa` — the ESipa server surface, offered over HTTPS (BER-TLV `/esipa`
-  and GSMA HTTP JSON `/gsma/rsp2/esipa/...`) and CoAP/DTLS so it works on
+- `esipa` — the ESipa server surface, offered over HTTPS (SGP.32 ASN.1 on
+  `/gsma/rsp2/asn1`, GSMA HTTP JSON on `/gsma/rsp2/esipa/...`, and the same
+  BER-TLV messages on the legacy `/esipa`) and CoAP/DTLS so it works on
   constrained NB-IoT and LTE-M networks.
 - `relay` and `smdp` — the indirect-download ES9+ relay toward the SM-DP+.
 - `profiledownload`, `ipadata` — direct profile download triggering and

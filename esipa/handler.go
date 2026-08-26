@@ -2,9 +2,12 @@
 // HTTPS and CoAP/DTLS transports.
 //
 // Wire bindings:
-//   - BER-TLV on DefaultPath (/esipa) with MediaType
+//   - SGP.32 v1.3 section 6.1.1 ASN.1 on GSMAPathASN1 (/gsma/rsp2/asn1) with
+//     ASN1MediaType, the binding every conformant IPAe uses
 //   - GSMA HTTP JSON on DefaultGSMAPaths (/gsma/rsp2/esipa/...) for IPA
 //     implementations that speak HTTP JSON ESipa
+//   - the same BER-TLV messages on the legacy DefaultPath (/esipa), retained
+//     for consumers pinned to it and reused as the CoAP/DTLS Uri-Path
 package esipa
 
 import (
@@ -29,10 +32,24 @@ import (
 )
 
 const (
-	// DefaultPath is the BER-TLV transport path used by the HTTPS and CoAP handlers.
+	// DefaultPath is the legacy BER-TLV transport path. It stays mounted for
+	// consumers pinned to it and supplies the CoAP/DTLS Uri-Path, which SGP.32
+	// v1.3 section 6.2 leaves to the deployment.
 	DefaultPath = "/esipa"
 
-	// MediaType is the HTTP content type used for BER-TLV encoded ESipa payloads.
+	// GSMAPathASN1 is the generic HTTP path that SGP.32 v1.3 section 6.1.1
+	// mandates for every ASN.1-binding function execution request.
+	GSMAPathASN1 = "/gsma/rsp2/asn1"
+
+	// ASN1MediaType is the Content-Type that SGP.32 v1.3 section 6.1.1 mandates
+	// on both request and response of the ASN.1 binding.
+	ASN1MediaType = "application/x-gsma-rsp-asn1"
+
+	// MediaType is the vendor content type this library emitted on the ASN.1
+	// binding before v0.2.15.
+	//
+	// Deprecated: it is not the SGP.32 media type and IPAe implementations
+	// discard responses carrying it. Use ASN1MediaType.
 	MediaType = "application/vnd.gsma.esipa.ber-tlv"
 
 	// DefaultMaxMessageSize keeps handlers bounded while allowing block-wise eUICC

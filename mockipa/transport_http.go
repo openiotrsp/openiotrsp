@@ -27,7 +27,12 @@ func (t HTTPTransport) Exchange(ctx context.Context, payload []byte) ([]byte, bo
 	if err != nil {
 		return nil, false, err
 	}
-	request.Header.Set("Content-Type", esipa.MediaType)
+	// SGP.32 v1.3 sections 6.1 and 6.1.1 mandate these three request headers on
+	// the ASN.1 binding. gsma-rsp-ipad is the User-Agent for an IPA in the
+	// device rather than in the eUICC.
+	request.Header.Set("Content-Type", esipa.ASN1MediaType)
+	request.Header.Set("X-Admin-Protocol", esipa.DefaultAdminProtocol)
+	request.Header.Set("User-Agent", "gsma-rsp-ipad")
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, false, err

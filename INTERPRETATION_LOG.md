@@ -395,3 +395,43 @@ Each entry must include:
   `TestEuiccSignEPRRequiresAssociationTokenBinding`.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No (prose in SGP.32
   is explicit).
+
+## SGP.32 ESipa X-Admin-Protocol Default Version
+
+- Spec section: SGP.32 v1.3 section 6.1 ("X-Admin-Protocol" header field SHALL
+  be set to highest version of SGP.32 [This document] supported by the sender),
+  amended from SGP.32 v1.2 section 6.1 ("SHALL be set to v2.1.0 in both HTTP
+  request and HTTP response. NOTE: this value provides interoperability with
+  previous versions of SGP.22") by CR13009R01; SGP.22 v2.7 section 6.2, from
+  which the `gsma/rsp/v<x.y.z>` syntax is inherited.
+- Ambiguity: v1.3 keeps the `gsma/rsp/v<x.y.z>` syntax, whose version namespace
+  has always been SGP.22, while redefining the value as an SGP.32 version. It
+  does not say whether an eIM should therefore advertise `gsma/rsp/v1.3.0`, nor
+  what to send when the requester offers no version at all.
+- Chosen reading: Echo the requester's value whenever it names a `gsma/rsp/`
+  protocol, and fall back to `gsma/rsp/v2.1.0` otherwise, on both the ASN.1 and
+  the JSON binding. Do not emit an SGP.32 version number in a `gsma/rsp/`
+  header.
+- Rationale: Echoing means a conformant v1.3 IPA is answered with exactly the
+  version it negotiated, so the v1.3 rule is satisfied wherever it is
+  observable. The fallback only applies to requesters that sent nothing, and
+  `v2.1.0` is the one value SGP.32 ever named explicitly and the value deployed
+  IPAs put on the wire. The previous default, `gsma/rsp/v2.4.0`, matched no
+  specification text and risked rejection by a strict IPAe.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 ESipa HTTP Connection Reuse
+
+- Spec section: SGP.32 v1.3 sections 6.1 and 6.1.1; SGP.22 v2.7 section 6.2,
+  which SGP.32 section 6.1 adopts by reference.
+- Ambiguity: Neither specification states whether an ESipa response may keep
+  the HTTP connection open. Both list the mandatory header fields and allow
+  additional ones without constraining `Connection`.
+- Chosen reading: Do not set `Connection: close`. Leave connection lifetime to
+  the HTTP server and to the client's own `Connection` request header.
+- Rationale: A normal exchange is getEimPackage, provideEimPackageResult, then
+  getEimPackage again. Forcing close costs a full TLS handshake per message,
+  which is a real power and latency penalty on a constrained NB-IoT device, and
+  IPAs request `keep-alive`. Nothing in the mandated message flow depends on a
+  fresh connection.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

@@ -15,25 +15,32 @@ func NewHTTPHandler(store storage.Store, tenantID storage.TenantID) http.Handler
 }
 
 // HTTPHandler returns the stdlib HTTP wrapper around the shared ESipa handler.
-// It mounts BER-TLV DefaultPath and the GSMA JSON DefaultGSMAPaths.
+// It mounts the SGP.32 ASN.1 binding on GSMAPathASN1, the GSMA JSON binding on
+// DefaultGSMAPaths, and the legacy BER-TLV DefaultPath, so one handler serves
+// both an IPAe and an IPAd out of the box.
 func (h *Handler) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
-	path := h.path()
-	mux.HandleFunc(path, h.ServeHTTP)
+	mux.HandleFunc(GSMAPathASN1, h.ServeHTTP)
+	if path := h.path(); path != GSMAPathASN1 {
+		mux.HandleFunc(path, h.ServeHTTP)
+	}
 	for _, gsmaPath := range DefaultGSMAPaths {
 		mux.HandleFunc(gsmaPath, h.ServeGSMAJSON)
 	}
 	return mux
 }
 
-// ServeHTTP decodes one BER-TLV ESipa request, invokes Handle, and writes the
-// BER-TLV ESipa response.
+// ServeHTTP decodes one ASN.1 ESipa request, invokes Handle, and writes the
+// ASN.1 ESipa response per SGP.32 v1.3 section 6.1.1. The request Content-Type
+// is not inspected: the binding is selected by path, and rejecting an IPA over
+// a header it got wrong would only cost interoperability.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	setAdminProtocolResponse(w, r.Header.Get(adminProtocolHeader))
 	maxSize := h.maxMessageSize()
 	body := http.MaxBytesReader(w, r.Body, maxSize)
 	defer func() {
@@ -51,12 +58,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if encoded.NoContent {
-		w.Header().Set("Connection", "close")
+		// SGP.32 v1.3 section 6.1.1: a normal notification execution answers
+		// 204 with an empty body, and SGP.22 section 6.2 says not to set
+		// Content-Type when the body is empty.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	w.Header().Set("Content-Type", MediaType)
-	w.Header().Set("Connection", "close")
+	w.Header().Set("Content-Type", ASN1MediaType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(encoded.Payload)
 }

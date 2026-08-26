@@ -185,6 +185,77 @@ func TestGSMAJSONHandleNotificationProvideWithoutEIDValue(t *testing.T) {
 	}
 }
 
+// TestGSMAJSONProvideWithoutEIDValueCorrelatesByTransactionID covers the IPAs
+// that omit eidValue on provideEimPackageResult and expect the eIM to correlate
+// the result to the outstanding request by eimTransactionId. The payload here
+// is a bare BF51 with no embedded EID and no eUICC certificate, so the
+// transaction lookup is the only way to reach the device. Consumers do not need
+// their own eimTransactionId-to-EID adapter in front of this handler.
+func TestGSMAJSONProvideWithoutEIDValueCorrelatesByTransactionID(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x67)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	transactionID := []byte{0xde, 0xad, 0xbe, 0xef}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	request.EuiccPackageSigned.EimTransactionID = cloneBytes(transactionID)
+	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	}); err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.AllowUnverifiedEUICCPackageResults = true
+	server := httptest.NewServer(handler.HTTPHandler())
+	t.Cleanup(server.Close)
+
+	result := sampleEuiccPackageResultForTag(21, 3, 0)
+	result.Signed.Data.EimTransactionID = cloneBytes(transactionID)
+	resultDER := encode(t, result)
+	if recovered := recoverEIDFromPackageResultTLV(mustTLVFromDER(t, resultDER)); len(recovered) != 0 {
+		t.Fatalf("result payload carries a recoverable EID %x, so it cannot exercise transaction correlation", recovered)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"eimPackageResult": base64.StdEncoding.EncodeToString(resultDER),
+	})
+	req, err := http.NewRequest(http.MethodPost, server.URL+GSMAPathProvideEimPackageResult, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", GSMAJSONMediaType+";charset=UTF-8")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("provideEimPackageResult error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var provide gsmaProvideResponse
+	if err := json.NewDecoder(resp.Body).Decode(&provide); err != nil {
+		t.Fatalf("decode provide response error = %v", err)
+	}
+	if provide.EimPackageError != nil {
+		t.Fatalf("eimPackageError = %d, want the result correlated to the pending operation", *provide.EimPackageError)
+	}
+	pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eidKey, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v, want empty after provide", pending)
+	}
+}
+
 func TestGSMAJSONHandleNotificationPendingNotification(t *testing.T) {
 	t.Parallel()
 

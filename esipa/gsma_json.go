@@ -26,9 +26,11 @@ const (
 	// GSMAJSONMediaType is the Content-Type used by GSMA HTTP JSON ESipa.
 	GSMAJSONMediaType = "application/json"
 
-	// DefaultAdminProtocol is echoed on GSMA JSON responses when the request
-	// does not negotiate a different gsma/rsp version.
-	DefaultAdminProtocol = "gsma/rsp/v2.4.0"
+	// DefaultAdminProtocol is the X-Admin-Protocol value sent on ESipa
+	// responses when the request does not negotiate a gsma/rsp version.
+	// SGP.32 v1.2 section 6.1 fixes it at v2.1.0 for interoperability with
+	// SGP.22; see INTERPRETATION_LOG.md for why v1.3 did not move it.
+	DefaultAdminProtocol = "gsma/rsp/v2.1.0"
 
 	adminProtocolHeader = "X-Admin-Protocol"
 )
@@ -159,7 +161,6 @@ func (h *Handler) serveGSMAProvideEimPackageResult(w http.ResponseWriter, r *htt
 		return
 	}
 	if encoded.NoContent {
-		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -238,7 +239,6 @@ func (h *Handler) serveGSMAHandleNotification(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if encoded.NoContent || len(encoded.Payload) == 0 {
-		w.Header().Set("Connection", "close")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -419,6 +419,10 @@ func parseRawTLV(data []byte) (*bertlv.TLV, error) {
 	return tlv, nil
 }
 
+// setAdminProtocolResponse sets the X-Admin-Protocol response header that
+// SGP.32 v1.3 section 6.1.1 and 6.1.2 require on both bindings. The requester's
+// negotiated version is echoed when it names a gsma/rsp protocol so a stricter
+// IPA never sees a version it did not offer.
 func setAdminProtocolResponse(w http.ResponseWriter, requestValue string) {
 	value := DefaultAdminProtocol
 	if trimmed := strings.TrimSpace(requestValue); strings.HasPrefix(trimmed, "gsma/rsp/") {
@@ -429,7 +433,6 @@ func setAdminProtocolResponse(w http.ResponseWriter, requestValue string) {
 
 func writeGSMAJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", GSMAJSONMediaType+";charset=UTF-8")
-	w.Header().Set("Connection", "close")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
