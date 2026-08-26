@@ -151,16 +151,36 @@ Each entry must include:
   `trustedPublicKeyDataTls [6]`, each a CHOICE of SubjectPublicKeyInfo
   (`eimPublicKey` / `trustedEimPkTls`, context tag `[0]`) or Certificate
   (`eimCertificate` / `trustedCertificateTls`, context tag `[1]`).
-- Ambiguity: Whether the outer context `[5]`/`[6]` field embeds the X.509 object
-  directly as a universal SEQUENCE (`30...`) or wraps it in the inner CHOICE
-  arm tag (`A0`/`A1`).
-- Chosen reading: The inner CHOICE arm tag is mandatory on the wire. Encode and
-  decode `A5 { A1 { 30... } }` for certificates and `A5 { A0 { 30... } }` for
-  SubjectPublicKeyInfo; the same pattern applies to `[6]`.
-- Rationale: SGP.32 defines explicit CHOICE arms with distinct context tags.
-  Vendor interop hex diffs and a second eIM rejection on Add eIM ECO confirm bare
-  `30...` under `A5` is non-conformant.
-- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+- Ambiguity: Two separate questions. First, whether the outer context
+  `[5]`/`[6]` field embeds the X.509 object directly as a universal SEQUENCE
+  (`30...`) or wraps it in the inner CHOICE arm tag (`A0`/`A1`). Second, given
+  the arm tag is present, whether it is EXPLICIT (nesting the whole SEQUENCE,
+  `A0 { 30 ... }`) or IMPLICIT (replacing the SEQUENCE's `30` identifier octet,
+  so the X.509 fields become siblings directly under the arm, `A0 <contents>`).
+- Chosen reading: The inner CHOICE arm tag is mandatory on the wire; a bare
+  `30...` under `A5`/`A6` is rejected. On the second question, decode is
+  tolerant and encode is strict: `unmarshalX509Choice` accepts both the
+  EXPLICIT and the IMPLICIT shape and normalizes either to the X.509 object's
+  own SEQUENCE, while `marshalX509Choice` continues to emit the EXPLICIT
+  `A5 { A1 { 30... } }` form.
+- Rationale: On the first question, SGP.32 defines CHOICE arms with distinct
+  context tags, and vendor interop hex diffs plus a second eIM rejection on Add
+  eIM ECO confirm bare `30...` is non-conformant. On the second, the module is
+  `DEFINITIONS AUTOMATIC TAGS` and the arms underlie `SubjectPublicKeyInfo` and
+  `Certificate`, which are SEQUENCEs rather than CHOICEs, so a strict reading
+  makes the arm tag IMPLICIT and this library's EXPLICIT output carries one
+  SEQUENCE layer too many. That reading is sound but not yet confirmed against
+  a `GetEimConfigurationData` readout from real silicon or a vendor reference
+  encoding, and changing the encoder changes signed-adjacent bytes on the wire.
+  Accepting both shapes on input cannot invalidate stored data and removes the
+  failure mode where a configuration written by a card or another eIM cannot be
+  parsed at all; changing the output is deferred until reference bytes exist.
+  The shapes are distinguishable without guessing: `SubjectPublicKeyInfo` has
+  two fields and `Certificate` three, so a lone SEQUENCE child under the arm can
+  only be a nested X.509 object. This mirrors `CertificateDERFromTagged`, which
+  already accepts both shapes for A5/A6 `Certificate`.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. The encode side
+  remains open pending reference bytes.
 
 ## SGP.32 IpaEuiccDataRequest.tagList vs EID Tag 5A
 

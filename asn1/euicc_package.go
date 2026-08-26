@@ -201,24 +201,55 @@ func marshalX509Choice(tag bertlv.Tag, choice *X509Choice) (*bertlv.TLV, error) 
 	return constructed(tag, constructed(innerTag, rawChild(choice.Data))), nil
 }
 
+// unmarshalX509Choice decodes an eimPublicKeyData [5] / trustedPublicKeyDataTls
+// [6] CHOICE. The A0/A1 arm tag is required; the X.509 object beneath it is
+// accepted in either shape it appears in on the wire. See x509ChoiceArmObject.
 func unmarshalX509Choice(tlv *bertlv.TLV) (*X509Choice, error) {
 	if len(tlv.Children) != 1 {
 		return nil, errors.New("asn1: X.509 choice must contain exactly one child")
 	}
-	child := tlv.Children[0]
+	arm := tlv.Children[0]
 	var kind X509ChoiceKind
 	switch {
-	case hasTag(child, bertlv.ContextSpecific.Constructed(0)):
+	case hasTag(arm, bertlv.ContextSpecific.Constructed(0)):
 		kind = X509SubjectPublicKeyInfo
-	case hasTag(child, bertlv.ContextSpecific.Constructed(1)):
+	case hasTag(arm, bertlv.ContextSpecific.Constructed(1)):
 		kind = X509Certificate
 	default:
 		return nil, errors.New("asn1: X.509 choice missing A0/A1 CHOICE wrapper")
 	}
-	if len(child.Children) != 1 {
-		return nil, errors.New("asn1: X.509 CHOICE arm must contain exactly one child")
+	data, err := x509ChoiceArmObject(arm)
+	if err != nil {
+		return nil, err
 	}
-	return &X509Choice{Kind: kind, Data: cloneTLV(child.Children[0])}, nil
+	return &X509Choice{Kind: kind, Data: data}, nil
+}
+
+// x509ChoiceArmObject returns the X.509 object carried by an A0/A1 CHOICE arm
+// as its own UNIVERSAL 16 SEQUENCE, so callers get the same value whichever
+// shape the peer encoded.
+//
+// SGP32Definitions is DEFINITIONS AUTOMATIC TAGS and the arms underlie
+// SubjectPublicKeyInfo / Certificate, which are SEQUENCEs rather than CHOICEs,
+// so a strict encoder makes the arm tag IMPLICIT: it replaces the SEQUENCE's
+// 30 identifier octet and the X.509 fields become siblings directly under
+// A0/A1. Other implementations, including this library's encoder up to
+// v0.2.15, nest the whole SEQUENCE under the arm instead. Both are decoded;
+// the encoder is deliberately not changed here, because that would alter bytes
+// on the wire and still needs reference bytes from real silicon.
+//
+// The two shapes cannot be confused: SubjectPublicKeyInfo always has two
+// fields and Certificate three, so a lone SEQUENCE child can only be a nested
+// X.509 object.
+func x509ChoiceArmObject(arm *bertlv.TLV) (*bertlv.TLV, error) {
+	switch {
+	case len(arm.Children) == 1 && hasTag(arm.Children[0], tagSequence):
+		return cloneTLV(arm.Children[0]), nil
+	case len(arm.Children) > 1:
+		return constructed(tagSequence, cloneTLV(arm).Children...), nil
+	default:
+		return nil, errors.New("asn1: X.509 CHOICE arm does not carry an X.509 object")
+	}
 }
 
 func x509ChoiceArmTag(kind X509ChoiceKind) (bertlv.Tag, error) {

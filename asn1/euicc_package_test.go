@@ -71,6 +71,91 @@ func TestUnmarshalX509ChoiceRejectsBareCertificate(t *testing.T) {
 	}
 }
 
+// TestUnmarshalX509ChoiceAcceptsImplicitAndNestedArms covers both shapes an
+// A0/A1 CHOICE arm takes on the wire. Under AUTOMATIC TAGS a strict encoder
+// makes the arm tag IMPLICIT, replacing the X.509 SEQUENCE identifier octet so
+// the fields sit directly under the arm; this library and others nest the whole
+// SEQUENCE instead. Decoding either must yield the same X509Choice, so an
+// EimConfigurationData handed to us by a card or another eIM still parses.
+func TestUnmarshalX509ChoiceAcceptsImplicitAndNestedArms(t *testing.T) {
+	t.Parallel()
+
+	certificate := mustParseTLV(t, testCertificateDER(t))
+	publicKey := mustParseTLV(t, testSPKIDER(t))
+
+	tests := []struct {
+		name    string
+		field   bertlv.Tag
+		arm     bertlv.Tag
+		object  *bertlv.TLV
+		wantKey X509ChoiceKind
+	}{
+		{
+			name:    "eimPublicKeyData certificate",
+			field:   bertlv.ContextSpecific.Constructed(5),
+			arm:     bertlv.ContextSpecific.Constructed(1),
+			object:  certificate,
+			wantKey: X509Certificate,
+		},
+		{
+			name:    "trustedPublicKeyDataTls SubjectPublicKeyInfo",
+			field:   bertlv.ContextSpecific.Constructed(6),
+			arm:     bertlv.ContextSpecific.Constructed(0),
+			object:  publicKey,
+			wantKey: X509SubjectPublicKeyInfo,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			nested := constructed(test.field, constructed(test.arm, rawChild(test.object)))
+			// IMPLICIT: the arm tag replaces the SEQUENCE identifier octet.
+			implicit := constructed(test.field, constructed(test.arm, test.object.Children...))
+			if len(implicit.Children[0].Children) < 2 {
+				t.Fatalf("IMPLICIT arm has %d fields, too few to distinguish from a nested SEQUENCE", len(implicit.Children[0].Children))
+			}
+
+			eimID := bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte("eim.symb-iot.com"))
+			var fromNested, fromImplicit EimConfigurationData
+			if err := fromNested.UnmarshalBERTLV(constructed(tagSequence, eimID, nested)); err != nil {
+				t.Fatalf("UnmarshalBERTLV(nested) error = %v", err)
+			}
+			if err := fromImplicit.UnmarshalBERTLV(constructed(tagSequence, eimID, implicit)); err != nil {
+				t.Fatalf("UnmarshalBERTLV(IMPLICIT) error = %v", err)
+			}
+
+			for label, decoded := range map[string]EimConfigurationData{"nested": fromNested, "IMPLICIT": fromImplicit} {
+				choice := decoded.EimPublicKeyData
+				if choice == nil {
+					choice = decoded.TrustedPublicKeyDataTLS
+				}
+				if choice == nil {
+					t.Fatalf("%s: no X.509 choice decoded", label)
+				}
+				if choice.Kind != test.wantKey {
+					t.Fatalf("%s: kind = %d, want %d", label, choice.Kind, test.wantKey)
+				}
+				if got, want := mustMarshal(t, choice.Data), mustMarshal(t, test.object); !bytes.Equal(got, want) {
+					t.Fatalf("%s: X.509 object = %x, want %x", label, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestUnmarshalX509ChoiceRejectsEmptyArm(t *testing.T) {
+	t.Parallel()
+
+	eimID := bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte("eim.symb-iot.com"))
+	empty := constructed(bertlv.ContextSpecific.Constructed(5), constructed(bertlv.ContextSpecific.Constructed(1)))
+	var config EimConfigurationData
+	if err := config.UnmarshalBERTLV(constructed(tagSequence, eimID, empty)); err == nil {
+		t.Fatal("UnmarshalBERTLV() error = nil, want empty CHOICE arm error")
+	}
+}
+
 func TestEimConfigurationDataX509ChoiceRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -142,6 +227,19 @@ func testCertificateDER(t *testing.T) []byte {
 	}, &key.PublicKey, key)
 	if err != nil {
 		t.Fatalf("CreateCertificate() error = %v", err)
+	}
+	return der
+}
+
+func testSPKIDER(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error = %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey() error = %v", err)
 	}
 	return der
 }
