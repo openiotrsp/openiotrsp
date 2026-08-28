@@ -727,6 +727,90 @@ func TestDefaultHandlerRejectsTamperedSGP26SignedEUICCPackageResult(t *testing.T
 	}
 }
 
+// TestDefaultHandlerResolvesAndTerminatesBaseTypeResultArm reproduces the
+// disable a Kigen eUICC answered with the EuiccResultData base type identifier
+// (02 01 02) instead of disableResult [4] (84 01 02), delivered without an
+// eidValue so eimTransactionId is the only routing key. The eUICC has executed
+// and advanced its counter, so the eIM must resolve the EID by correlation and
+// drive the operation to a terminal state instead of rejecting the message and
+// leaving the IPAe to retry forever.
+func TestDefaultHandlerResolvesAndTerminatesBaseTypeResultArm(t *testing.T) {
+	t.Parallel()
+
+	fixture := loadSGP26ResultFixture(t)
+	resolver, err := NewStaticEUICCCertificateResolver(
+		fixture.ciDER,
+		fixture.eumDER,
+		fixture.euiccDER,
+		pki.WithCurrentTime(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+	)
+	if err != nil {
+		t.Fatalf("NewStaticEUICCCertificateResolver() error = %v", err)
+	}
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x5d)
+	eidKey := hex.EncodeToString(eid)
+	iccid := []byte{0x89, 0x10, 0x10, 0x12, 0x34, 0x56, 0x78, 0x90, 0x12, 0xf1}
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if err := store.SetProfileState(ctx, storage.DefaultTenantID, storage.ProfileState{
+		EID:       eidKey,
+		ICCID:     hex.EncodeToString(iccid),
+		IsEnabled: true,
+	}); err != nil {
+		t.Fatalf("SetProfileState() error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoDisable, 3)
+	transactionID, err := hex.DecodeString("e3d28ea548de60887ba99e0ba0862dfa")
+	if err != nil {
+		t.Fatalf("hex.DecodeString(eimTransactionId) error = %v", err)
+	}
+	request.EuiccPackageSigned.EimTransactionID = transactionID
+	operation, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.EUICCPublicKey = resolver
+
+	// profileNotInEnabledState, carried under the base type identifier.
+	baseTypeArm := protocolasn1.EuiccResultData{
+		Raw: mustTestIntegerTLV(t, bertlv.Universal.Primitive(2), 2),
+	}
+	result := signedEUICCPackageResultWithArm(t, fixture.euiccKey, request, 50, baseTypeArm)
+	if _, err := handler.handle(ctx, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: mustTLVFromDER(t, result),
+			},
+		},
+	)); err != nil {
+		t.Fatalf("handle(base type result arm) error = %v", err)
+	}
+
+	after, err := store.GetOperation(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if after.Status != storage.OperationFailed {
+		t.Fatalf("operation status = %s, want failed", after.Status)
+	}
+	profile, err := store.GetProfileState(ctx, storage.DefaultTenantID, eidKey, hex.EncodeToString(iccid))
+	if err != nil {
+		t.Fatalf("GetProfileState() error = %v", err)
+	}
+	if !profile.IsEnabled {
+		t.Fatalf("profile state = %#v, want unchanged after a failed disable", profile)
+	}
+}
+
 func TestUnacknowledgedPackageRedeliversUntilResultRecorded(t *testing.T) {
 	t.Parallel()
 
@@ -1841,6 +1925,11 @@ func signedEUICCPackageResult(t *testing.T, key *ecdsa.PrivateKey, request *prot
 	if err != nil {
 		t.Fatalf("IntegerEuiccResult() error = %v", err)
 	}
+	return signedEUICCPackageResultWithArm(t, key, request, sequenceNumber, result)
+}
+
+func signedEUICCPackageResultWithArm(t *testing.T, key *ecdsa.PrivateKey, request *protocolasn1.EuiccPackageRequest, sequenceNumber int64, result protocolasn1.EuiccResultData) []byte {
+	t.Helper()
 	data := protocolasn1.EuiccPackageResultDataSigned{
 		EimID:            request.EuiccPackageSigned.EimID,
 		CounterValue:     request.EuiccPackageSigned.CounterValue,

@@ -72,12 +72,16 @@ func TestRunnerCompletesProfileDownloadTrigger(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("pending operations = %#v, want none", pending)
 	}
-	state, err := store.GetProfileState(ctx, storage.DefaultTenantID, eid, "TS48V1-B-UNIQUE")
+	// No profile state is derived from the trigger. This activation code's
+	// matching ID is not an ICCID, and SGP.22 section 3.1.3 installs a
+	// downloaded profile disabled, so the eUICC's own ProfileInfoListResponse is
+	// the only source for the inventory.
+	states, err := store.ListProfileStates(ctx, storage.DefaultTenantID, eid)
 	if err != nil {
-		t.Fatalf("GetProfileState() error = %v", err)
+		t.Fatalf("ListProfileStates() error = %v", err)
 	}
-	if !state.IsEnabled || state.SMDPAddress != "smdpp.test.rsp.sysmocom.de" {
-		t.Fatalf("profile state = %#v, want enabled sysmocom profile", state)
+	if len(states) != 0 {
+		t.Fatalf("profile states = %#v, want none recorded from the activation code", states)
 	}
 	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eid)
 	if err != nil {
@@ -136,12 +140,14 @@ func TestRunnerCompletesLocalMockProfileDownloadTrigger(t *testing.T) {
 	if len(pending) != 0 {
 		t.Fatalf("pending operations = %#v, want none", pending)
 	}
-	state, err := store.GetProfileState(ctx, storage.DefaultTenantID, eid, profileID)
+	// An ICCID-shaped matching ID is still only a matching ID: the eIM records
+	// no profile until the eUICC lists one.
+	states, err := store.ListProfileStates(ctx, storage.DefaultTenantID, eid)
 	if err != nil {
-		t.Fatalf("GetProfileState() error = %v", err)
+		t.Fatalf("ListProfileStates() error = %v", err)
 	}
-	if !state.IsEnabled || state.SMDPAddress != "mock.smdp.local" {
-		t.Fatalf("profile state = %#v, want enabled local mock profile", state)
+	if len(states) != 0 {
+		t.Fatalf("profile states = %#v, want none recorded from the activation code", states)
 	}
 	notifications, err := store.ListNotifications(ctx, storage.DefaultTenantID, eid)
 	if err != nil {

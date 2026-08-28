@@ -455,3 +455,38 @@ Each entry must include:
   IPAs request `keep-alive`. Nothing in the mandated message flow depends on a
   fresh connection.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 EuiccResultData Base Type Arm
+
+- Spec section: SGP.32 v1.3 ASN.1 module, `EuiccResultData` CHOICE and
+  `EuiccPackageResultDataSigned.euiccResult`; SGP.32 v1.3 section 5.9.4
+  (eUICC Package processing and result reporting).
+- Ambiguity: The module defines each result alternative under its own tag, and
+  says nothing about a result whose alternative tag is absent or unknown to the
+  receiver. A Kigen eUICC answered a `disable` PSMO with `euiccResult` of
+  `30 03 02 01 02`: the arm carries the `EuiccResultData` base type identifier
+  (UNIVERSAL INTEGER) instead of `disableResult` `[4]` (`84 01 02`). Nothing
+  states whether a receiver must reject such a result, and rejecting it
+  discards the enclosing message, including the `eimTransactionId` that is a
+  provide result's only routing key when `eidValue` is omitted.
+- Chosen reading: Three layers. Decode preserves any alternative tag verbatim,
+  so an unrecognised arm degrades to an unrecognised result and never to an
+  undecodable `EuiccPackageResult`. A single-operation package whose sole arm
+  carries the base type identifier as an INTEGER has that integer read as the
+  result code of the operation the request names, for operations whose
+  alternative is an INTEGER. Anything still unmatched yields
+  `euiccpkg.ErrResultNotFound`, which the ESipa handler records as a failed
+  operation with the raw result payload attached, not as a rejected message.
+- Rationale: A malformed result is strictly worse than a malformed request. By
+  the time a result is sent the eUICC has executed the operation and advanced
+  its counter; refusing to decode cannot undo that and only prevents the eIM
+  from reaching a terminal state, which in practice wedged one operation and put
+  the IPAe into a retry loop against a card that had already answered.
+  Correlation is unambiguous because the eIM matches the result to exactly one
+  outstanding request by `eimId`, `counterValue`, and `eimTransactionId`, and
+  that request names exactly one operation. The signature is verified before any
+  arm is read, so tolerance here never weakens authentication. Covered by
+  `TestEuiccPackageResultBaseTypeArmDecodes`,
+  `TestParseOperationResultBaseTypeIntegerArm`, and
+  `TestDefaultHandlerResolvesAndTerminatesBaseTypeResultArm`.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

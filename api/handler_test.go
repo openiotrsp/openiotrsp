@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	testEID   = "89049032000000000000000000000001"
-	testICCID = "89101122334455"
+	testEID = "89049032000000000000000000000001"
+	// SGP.22 Iccid is OCTET STRING (SIZE(10)).
+	testICCID = "89101122334455667788"
 )
 
 var nextMockNotificationSequence atomic.Int64
@@ -50,9 +51,13 @@ func TestProfileDownloadEndpointCompletesThroughMockIPA(t *testing.T) {
 
 	runMockIPAOnce(t, server)
 
+	// The activation code's matching ID, TS48V1-B-UNIQUE, is not an ICCID, and
+	// SGP.22 section 3.1.3 installs a downloaded profile disabled. Nothing about
+	// the installed profile is knowable from the trigger, so the inventory stays
+	// empty until the first listProfileInfo reports the eUICC's own view.
 	status := getJSON[statusResponse](t, server, "/v1/devices/"+testEID+"/status", http.StatusOK)
-	if len(status.Profiles) != 1 || status.Profiles[0].ICCID != "TS48V1-B-UNIQUE" || !status.Profiles[0].IsEnabled {
-		t.Fatalf("status = %#v, want enabled downloaded profile", status)
+	if len(status.Profiles) != 0 {
+		t.Fatalf("status = %#v, want no profile synthesised from the activation code", status)
 	}
 	notifications := getJSON[notificationsResponse](t, server, "/v1/devices/"+testEID+"/notifications", http.StatusOK)
 	if len(notifications.Notifications) != 1 || notifications.Notifications[0].Kind != "install" || notifications.Notifications[0].PayloadBase64 == "" {
@@ -85,6 +90,34 @@ func TestProfileDownloadRejectsMalformedActivationCode(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("pending = %#v, want nothing queued for a malformed activation code", pending)
+	}
+}
+
+// TestProfileOperationRejectsNonICCIDPathSegment uses the SM-DP+ matching ID an
+// operator aimed a disable at after it had been recorded as a profile: 32 bytes
+// where SGP.22 Iccid is 10. The eUICC can only reject such a PSMO, and it
+// consumes a counter value doing so, so the route refuses it before signing.
+func TestProfileOperationRejectsNonICCIDPathSegment(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+	const matchingID = "ea5e356ce67a71744f8c23097b859d16c398b73c6f010e7ab7e4aea7e3317190"
+
+	for _, route := range []string{"/enable", "/disable", "/fallback"} {
+		postJSON[errorResponse](t, server, "/v1/devices/"+testEID+"/profiles/"+matchingID+route, nil, http.StatusBadRequest)
+	}
+	deleteResponse := doRequest(t, server, http.MethodDelete, "/v1/devices/"+testEID+"/profiles/"+matchingID, nil)
+	if deleteResponse.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE status = %d body = %s, want %d", deleteResponse.Code, deleteResponse.Body.String(), http.StatusBadRequest)
+	}
+
+	pending, err := store.FetchPendingOperations(context.Background(), storage.DefaultTenantID, testEID, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v, want nothing queued for a non-ICCID path segment", pending)
 	}
 }
 

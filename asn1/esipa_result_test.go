@@ -189,6 +189,60 @@ func TestEuiccPackageResultChoiceA0Signed_ProductionSample(t *testing.T) {
 	}
 }
 
+// TestEuiccPackageResultBaseTypeArmDecodes uses the disable result a Kigen eUICC
+// (EID 89044045930000000000002153893210) returned over the ASN.1 binding: the
+// euiccResult SEQUENCE carries the EuiccResultData base type identifier
+// (UNIVERSAL INTEGER, 02 01 02) where OperationDisable defines disableResult
+// [4] (84 01 02). Refusing to decode cannot undo an operation the eUICC has
+// already executed, and this message's only routing key is the eimTransactionId
+// one level above the arm, so the arm is preserved verbatim instead.
+func TestEuiccPackageResultBaseTypeArmDecodes(t *testing.T) {
+	t.Parallel()
+
+	const signature = "1111111111111111111111111111111111111111111111111111111111111111" +
+		"2222222222222222222222222222222222222222222222222222222222222222"
+	der := mustDecodeHex(t, "bf5079bf5176a074302f"+
+		"801065696d2e73796d622d696f742e636f6d"+
+		"810120"+
+		"8210e3d28ea548de60887ba99e0ba0862dfa"+
+		"830132"+
+		"3003020102"+
+		"5f3740"+signature)
+
+	var provide ProvideEimPackageResult
+	if err := Decode(der, &provide); err != nil {
+		t.Fatalf("Decode(ProvideEimPackageResult) error = %v", err)
+	}
+	if len(provide.EID) != 0 {
+		t.Fatalf("EID = %x, want none", provide.EID)
+	}
+	var result EuiccPackageResult
+	if err := result.UnmarshalBERTLV(provide.EimPackageResult.Raw); err != nil {
+		t.Fatalf("UnmarshalBERTLV(EuiccPackageResult) error = %v", err)
+	}
+	if result.Kind != EuiccPackageResultOK || result.Signed == nil {
+		t.Fatalf("result = %#v, want signed OK", result)
+	}
+	data := result.Signed.Data
+	wantTxn := mustDecodeHex(t, "e3d28ea548de60887ba99e0ba0862dfa")
+	if data.EimID != "eim.symb-iot.com" || !bytes.Equal(data.EimTransactionID, wantTxn) {
+		t.Fatalf("eimId = %q, eimTransactionId = %x", data.EimID, data.EimTransactionID)
+	}
+	if data.CounterValue != 32 || data.SeqNumber != 50 {
+		t.Fatalf("counterValue = %d, seqNumber = %d, want 32 and 50", data.CounterValue, data.SeqNumber)
+	}
+	if len(data.Results) != 1 || data.Results[0].Raw == nil {
+		t.Fatalf("results = %#v, want one arm", data.Results)
+	}
+	arm, err := data.Results[0].Raw.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(arm) error = %v", err)
+	}
+	if !bytes.Equal(arm, mustDecodeHex(t, "020102")) {
+		t.Fatalf("arm = %x, want 020102 preserved verbatim", arm)
+	}
+}
+
 func TestEuiccPackageResultChoiceArmsDecodeAndSequenceRoundTrip(t *testing.T) {
 	t.Parallel()
 

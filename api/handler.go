@@ -25,6 +25,8 @@ import (
 
 const (
 	defaultMaxBodyBytes = 1 << 20
+	// iccidLength is the SGP.22 Iccid size: OCTET STRING (SIZE(10)).
+	iccidLength = 10
 )
 
 var errPackageServiceUnavailable = errors.New("api: eUICC package service unavailable")
@@ -1093,13 +1095,17 @@ func parseOID(value string) (stdasn1.ObjectIdentifier, error) {
 	return oid, nil
 }
 
+// parseICCID decodes the ICCID path segment of a profile route. SGP.22 defines
+// Iccid as OCTET STRING (SIZE(10)), so a value of any other length cannot be a
+// profile the eUICC holds and must be refused before a PSMO is signed. The
+// activation-code matching ID is the value this catches in practice: it is only
+// sometimes an ICCID.
 func parseICCID(value string) ([]byte, error) {
-	normalized := strings.TrimSpace(value)
-	bytes, err := hex.DecodeString(normalized)
-	if err != nil || len(bytes) == 0 {
-		return nil, fmt.Errorf("api: ICCID must be non-empty hex")
+	decoded, err := hex.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(decoded) != iccidLength {
+		return nil, fmt.Errorf("api: ICCID must be %d hex-encoded bytes", iccidLength)
 	}
-	return bytes, nil
+	return decoded, nil
 }
 
 func decodeBase64Field(name string, value string) ([]byte, error) {

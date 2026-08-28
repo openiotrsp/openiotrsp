@@ -14,6 +14,10 @@ type roundTripCase struct {
 	value   Marshaler
 	newFunc func() Unmarshaler
 	tagHex  string
+	// anyTag marks a CHOICE that preserves whatever alternative tag it is
+	// given, so a well-formed TLV is never rejected on tag grounds. Only
+	// structurally broken input must fail.
+	anyTag bool
 }
 
 type knownAnswerDERCase struct {
@@ -137,8 +141,9 @@ func TestMalformedInputReturnsError(t *testing.T) {
 			inputs := [][]byte{
 				nil,
 				encoded[:len(encoded)-1],
-				{0x00, 0x00},
-				{0xff, 0x01, 0x00},
+			}
+			if !tc.anyTag {
+				inputs = append(inputs, []byte{0x00, 0x00}, []byte{0xff, 0x01, 0x00})
 			}
 			for _, input := range inputs {
 				assertDecodeErrorNoPanic(t, input, tc.newFunc())
@@ -434,6 +439,7 @@ func roundTripCases() []roundTripCase {
 			value:   &result,
 			newFunc: func() Unmarshaler { return new(EuiccResultData) },
 			tagHex:  "83",
+			anyTag:  true,
 		},
 		{
 			name:    "EuiccPackageResultDataSigned",

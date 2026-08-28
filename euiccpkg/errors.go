@@ -13,6 +13,11 @@ var (
 	ErrTransactionMismatch = errors.New("euiccpkg: result transaction mismatch")
 	// ErrCounterMismatch means the result counter does not match the signed request.
 	ErrCounterMismatch = errors.New("euiccpkg: result counter mismatch")
+	// ErrResultNotFound means a verified eUICC Package Result carries no
+	// EuiccResultData alternative for the operation the request asked for. The
+	// operation still has an answer from the eUICC, so callers record it as a
+	// failure rather than rejecting the message.
+	ErrResultNotFound = errors.New("euiccpkg: no result for the requested operation")
 )
 
 // ResultCode is the domain form of SGP.32 PSMO result INTEGER values.

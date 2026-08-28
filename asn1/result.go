@@ -929,6 +929,10 @@ func (d *EuiccPackageResultDataSigned) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 			out.Results = append(out.Results, result)
 		}
 	case isEuiccResultDataTLV(resultList):
+		// Some eUICCs omit the euiccResult SEQUENCE and emit the single arm
+		// directly. Only a recognised alternative tag is accepted here: the
+		// last child of a result with no arms at all is seqNumber [3], which
+		// would otherwise be mistaken for an enableResult.
 		out.Results = []EuiccResultData{{Raw: cloneTLV(resultList)}}
 	default:
 		return fmt.Errorf("%w: unknown EuiccPackageResultDataSigned results tag %s", errUnexpectedTag, resultList.Tag.String())
@@ -937,7 +941,9 @@ func (d *EuiccPackageResultDataSigned) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	return nil
 }
 
-// EuiccResultData is one SGP.32 EuiccResultData CHOICE value.
+// EuiccResultData is one SGP.32 EuiccResultData CHOICE value. Only the wire
+// bytes are kept: the selected alternative is identified by the correlated
+// request, which names exactly one operation.
 type EuiccResultData struct {
 	Raw *bertlv.TLV
 }
@@ -950,13 +956,15 @@ func (r *EuiccResultData) MarshalBERTLV() (*bertlv.TLV, error) {
 	return cloneTLV(r.Raw), nil
 }
 
-// UnmarshalBERTLV decodes EuiccResultData.
+// UnmarshalBERTLV decodes EuiccResultData. Any tag is preserved, including one
+// that names no known alternative: the eUICC has already executed the operation
+// and advanced its counter by the time a result is sent, so an arm we cannot
+// name must degrade to an unrecognised result rather than to an undecodable
+// EuiccPackageResult that cannot be correlated to an operation at all. Callers
+// resolve the alternative against the request that produced it.
 func (r *EuiccResultData) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if tlv == nil {
 		return errors.New("asn1: missing EuiccResultData")
-	}
-	if !isEuiccResultDataTLV(tlv) {
-		return fmt.Errorf("%w: unknown EuiccResultData tag %s", errUnexpectedTag, tlv.Tag.String())
 	}
 	r.Raw = cloneTLV(tlv)
 	return nil
