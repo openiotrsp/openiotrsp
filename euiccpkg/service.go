@@ -464,19 +464,46 @@ func psmoOperationResult(operation OperationKind, results []protocolasn1.EuiccRe
 		case OperationSetDefaultDPAddress:
 			return setDefaultDPAddressResult(raw)
 		}
-		value, err := integerResult(raw)
-		if err != nil {
-			return nil, err
-		}
-		code := mapOperationResult(operation, value)
-		return &Result{
-			OK:            code == ResultOK,
-			Operation:     operation,
-			ResultCode:    code,
-			RawResultCode: value,
-		}, nil
+		return integerOperationResult(operation, raw)
 	}
-	return nil, fmt.Errorf("euiccpkg: result for operation %s not found", operation)
+	if raw := baseTypeIntegerResult(operation, results); raw != nil {
+		return integerOperationResult(operation, raw)
+	}
+	return nil, fmt.Errorf("%w: %s", ErrResultNotFound, operation)
+}
+
+func integerOperationResult(operation OperationKind, raw *protocolasn1.TLV) (*Result, error) {
+	value, err := integerResult(raw)
+	if err != nil {
+		return nil, err
+	}
+	code := mapOperationResult(operation, value)
+	return &Result{
+		OK:            code == ResultOK,
+		Operation:     operation,
+		ResultCode:    code,
+		RawResultCode: value,
+	}, nil
+}
+
+// baseTypeIntegerResult returns the sole result arm of a package result that
+// carries the EuiccResultData base type identifier (UNIVERSAL INTEGER) instead
+// of the CHOICE alternative tag the operation defines. A single-operation
+// package correlates its result unambiguously, so the arm belongs to operation.
+// Operations whose alternative is a constructed response cannot be recovered
+// this way. See INTERPRETATION_LOG.md, "SGP.32 EuiccResultData Base Type Arm".
+func baseTypeIntegerResult(operation OperationKind, results []protocolasn1.EuiccResultData) *protocolasn1.TLV {
+	switch operation {
+	case OperationListProfileInfo, OperationGetRAT, OperationSetDefaultDPAddress:
+		return nil
+	}
+	if len(results) != 1 || results[0].Raw == nil {
+		return nil
+	}
+	if !results[0].Raw.Tag.Equal(bertlv.Universal.Primitive(2)) {
+		return nil
+	}
+	return results[0].Raw
 }
 
 func listProfileInfoResult(raw *protocolasn1.TLV) (*Result, error) {
@@ -529,7 +556,7 @@ func setDefaultDPAddressResult(raw *protocolasn1.TLV) (*Result, error) {
 func ecoOperationResult(operation OperationKind, results []protocolasn1.EuiccResultData) (*Result, error) {
 	raw := resultDataByTag(results, operation.resultTag())
 	if raw == nil {
-		return nil, fmt.Errorf("euiccpkg: result for operation %s not found", operation)
+		return nil, fmt.Errorf("%w: %s", ErrResultNotFound, operation)
 	}
 	switch operation {
 	case OperationAddEIM:

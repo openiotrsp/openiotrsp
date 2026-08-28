@@ -70,11 +70,17 @@ The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the ASN.1 
 
 A trigger result reports `profileDownloadError` with a `profileDownloadErrorReason`. SGP.32 v1.3 names only `ecallActive(104)` and `undefinedError(127)`; `asn1.ProfileDownloadErrorReason.String` renders any other value cards emit as the bare integer rather than inventing a name.
 
+A successful download records the operation result and the install notification, and nothing else. No profile row is derived from the trigger: an activation code carries a matching ID, which is only sometimes an ICCID, and SGP.22 §3.1.3 installs a downloaded profile in the Disabled state. The profile inventory is populated from the eUICC's own `ProfileInfoListResponse` — `POST /v1/devices/{eid}/profiles/list`, or the `profileInfoList` object of an `IpaEuiccDataResponse` — which carries the real ICCID, `profileState`, and fallback attribute. Until one of those runs, `GET /v1/devices/{eid}/status` lists no profile for a freshly downloaded one. Consistently with that, the ICCID path segment of the profile routes must be 10 hex-encoded bytes (SGP.22 `Iccid`), so a matching ID cannot be mistaken for a profile and signed into a PSMO.
+
 ### eUICC Package Result signatures (`euiccSignEPR` / `euiccSignEPE`)
 
 Strict verify accepts both ASN.1 DER ECDSA and BSI TR-03111 fixed-width `r||s` (64 octets on P-256) under tag `5F37`. DER is tried first; TR-03111 is the common encoding from production eUICC silicon.
 
 Per SGP.32, the signed input is the wire `euiccPackageResultDataSigned` (or error) SEQUENCE concatenated with `associationToken` (`[4] INTEGER`). When no token is configured for the Associated eIM, the token value is zero (`84 01 00`). AUTOMATIC TAGS BF51 CHOICE `[0]`/`[1]` do not change the covered bytes: still the inner data SEQUENCE, not `BF51`/`A0`/`5F37`.
+
+### Unrecognised `EuiccResultData` alternatives
+
+`asn1.EuiccResultData` keeps whatever alternative tag it is given. A result the eIM cannot name never fails the enclosing `EuiccPackageResult`: by the time a result is sent the eUICC has executed the operation and advanced its counter, and refusing to decode only prevents the eIM from learning what happened and from routing a message whose `eimTransactionId` may be its sole key. `euiccpkg.ParseOperationResult` and `VerifyPackageResult` map one deviation seen in the field — the base type identifier `02 01 02` where a single-operation package expects, say, `disableResult` `84 01 02` — onto the operation the request names. Anything still unmatched returns `euiccpkg.ErrResultNotFound`, which the ESipa handler records as a failed operation with the raw result payload, rather than answering `400` and leaving the IPAe to retry a completed operation.
 
 The adoption log line is:
 

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/damonto/euicc-go/bertlv"
+	"github.com/damonto/euicc-go/bertlv/primitive"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/pki"
 	"github.com/openiotrsp/openiotrsp/storage"
@@ -1028,6 +1029,42 @@ func TestParseOperationResultListProfileInfoChoiceA0(t *testing.T) {
 	}
 	if result.Profiles[0].ICCID != "8910" || !result.Profiles[0].IsEnabled {
 		t.Fatalf("profile = %#v, want ICCID 8910 enabled", result.Profiles[0])
+	}
+}
+
+// TestParseOperationResultBaseTypeIntegerArm covers the disable result a Kigen
+// eUICC returned for a single-operation package: the arm carries the
+// EuiccResultData base type identifier (UNIVERSAL INTEGER) instead of
+// disableResult [4]. The request names exactly one operation, so the code is
+// read against it.
+func TestParseOperationResultBaseTypeIntegerArm(t *testing.T) {
+	t.Parallel()
+
+	arm, err := bertlv.MarshalValue(bertlv.Universal.Primitive(2), primitive.MarshalInt(int64(2)))
+	if err != nil {
+		t.Fatalf("MarshalValue(INTEGER) error = %v", err)
+	}
+	result, err := ParseOperationResult(Disable([]byte{0x89, 0x10}), []protocolasn1.EuiccResultData{{Raw: arm}})
+	if err != nil {
+		t.Fatalf("ParseOperationResult(base type arm) error = %v", err)
+	}
+	if result.OK || result.Operation != OperationDisable || result.ResultCode != ResultProfileNotInEnabledState {
+		t.Fatalf("result = %#v, want failed disable with profileNotInEnabledState", result)
+	}
+	if result.RawResultCode != 2 {
+		t.Fatalf("raw result code = %d, want 2", result.RawResultCode)
+	}
+}
+
+// TestParseOperationResultUnknownArmIsNotFound pins the sentinel callers use to
+// tell "the eUICC answered something we cannot name" apart from "the message is
+// unusable", so an unrecognised arm fails the operation instead of wedging it.
+func TestParseOperationResultUnknownArmIsNotFound(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseOperationResult(Disable([]byte{0x89, 0x10}), []protocolasn1.EuiccResultData{integerResultData(t, 7, 0)})
+	if !errors.Is(err, ErrResultNotFound) {
+		t.Fatalf("ParseOperationResult(foreign arm) error = %v, want ErrResultNotFound", err)
 	}
 }
 

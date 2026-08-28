@@ -26,7 +26,6 @@ import (
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
 	"github.com/openiotrsp/openiotrsp/ipadata"
-	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/relay"
 	"github.com/openiotrsp/openiotrsp/storage"
 )
@@ -783,6 +782,12 @@ func verifiedOperationResult(
 		EUICCPublicKey:   publicKey,
 		AssociationToken: token,
 	})
+	if errors.Is(err, euiccpkg.ErrResultNotFound) {
+		// Signature and transaction already matched. An arm we cannot name
+		// fails the operation instead of wedging it: the eUICC has executed
+		// and advanced its counter, and the raw result is recorded either way.
+		return nil, storage.OperationFailed, nil
+	}
 	if err != nil {
 		return nil, storage.OperationFailed, err
 	}
@@ -1035,7 +1040,7 @@ func recordProfileDownloadTriggerResult(
 	if err := result.UnmarshalBERTLV(tlv); err != nil {
 		return nil, err
 	}
-	operation, trigger, ok, err := pendingProfileDownloadTrigger(ctx, store, tenantID, eid, result.EimTransactionID)
+	operation, ok, err := pendingProfileDownloadTrigger(ctx, store, tenantID, eid, result.EimTransactionID)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,11 +1060,12 @@ func recordProfileDownloadTriggerResult(
 	}); err != nil {
 		return nil, err
 	}
-	if status == storage.OperationDone {
-		if err := recordDownloadedProfileState(ctx, store, tenantID, eid, &trigger); err != nil {
-			return nil, err
-		}
-	}
+	// Profile state is not derived from the trigger. The activation code's
+	// matching ID is only sometimes an ICCID, and SGP.22 section 3.1.3 installs
+	// a downloaded profile disabled, so anything synthesised here would invent a
+	// profile the eUICC does not hold. The first ProfileInfoListResponse (PSMO
+	// listProfileInfo or an IpaEuiccDataResponse refresh) carries the real ICCID
+	// and profileState and populates the inventory.
 	return &protocolasn1.EimAcknowledgements{
 		SequenceNumbers: []protocolasn1.SequenceNumber{protocolasn1.SequenceNumber(operation.SequenceNumber)},
 	}, nil
@@ -1071,10 +1077,10 @@ func pendingProfileDownloadTrigger(
 	tenantID storage.TenantID,
 	eid string,
 	transactionID []byte,
-) (storage.Operation, protocolasn1.ProfileDownloadTriggerRequest, bool, error) {
+) (storage.Operation, bool, error) {
 	operations, err := store.FetchPendingOperations(ctx, tenantID, eid, 100)
 	if err != nil {
-		return storage.Operation{}, protocolasn1.ProfileDownloadTriggerRequest{}, false, err
+		return storage.Operation{}, false, err
 	}
 	for _, operation := range operations {
 		if operation.Kind != storage.OperationProfileDownloadTrigger {
@@ -1082,35 +1088,13 @@ func pendingProfileDownloadTrigger(
 		}
 		var request protocolasn1.ProfileDownloadTriggerRequest
 		if err := protocolasn1.Decode(operation.Payload, &request); err != nil {
-			return storage.Operation{}, protocolasn1.ProfileDownloadTriggerRequest{}, false, err
+			return storage.Operation{}, false, err
 		}
 		if bytes.Equal(request.EimTransactionID, transactionID) {
-			return operation, request, true, nil
+			return operation, true, nil
 		}
 	}
-	return storage.Operation{}, protocolasn1.ProfileDownloadTriggerRequest{}, false, nil
-}
-
-func recordDownloadedProfileState(
-	ctx context.Context,
-	store storage.Store,
-	tenantID storage.TenantID,
-	eid string,
-	trigger *protocolasn1.ProfileDownloadTriggerRequest,
-) error {
-	if trigger == nil || trigger.ProfileDownloadData == nil || trigger.ProfileDownloadData.Kind != protocolasn1.ProfileDownloadActivationCode {
-		return nil
-	}
-	activation, err := profiledownload.ParseActivationCode(trigger.ProfileDownloadData.ActivationCode)
-	if err != nil {
-		return nil
-	}
-	return store.SetProfileState(ctx, tenantID, storage.ProfileState{
-		EID:         eid,
-		ICCID:       activation.ProfileID(),
-		IsEnabled:   true,
-		SMDPAddress: activation.SMDPAddress,
-	})
+	return storage.Operation{}, false, nil
 }
 
 func packageResultAckSequences(result *protocolasn1.EuiccPackageResult) []protocolasn1.SequenceNumber {
@@ -1151,6 +1135,11 @@ func resultStatusForOperation(operation storage.Operation, result *protocolasn1.
 		return storage.OperationFailed, err
 	}
 	parsed, err := euiccpkg.ParseOperationResult(request.EuiccPackageSigned.EuiccPackage, result.Signed.Data.Results)
+	if errors.Is(err, euiccpkg.ErrResultNotFound) {
+		// The eUICC answered and moved its counter; an arm we cannot name is a
+		// failed operation, not a message to reject.
+		return storage.OperationFailed, nil
+	}
 	if err != nil {
 		return storage.OperationFailed, err
 	}
