@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
+	"github.com/openiotrsp/openiotrsp/profiledownload"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
 )
@@ -113,6 +114,81 @@ func TestASN1BindingSection611(t *testing.T) {
 				t.Fatalf("body = %x, want %x", body, want)
 			}
 		})
+	}
+}
+
+// TestDownloadTriggerResultInHandleNotificationEnvelope pins the known answer
+// captured from the first profile download attempt on the Kigen eUICC: the IPAe
+// reported the trigger outcome as a provideEimPackageResult wrapped in a
+// handleNotification envelope, with no eidValue at any depth, so eimTransactionId
+// is the only routing key. The exchange must leave the operation in a terminal
+// state and keep the notification shape on the response.
+func TestDownloadTriggerResultInHandleNotificationEnvelope(t *testing.T) {
+	t.Parallel()
+
+	// BF3D 1D handleNotification / BF50 1A provideEimPackageResult (no
+	// eidValue) / BF54 17 profileDownloadTriggerResult / 82 10
+	// eimTransactionId / 30 03 profileDownloadError 80 01 01 reason 1.
+	const capture = "bf3d1dbf501abf5417821074686e839d9206c11cf9c7a24dc160f33003800101"
+	message, err := hex.DecodeString(capture)
+	if err != nil {
+		t.Fatalf("DecodeString(capture) error = %v", err)
+	}
+	transactionID, err := hex.DecodeString("74686e839d9206c11cf9c7a24dc160f3")
+	if err != nil {
+		t.Fatalf("DecodeString(transactionID) error = %v", err)
+	}
+
+	ctx := context.Background()
+	store := memory.New()
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: plugfestEID}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	trigger, err := profiledownload.NewActivationCodeTrigger("1$tlt.prod.ondemandconnectivity.com$MATCH", transactionID)
+	if err != nil {
+		t.Fatalf("NewActivationCodeTrigger() error = %v", err)
+	}
+	operation, err := profiledownload.EnqueueTrigger(ctx, store, storage.DefaultTenantID, plugfestEID, trigger)
+	if err != nil {
+		t.Fatalf("EnqueueTrigger() error = %v", err)
+	}
+
+	server := httptest.NewServer(NewHandler(store, storage.DefaultTenantID).HTTPHandler())
+	t.Cleanup(server.Close)
+
+	response, err := server.Client().Post(server.URL+GSMAPathASN1, ASN1MediaType, bytes.NewReader(message))
+	if err != nil {
+		t.Fatalf("POST %s error = %v", GSMAPathASN1, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if response.StatusCode != http.StatusNoContent || len(body) != 0 {
+		t.Fatalf("response = %s body %x, want an empty 204 notification response", response.Status, body)
+	}
+
+	result, err := store.GetOperationResult(ctx, storage.DefaultTenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperationResult() error = %v", err)
+	}
+	if result.Status != storage.OperationFailed {
+		t.Fatalf("operation status = %q, want %q", result.Status, storage.OperationFailed)
+	}
+	var recorded protocolasn1.ProfileDownloadTriggerResult
+	if err := protocolasn1.Decode(result.Payload, &recorded); err != nil {
+		t.Fatalf("Decode(recorded result) error = %v", err)
+	}
+	if recorded.Error == nil || recorded.Error.Reason != 1 {
+		t.Fatalf("recorded result = %#v, want profileDownloadError reason 1", recorded)
+	}
+	pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, plugfestEID, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v, want the trigger to have reached a terminal state", pending)
 	}
 }
 

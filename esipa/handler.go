@@ -224,11 +224,13 @@ func shouldRelay(tlv *bertlv.TLV, relayService *relay.Relay) bool {
 }
 
 func isLocalHandleNotification(tlv *bertlv.TLV) bool {
+	if provideResultTLV(tlv) != nil {
+		return true
+	}
 	if tlv == nil || !tlv.Tag.Equal(tagHandleNotify) || len(tlv.Children) != 1 {
 		return false
 	}
-	child := tlv.Children[0]
-	return child.Tag.Equal(tagNotificationList) || child.Tag.Equal(tagProvideResult)
+	return tlv.Children[0].Tag.Equal(tagNotificationList)
 }
 
 func handleRelay(ctx context.Context, request Request, relayService *relay.Relay) (Response, error) {
@@ -320,10 +322,16 @@ func handleGetEimPackage(ctx context.Context, store storage.Store, tenantID stor
 	return responseFromMarshaler(response)
 }
 
+// handleProvideEimPackageResult records one provide result. tlv is either the
+// BF50 itself or the BF3D envelope an IPAe wraps it in.
 func handleProvideEimPackageResult(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool, logger *slog.Logger, requestBytes []byte) (Response, error) {
+	provideTLV := provideResultTLV(tlv)
+	if provideTLV == nil {
+		return Response{}, fmt.Errorf("%w: %s does not carry a provide result", errUnsupportedMessage, firstTLVTagHex(tlv))
+	}
 	var request protocolasn1.ProvideEimPackageResult
-	if err := request.UnmarshalBERTLV(tlv); err != nil {
-		logProvideResultDecodeFailed(logger, requestBytes, tlv, err)
+	if err := request.UnmarshalBERTLV(provideTLV); err != nil {
+		logProvideResultDecodeFailed(logger, requestBytes, provideTLV, err)
 		return Response{}, err
 	}
 	eid, code, err := ResolveProvideResultEID(ctx, store, tenantID, request.EID, request.EimPackageResult.Raw)
@@ -368,8 +376,10 @@ func handleTransferEimPackageResponse(ctx context.Context, store storage.Store, 
 }
 
 func handleNotification(ctx context.Context, store storage.Store, tenantID storage.TenantID, tlv *bertlv.TLV, euiccPublicKey EUICCPublicKeyResolver, allowUnverifiedEUICCPackageResults bool) (Response, error) {
-	if len(tlv.Children) == 1 && tlv.Children[0].Tag.Equal(tagProvideResult) {
-		_, err := handleProvideEimPackageResult(ctx, store, tenantID, tlv.Children[0], euiccPublicKey, allowUnverifiedEUICCPackageResults, nil, nil)
+	if provideResultTLV(tlv) != nil {
+		// A provide result delivered as a notification stays a notification:
+		// the eIM records it and answers with an empty body.
+		_, err := handleProvideEimPackageResult(ctx, store, tenantID, tlv, euiccPublicKey, allowUnverifiedEUICCPackageResults, nil, nil)
 		return Response{}, err
 	}
 	notifications, err := notificationsFromHandleNotification(tlv)

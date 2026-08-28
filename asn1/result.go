@@ -3,6 +3,7 @@ package asn1
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/damonto/euicc-go/bertlv"
 )
@@ -136,6 +137,21 @@ const (
 	// ProfileDownloadErrorUndefined is the generic profile download error.
 	ProfileDownloadErrorUndefined ProfileDownloadErrorReason = 127
 )
+
+// String names the reason so download failures are self-describing in logs.
+// SGP.32 v1.3 names only ecallActive(104) and undefinedError(127) in
+// profileDownloadErrorReason; deployed IPAe implementations do emit other
+// values, and those render as the bare integer rather than an invented name.
+func (r ProfileDownloadErrorReason) String() string {
+	switch r {
+	case ProfileDownloadErrorECallActive:
+		return "ecallActive(104)"
+	case ProfileDownloadErrorUndefined:
+		return "undefinedError(127)"
+	default:
+		return strconv.FormatInt(int64(r), 10)
+	}
+}
 
 // ProfileDownloadError is the profileDownloadError branch of ProfileDownloadTriggerResult.
 type ProfileDownloadError struct {

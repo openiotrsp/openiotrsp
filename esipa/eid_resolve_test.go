@@ -9,6 +9,69 @@ import (
 	"github.com/openiotrsp/openiotrsp/storage"
 )
 
+func TestProvideResultFromMessage(t *testing.T) {
+	t.Parallel()
+
+	eid := testEID(0x41)
+	resultTLV := mustTLV(t, &protocolasn1.ProfileDownloadTriggerResult{
+		EimTransactionID: []byte{0x0a, 0x0b},
+		Error:            &protocolasn1.ProfileDownloadError{Reason: 1},
+	})
+
+	cases := []struct {
+		name    string
+		message *bertlv.TLV
+		wantEID []byte
+		wantOK  bool
+	}{
+		{
+			name:    "bare provide result carries eidValue",
+			message: constructed(tagProvideResult, octetTLV(tagEID, eid), resultTLV),
+			wantEID: eid,
+			wantOK:  true,
+		},
+		{
+			name:    "handleNotification envelope without eidValue",
+			message: constructed(tagHandleNotify, constructed(tagProvideResult, resultTLV)),
+			wantOK:  true,
+		},
+		{
+			name:    "notification list is not a provide result",
+			message: constructed(tagHandleNotify, constructed(tagNotificationList)),
+		},
+		{
+			name:    "getEimPackage is not a provide result",
+			message: constructed(tagGetEimPackage, octetTLV(tagEID, eid)),
+		},
+		{
+			name: "nil message",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotEID, gotResult, ok := ProvideResultFromMessage(tc.message)
+			if ok != tc.wantOK {
+				t.Fatalf("ProvideResultFromMessage() ok = %t, want %t", ok, tc.wantOK)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if !bytes.Equal(gotEID, tc.wantEID) {
+				t.Fatalf("eidValue = %x, want %x", gotEID, tc.wantEID)
+			}
+			if gotResult == nil || !gotResult.Tag.Equal(tagDownloadTrig) {
+				t.Fatalf("result TLV = %#v, want a BF54 profileDownloadTriggerResult", gotResult)
+			}
+			if got := EimTransactionIDFromResultTLV(gotResult); !bytes.Equal(got, []byte{0x0a, 0x0b}) {
+				t.Fatalf("eimTransactionId = %x, want 0a0b", got)
+			}
+		})
+	}
+}
+
 func TestEimTransactionIDFromResultTLVProfileDownloadTrigger(t *testing.T) {
 	t.Parallel()
 

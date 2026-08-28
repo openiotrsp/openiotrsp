@@ -37,6 +37,17 @@ The response headers must include `X-Admin-Protocol: gsma/rsp/v2.1.0` and `Conte
 
 A `handleNotificationEsipa` request answers `204` with an empty body and no `Content-Type`, per SGP.32 §6.1.1.
 
+`HandleNotificationEsipa` also has a `provideEimPackageResult` arm, and IPAe implementations use it: a profile download trigger result commonly arrives as `BF3D(BF50(BF54))` while eUICC Package Results arrive as a bare `BF50`. Both are recorded against the same operation, and the notification form keeps the `204` response. A host that resolves the routing EID itself — a multi-tenant eIM must, before it can pick the tenant — reaches the payload with `esipa.ProvideResultFromMessage`, which unwraps either shape, and passes the result to `esipa.ResolveProvideResultEID` without reimplementing the envelope rule:
+
+```go
+if eidValue, result, ok := esipa.ProvideResultFromMessage(message.Raw); ok {
+	eid, errCode, err := esipa.ResolveProvideResultEID(ctx, store, tenantID, eidValue, result)
+	// eid selects the tenant-scoped device; forward the original bytes unchanged.
+}
+```
+
+An IPAe may omit `eidValue` at every depth, in which case `eimTransactionId` is the only routing key and `ResolveProvideResultEID` recovers the EID from the pending operation that carries it.
+
 ### BF52 vs profile inventory
 
 `ipadata.DefaultTagList` (BF52 `IpaEuiccDataRequest`) requests eUICCInfo, notifications, EUM/eUICC certificates, and IPA capabilities. Profile inventory on production IPA/silicon is delivered as a signed `euiccPackageRequest` with `listProfileInfo` PSMO (BF51), not BF52. Hosts must not treat BF52 as a substitute for `listProfileInfo`. Presented EUM/eUICC certificates in `storage.EUICCState` remain observational unless the host validates them against an explicit CI root store before using them as EPR trust material.
@@ -52,6 +63,12 @@ SGP.32 allows omitting `eidValue` on `ProvideEimPackageResult` (BF50). When GSMA
 Decode accepts AUTOMATIC TAGS CHOICE `[0]` under BF52 (same class as BF51 / BF2D) and both A6 Certificate shapes: one nested SEQUENCE, or IMPLICIT TBS / AlgorithmIdentifier / signature siblings. EID recovery walks those data objects after CHOICE unwrap and does not require every `IpaEuiccData` field to decode successfully.
 
 The same recovery runs in `provideTLVFromGSMA` / `ServeGSMAJSON` (and the ASN.1 provide path), so a consumer does not need its own `eimTransactionId`-to-EID adapter in front of the handler. Step 3 covers a bare BF51 `euiccPackageResult` that carries neither an embedded EID nor an eUICC certificate, which is what Kigen's IPA sends. It resolves only while the correlated operation is still outstanding: an IPA that omits `eidValue` on a redelivery after the operation completed cannot be associated to a device, so IPAs should still send `eidValue` whenever they have it.
+
+### Profile download triggers
+
+`profiledownload.NewActivationCodeTrigger` validates the activation code against the SGP.22 §4.1 structure — format version `1` and a non-empty SM-DP+ address — and strips a QR `LPA:` prefix, because the `activationCode` field carries the activation code itself. Every caller is covered, including `POST /v1/profile-downloads`, which answers `400` instead of signing a trigger the eUICC will reject after delivery.
+
+A trigger result reports `profileDownloadError` with a `profileDownloadErrorReason`. SGP.32 v1.3 names only `ecallActive(104)` and `undefinedError(127)`; `asn1.ProfileDownloadErrorReason.String` renders any other value cards emit as the bare integer rather than inventing a name.
 
 ### eUICC Package Result signatures (`euiccSignEPR` / `euiccSignEPE`)
 

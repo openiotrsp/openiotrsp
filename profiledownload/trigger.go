@@ -17,13 +17,24 @@ const activationCodeMaxLen = 255
 
 // NewActivationCodeTrigger builds a ProfileDownloadTriggerRequest containing an
 // SGP.22 activation code.
+//
+// The code is validated against the SGP.22 section 4.1 structure here, where the
+// trigger is built, because a malformed code is otherwise signed, persisted, and
+// delivered over the air only to be rejected by the eUICC. A QR "LPA:" prefix is
+// accepted and stripped: the activationCode field carries the activation code
+// itself, not the QR payload.
 func NewActivationCodeTrigger(activationCode string, transactionID []byte) (*protocolasn1.ProfileDownloadTriggerRequest, error) {
-	if len(activationCode) > activationCodeMaxLen {
-		return nil, fmt.Errorf("profiledownload: activation code is %d bytes, maximum is %d", len(activationCode), activationCodeMaxLen)
+	parsed, err := ParseActivationCode(activationCode)
+	if err != nil {
+		return nil, err
+	}
+	code := parsed.String()
+	if len(code) > activationCodeMaxLen {
+		return nil, fmt.Errorf("profiledownload: activation code is %d bytes, maximum is %d", len(code), activationCodeMaxLen)
 	}
 	return trigger(&protocolasn1.ProfileDownloadData{
 		Kind:           protocolasn1.ProfileDownloadActivationCode,
-		ActivationCode: activationCode,
+		ActivationCode: code,
 	}, transactionID), nil
 }
 

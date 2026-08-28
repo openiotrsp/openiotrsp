@@ -9,6 +9,54 @@ import (
 	"github.com/openiotrsp/openiotrsp/storage"
 )
 
+// ProvideResultFromMessage returns the eidValue and the EimPackageResult payload
+// carried by an ESipa IPA-to-eIM message that conveys a Provide eIM Package
+// Result, unwrapping the HandleNotificationEsipa envelope (BF3D) when one is
+// present. Both shapes are legal: EsipaMessageFromIpaToEim has a
+// provideEimPackageResult [80] arm, and HandleNotificationEsipa carries the same
+// ProvideEimPackageResult as its own [80] arm. Deployed IPAe implementations use
+// both, reporting eUICC Package Results as a bare BF50 and profile download
+// trigger results as BF3D(BF50). ok is false for messages that do not carry a
+// provide result.
+//
+// A multi-tenant caller uses it to reach ResolveProvideResultEID, which needs
+// the inner result TLV, without having to know the envelope rule:
+//
+//	request, err := esipa.DecodeRequest(payload)
+//	if eidValue, result, ok := esipa.ProvideResultFromMessage(request.Message.Raw); ok {
+//		eid, errCode, err := esipa.ResolveProvideResultEID(ctx, store, tenantID, eidValue, result)
+//	}
+func ProvideResultFromMessage(msg *bertlv.TLV) (explicitEID []byte, resultTLV *bertlv.TLV, ok bool) {
+	provideTLV := provideResultTLV(msg)
+	if provideTLV == nil {
+		return nil, nil, false
+	}
+	var request protocolasn1.ProvideEimPackageResult
+	if err := request.UnmarshalBERTLV(provideTLV); err != nil {
+		return nil, nil, false
+	}
+	return request.EID, request.EimPackageResult.Raw, true
+}
+
+// provideResultTLV returns the BF50 ProvideEimPackageResult an ESipa message
+// carries, whether directly or inside a BF3D handleNotification envelope. It is
+// the single place that knows the envelope rule.
+func provideResultTLV(msg *bertlv.TLV) *bertlv.TLV {
+	if msg == nil {
+		return nil
+	}
+	if msg.Tag.Equal(tagHandleNotify) {
+		if len(msg.Children) != 1 {
+			return nil
+		}
+		msg = msg.Children[0]
+	}
+	if msg.Tag.Equal(tagProvideResult) {
+		return msg
+	}
+	return nil
+}
+
 // ResolveProvideResultEID prefers an explicit Provide EID, then recovers from the
 // result payload (BF52 EID / eUICC certificate), then from eimTransactionId
 // against pending operation payloads when EID was omitted.

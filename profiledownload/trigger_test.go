@@ -71,6 +71,46 @@ func TestTriggerConstructionRoundTrips(t *testing.T) {
 	}
 }
 
+// TestNewActivationCodeTriggerValidatesStructure covers the SGP.22 section 4.1
+// structure check. The missing-format-version case is the one a real card
+// rejected 2.2 seconds after delivery, with no ES9+ attempt.
+func TestNewActivationCodeTriggerValidatesStructure(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		code    string
+		wantAC  string
+		wantErr bool
+	}{
+		{name: "activation code", code: "1$smdp$MATCH", wantAC: "1$smdp$MATCH"},
+		{name: "QR prefix is stripped", code: "LPA:1$smdp$MATCH", wantAC: "1$smdp$MATCH"},
+		{name: "missing format version", code: "$smdp$MATCH", wantErr: true},
+		{name: "unsupported format version", code: "2$smdp$MATCH", wantErr: true},
+		{name: "missing SM-DP+ address", code: "1$$MATCH", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			trigger, err := NewActivationCodeTrigger(tc.code, []byte{0x01})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("NewActivationCodeTrigger(%q) error = nil, want a validation error", tc.code)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewActivationCodeTrigger(%q) error = %v", tc.code, err)
+			}
+			if got := trigger.ProfileDownloadData.ActivationCode; got != tc.wantAC {
+				t.Fatalf("activation code = %q, want %q", got, tc.wantAC)
+			}
+		})
+	}
+}
+
 func TestEnqueueTrigger(t *testing.T) {
 	t.Parallel()
 
