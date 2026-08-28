@@ -32,12 +32,15 @@ func ParseActivationCode(value string) (ActivationCode, error) {
 	return code, nil
 }
 
+// String returns the SGP.22 section 4.1 activation code without the QR "LPA:"
+// prefix, which is the form the ESipa activationCode field carries.
+func (c ActivationCode) String() string {
+	return strings.TrimPrefix(c.Raw, "LPA:")
+}
+
 // LPAString returns the activation code form expected by euicc-go's LPA package.
 func (c ActivationCode) LPAString() string {
-	if strings.HasPrefix(c.Raw, "LPA:") {
-		return c.Raw
-	}
-	return "LPA:" + c.Raw
+	return "LPA:" + c.String()
 }
 
 // ProfileID returns a stable local identifier for persisted demo state.

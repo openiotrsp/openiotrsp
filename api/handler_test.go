@@ -64,6 +64,30 @@ func TestProfileDownloadEndpointCompletesThroughMockIPA(t *testing.T) {
 	}
 }
 
+// TestProfileDownloadRejectsMalformedActivationCode uses the code that reached a
+// real eUICC before the trigger builder validated it: the SGP.22 section 4.1
+// format version is missing, so the card rejected the download with no ES9+
+// attempt. The eIM must refuse it before anything is signed or queued.
+func TestProfileDownloadRejectsMalformedActivationCode(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+
+	postJSON[errorResponse](t, server, "/v1/profile-downloads", map[string]any{
+		"eid":            testEID,
+		"activationCode": "$tlt.prod.ondemandconnectivity.com$EA5E356CE67A71744F8C23097B859D16",
+	}, http.StatusBadRequest)
+
+	pending, err := store.FetchPendingOperations(context.Background(), storage.DefaultTenantID, testEID, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending = %#v, want nothing queued for a malformed activation code", pending)
+	}
+}
+
 func TestEUICCDataEndpointCompletesThroughMockIPA(t *testing.T) {
 	t.Parallel()
 
