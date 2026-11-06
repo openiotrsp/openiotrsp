@@ -1174,6 +1174,10 @@ func TestProfileDownloadTriggerFailedInstallRecordsFailed(t *testing.T) {
 	}
 }
 
+// TestProvideEimPackageResult_VendorUnsignedErrorHandler exercises the test-only
+// unverified handler path, where unsigned EuiccPackageResult payloads may still be
+// recorded. Production handlers with eUICC verification enabled reject these
+// (TestUnsignedEuiccPackageErrorRejectedWithVerifiedResults).
 func TestProvideEimPackageResult_VendorUnsignedErrorHandler(t *testing.T) {
 	t.Parallel()
 
@@ -1236,6 +1240,80 @@ func TestProvideEimPackageResult_VendorUnsignedErrorHandler(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("pending = %#v, want queue unblocked", pending)
+	}
+}
+
+func TestUnsignedEuiccPackageErrorRejectedWithVerifiedResults(t *testing.T) {
+	t.Parallel()
+
+	material, err := pki.LoadSGP26VariantONISTMaterial("")
+	if err != nil {
+		t.Fatalf("LoadSGP26VariantONISTMaterial() error = %v", err)
+	}
+	resolver, err := NewStaticEUICCCertificateResolver(
+		material.CICertificate,
+		material.EUMCertificate,
+		material.EUICCCertificate,
+		pki.WithCurrentTime(time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)),
+	)
+	if err != nil {
+		t.Fatalf("NewStaticEUICCCertificateResolver() error = %v", err)
+	}
+
+	ctx := context.Background()
+	store := memory.New()
+	eid := testEID(0x71)
+	eidKey := hex.EncodeToString(eid)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	request := samplePSMOEuiccPackageRequest(eid, protocolasn1.PsmoEnable, 3)
+	const eimID = "testeim1"
+	request.EuiccPackageSigned.EimID = eimID
+	txn := []byte{0xab, 0xcd}
+	request.EuiccPackageSigned.EimTransactionID = txn
+	if _, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eidKey,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: encode(t, request),
+	}); err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+
+	code := protocolasn1.EuiccPackageUnsignedErrorCode(127)
+	unsigned := &protocolasn1.EuiccPackageResult{
+		Kind: protocolasn1.EuiccPackageResultErrorUnsigned,
+		ErrorUnsigned: &protocolasn1.EuiccPackageErrorUnsigned{
+			EimID:            eimID,
+			EimTransactionID: txn,
+			ErrorCode:        &code,
+		},
+	}
+	unsignedTLV, err := unsigned.MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("EuiccPackageResult MarshalBERTLV() error = %v", err)
+	}
+
+	handler := NewHandler(store, storage.DefaultTenantID)
+	handler.EUICCPublicKey = resolver
+
+	_, err = handler.handle(ctx, envelopeRequest(t,
+		&protocolasn1.ProvideEimPackageResult{
+			EID: eid,
+			EimPackageResult: protocolasn1.EimPackageResult{
+				Raw: unsignedTLV,
+			},
+		},
+	))
+	if !errors.Is(err, errUnsignedEuiccPackageErrorRejected) {
+		t.Fatalf("handle(unsigned error) error = %v, want %v", err, errUnsignedEuiccPackageErrorRejected)
+	}
+	pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eidKey, 10)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	if len(pending) != 1 || pending[0].Status != storage.OperationPending {
+		t.Fatalf("pending after rejection = %#v, want one pending operation", pending)
 	}
 }
 

@@ -313,6 +313,14 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 	if !result.OK {
 		status = storage.OperationFailed
 	}
+	alreadyCompleted := false
+	if input.OperationID != 0 {
+		operation, err := s.Store.GetOperation(ctx, input.Request.TenantID, input.OperationID)
+		if err != nil {
+			return nil, err
+		}
+		alreadyCompleted = operation.Status == storage.OperationDone
+	}
 	if input.OperationID != 0 || input.SequenceNumber != 0 {
 		if err := s.Store.RecordEUICCPackageResult(ctx, input.Request.TenantID, storage.EUICCPackageResult{
 			EID:            input.Request.EID,
@@ -325,7 +333,7 @@ func (s *Service) VerifyAndApplyResult(ctx context.Context, input ResultInput) (
 		}
 	}
 
-	if result.OK {
+	if result.OK && !alreadyCompleted {
 		if err := ApplyPackageResultState(ctx, s.Store, input.Request.TenantID, input.Request.EID, input.Request.Package, result); err != nil {
 			return nil, err
 		}
