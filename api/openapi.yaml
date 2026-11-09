@@ -154,6 +154,12 @@ paths:
       description: Requests the eUICC profile inventory. A successful result refreshes the eIM persisted profile view.
       parameters:
         - $ref: "#/components/parameters/EID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListProfileInfoRequest"
       responses:
         "202":
           description: Operation queued.
@@ -553,6 +559,18 @@ components:
           type: boolean
           default: false
           description: Sets the SGP.32 PSMO enable rollback flag for this operation.
+      additionalProperties: false
+    ListProfileInfoRequest:
+      type: object
+      description: Optional ProfileInfoListRequest.tagList override. When omitted, the SGP.32 section 5.9.14 default tag list is used.
+      properties:
+        tagListHex:
+          type: string
+          description: Concatenated BER tag bytes as hex. Official default is 5a4f9f709192959f7b9f269f67; omit the body to use it.
+          example: 5a9f7095999f269f67909192b7
+        tagListBase64:
+          type: string
+          description: Concatenated BER tag bytes as base64.
       additionalProperties: false
     Operation:
       type: object

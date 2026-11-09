@@ -142,6 +142,11 @@ type setDefaultDPAddressRequest struct {
 	DefaultDPAddress string `json:"defaultDpAddress"`
 }
 
+type listProfileInfoRequest struct {
+	TagListHex    string `json:"tagListHex,omitempty"`
+	TagListBase64 string `json:"tagListBase64,omitempty"`
+}
+
 type euiccDataFetchRequest struct {
 	TagListHex                  string `json:"tagListHex,omitempty"`
 	TagListBase64               string `json:"tagListBase64,omitempty"`
@@ -285,8 +290,17 @@ func (h *Handler) deleteProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listProfileInfo(w http.ResponseWriter, r *http.Request) {
+	var request listProfileInfoRequest
+	if !decodeOptionalJSON(w, r, h.maxBodyBytes(), &request) {
+		return
+	}
+	tagList, err := parseOptionalTagList(request.TagListHex, request.TagListBase64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	h.enqueueDeviceOperation(w, r, func(*euiccpkg.Service) (protocolasn1.EuiccPackage, error) {
-		return euiccpkg.ListProfileInfo(), nil
+		return euiccpkg.ListProfileInfoWithTagList(tagList), nil
 	})
 }
 
@@ -925,23 +939,27 @@ func (r eimConfigRequest) config(service *euiccpkg.Service, pathEIMID string) (*
 	return config, nil
 }
 
-func (r euiccDataFetchRequest) input() (ipadata.RequestInput, error) {
-	if strings.TrimSpace(r.TagListHex) != "" && strings.TrimSpace(r.TagListBase64) != "" {
-		return ipadata.RequestInput{}, errors.New("api: provide either tagListHex or tagListBase64, not both")
+func parseOptionalTagList(tagListHex, tagListBase64 string) ([]byte, error) {
+	if strings.TrimSpace(tagListHex) != "" && strings.TrimSpace(tagListBase64) != "" {
+		return nil, errors.New("api: provide either tagListHex or tagListBase64, not both")
 	}
-	var tagList []byte
-	var err error
-	if strings.TrimSpace(r.TagListHex) != "" {
-		tagList, err = hex.DecodeString(strings.TrimSpace(r.TagListHex))
+	if strings.TrimSpace(tagListHex) != "" {
+		tagList, err := hex.DecodeString(strings.TrimSpace(tagListHex))
 		if err != nil || len(tagList) == 0 {
-			return ipadata.RequestInput{}, errors.New("api: tagListHex must be non-empty hex")
+			return nil, errors.New("api: tagListHex must be non-empty hex")
 		}
+		return tagList, nil
 	}
-	if strings.TrimSpace(r.TagListBase64) != "" {
-		tagList, err = decodeBase64Field("tagListBase64", r.TagListBase64)
-		if err != nil {
-			return ipadata.RequestInput{}, err
-		}
+	if strings.TrimSpace(tagListBase64) != "" {
+		return decodeBase64Field("tagListBase64", tagListBase64)
+	}
+	return nil, nil
+}
+
+func (r euiccDataFetchRequest) input() (ipadata.RequestInput, error) {
+	tagList, err := parseOptionalTagList(r.TagListHex, r.TagListBase64)
+	if err != nil {
+		return ipadata.RequestInput{}, err
 	}
 	var cipk []byte
 	if strings.TrimSpace(r.EUICCCIPKIdentifierBase64) != "" {
