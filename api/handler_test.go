@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/esipa"
 	"github.com/openiotrsp/openiotrsp/euiccpkg"
@@ -267,6 +268,33 @@ func TestListProfileInfoEnqueuesEuiccPackage(t *testing.T) {
 	psmos := request.EuiccPackageSigned.EuiccPackage.PSMOs
 	if len(psmos) != 1 || psmos[0].Operation != protocolasn1.PsmoListProfileInfo {
 		t.Fatalf("queued PSMOs = %#v, want one listProfileInfo operation", psmos)
+	}
+}
+
+func TestListProfileInfoCustomTagList(t *testing.T) {
+	t.Parallel()
+
+	store := memory.New()
+	server := newTestServer(t, store, DefaultTenantResolver{})
+	postJSON[enqueueResponse](t, server, "/v1/devices/"+testEID+"/profiles/list", map[string]any{
+		"tagListHex": "5a9f709f26",
+	}, http.StatusAccepted)
+
+	pending, err := store.FetchPendingOperations(context.Background(), storage.DefaultTenantID, testEID, 1)
+	if err != nil {
+		t.Fatalf("FetchPendingOperations() error = %v", err)
+	}
+	var request protocolasn1.EuiccPackageRequest
+	if err := protocolasn1.Decode(pending[0].Payload, &request); err != nil {
+		t.Fatalf("Decode(EuiccPackageRequest) error = %v", err)
+	}
+	tagListTLV := request.EuiccPackageSigned.EuiccPackage.PSMOs[0].ProfileInfoListRequest.First(bertlv.Application.Primitive(28))
+	if tagListTLV == nil {
+		t.Fatal("ProfileInfoListRequest missing tagList")
+	}
+	want := []byte{0x5a, 0x9f, 0x70, 0x9f, 0x26}
+	if !bytes.Equal(tagListTLV.Value, want) {
+		t.Fatalf("tagList = %x, want %x", tagListTLV.Value, want)
 	}
 }
 

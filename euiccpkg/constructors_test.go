@@ -11,11 +11,36 @@ import (
 func TestDefaultProfileInfoListTagList(t *testing.T) {
 	t.Parallel()
 
-	want := []byte{
-		0x5a, 0x4f, 0x9f, 0x70, 0x91, 0x92, 0x95, 0x9f, 0x7b, 0x9f, 0x26, 0x9f, 0x67,
+	if !bytes.Equal(DefaultProfileInfoListTagList, SGP32ProfileInfoListTagList) {
+		t.Fatalf("DefaultProfileInfoListTagList = %x, want %x", DefaultProfileInfoListTagList, SGP32ProfileInfoListTagList)
 	}
-	if !bytes.Equal(DefaultProfileInfoListTagList, want) {
-		t.Fatalf("DefaultProfileInfoListTagList = %x, want %x", DefaultProfileInfoListTagList, want)
+}
+
+func TestListProfileInfoWithAlternativeTagList(t *testing.T) {
+	t.Parallel()
+
+	pkg := ListProfileInfoWithTagList(AlternativeProfileInfoListTagList)
+	tagListTLV := pkg.PSMOs[0].ProfileInfoListRequest.First(bertlv.Application.Primitive(28))
+	if tagListTLV == nil {
+		t.Fatal("ProfileInfoListRequest missing tagList")
+	}
+	if !bytes.Equal(tagListTLV.Value, AlternativeProfileInfoListTagList) {
+		t.Fatalf("tagList = %x, want %x", tagListTLV.Value, AlternativeProfileInfoListTagList)
+	}
+}
+
+func TestListProfileInfoWithTagList(t *testing.T) {
+	t.Parallel()
+
+	custom := []byte{0x5a, 0x9f, 0x70, 0x9f, 0x26}
+	pkg := ListProfileInfoWithTagList(custom)
+	request := pkg.PSMOs[0].ProfileInfoListRequest
+	tagListTLV := request.First(bertlv.Application.Primitive(28))
+	if tagListTLV == nil {
+		t.Fatal("ProfileInfoListRequest missing tagList (5C)")
+	}
+	if !bytes.Equal(tagListTLV.Value, custom) {
+		t.Fatalf("tagList = %x, want %x", tagListTLV.Value, custom)
 	}
 }
 

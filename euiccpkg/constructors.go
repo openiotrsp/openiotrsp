@@ -40,20 +40,35 @@ func Delete(iccid []byte) protocolasn1.EuiccPackage {
 	})
 }
 
-// DefaultProfileInfoListTagList is the ProfileInfoListRequest.tagList used when the
-// caller does not supply search criteria. Tags follow SGP.32 v1.3 section 5.9.14
-// defaults: ICCID (5A), ISD-P AID (4F), profileState (9F70), serviceProviderName
-// (91), profileName (92), profileClass (95), ecallIndication (9F7B),
-// fallbackAttribute (9F26), and fallbackAllowed (9F67).
-var DefaultProfileInfoListTagList = []byte{
+// SGP32ProfileInfoListTagList is the ProfileInfoListRequest.tagList from SGP.32
+// v1.3 section 5.9.14: 5A 4F 9F70 91 92 95 9F7B 9F26 9F67.
+var SGP32ProfileInfoListTagList = []byte{
 	0x5a, 0x4f, 0x9f, 0x70, 0x91, 0x92, 0x95, 0x9f, 0x7b, 0x9f, 0x26, 0x9f, 0x67,
 }
 
-// ListProfileInfo builds a EuiccPackage containing one PSMO listProfileInfo operation.
+// DefaultProfileInfoListTagList is the ProfileInfoListRequest.tagList used when the
+// caller does not supply search criteria. It matches SGP32ProfileInfoListTagList.
+var DefaultProfileInfoListTagList = SGP32ProfileInfoListTagList
+
+// AlternativeProfileInfoListTagList is an optional override tag list hosts may pass
+// via API tagListHex when the SGP.32 default is not desired:
+// 5A 9F70 95 99 9F26 9F67 90 91 92 B7.
+var AlternativeProfileInfoListTagList = []byte{
+	0x5a, 0x9f, 0x70, 0x95, 0x99, 0x9f, 0x26, 0x9f, 0x67, 0x90, 0x91, 0x92, 0xb7,
+}
+
+// ListProfileInfo builds a EuiccPackage containing one PSMO listProfileInfo operation
+// with DefaultProfileInfoListTagList.
 func ListProfileInfo() protocolasn1.EuiccPackage {
+	return ListProfileInfoWithTagList(nil)
+}
+
+// ListProfileInfoWithTagList builds a EuiccPackage containing one PSMO listProfileInfo
+// operation. When tagList is nil or empty, DefaultProfileInfoListTagList is used.
+func ListProfileInfoWithTagList(tagList []byte) protocolasn1.EuiccPackage {
 	return psmoPackage(protocolasn1.Psmo{
 		Operation:              protocolasn1.PsmoListProfileInfo,
-		ProfileInfoListRequest: profileInfoListRequest(),
+		ProfileInfoListRequest: profileInfoListRequest(tagList),
 	})
 }
 
@@ -218,9 +233,12 @@ func ecoPackage(eco protocolasn1.Eco) protocolasn1.EuiccPackage {
 	}
 }
 
-func profileInfoListRequest() *bertlv.TLV {
+func profileInfoListRequest(tagList []byte) *bertlv.TLV {
+	if len(tagList) == 0 {
+		tagList = DefaultProfileInfoListTagList
+	}
 	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(45),
-		bertlv.NewValue(bertlv.Application.Primitive(28), cloneBytes(DefaultProfileInfoListTagList)),
+		bertlv.NewValue(bertlv.Application.Primitive(28), cloneBytes(tagList)),
 	)
 }
 
