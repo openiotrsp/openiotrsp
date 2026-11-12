@@ -1479,7 +1479,9 @@ type ListEimResult struct {
 	Error     *ListEimError
 }
 
-// MarshalBERTLV encodes ListEimResult.
+// MarshalBERTLV encodes ListEimResult as a bare SEQUENCE or bare INTEGER.
+// Production AUTOMATIC TAGS arms are accepted on decode only, so mockIPA
+// round-trips keep the untagged shape.
 func (r *ListEimResult) MarshalBERTLV() (*bertlv.TLV, error) {
 	if r == nil {
 		return nil, errors.New("asn1: nil ListEimResult")
@@ -1498,24 +1500,33 @@ func (r *ListEimResult) MarshalBERTLV() (*bertlv.TLV, error) {
 	return constructed(tagSequence, children...), nil
 }
 
-// UnmarshalBERTLV decodes ListEimResult.
+// UnmarshalBERTLV decodes ListEimResult, the value under EuiccResultData
+// listEimResult [11]. Callers pass that single child, not the [11] wrapper.
+//
+// SGP.32 v1.3 ListEimResult is an AUTOMATIC TAGS CHOICE (eimIdList SEQUENCE OF
+// EimIdInfo, listEimError INTEGER). Production silicon wraps success as
+// CONTEXT CONSTRUCTED [0] whose children are EimIdInfo values. Lab fixtures
+// and mockIPA often omit that CHOICE tag and place a bare UNIVERSAL 16
+// SEQUENCE. Error may be a bare INTEGER, CONTEXT PRIMITIVE [1], or CONTEXT
+// CONSTRUCTED [1] wrapping one INTEGER.
 func (r *ListEimResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	if tlv == nil {
 		return errors.New("asn1: missing ListEimResult")
 	}
 	var out ListEimResult
-	if hasTag(tlv, tagInteger) {
-		value, err := integerValue[ListEimError](tlv)
+	if errTLV, ok := listEimErrorTLV(tlv); ok {
+		value, err := integerValue[ListEimError](errTLV)
 		if err != nil {
 			return err
 		}
 		out.Error = &value
 	} else {
-		if err := expectTag(tlv, tagSequence); err != nil {
+		list := unwrapListEimOk(tlv)
+		if err := expectTag(list, tagSequence); err != nil {
 			return err
 		}
-		out.EimIDList = make([]EimIDInfo, 0, len(tlv.Children))
-		for _, child := range tlv.Children {
+		out.EimIDList = make([]EimIDInfo, 0, len(list.Children))
+		for _, child := range list.Children {
 			var info EimIDInfo
 			if err := info.UnmarshalBERTLV(child); err != nil {
 				return err
@@ -1525,6 +1536,35 @@ func (r *ListEimResult) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 	}
 	*r = out
 	return nil
+}
+
+// unwrapListEimOk maps AUTOMATIC TAGS success arm [0] to a synthetic
+// UNIVERSAL 16 SEQUENCE over the arm's EimIdInfo children. Bare SEQUENCE
+// (mockIPA / fixtures) is returned unchanged.
+func unwrapListEimOk(tlv *bertlv.TLV) *bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	if hasTag(tlv, bertlv.ContextSpecific.Constructed(0)) {
+		return constructed(tagSequence, tlv.Children...)
+	}
+	return tlv
+}
+
+// listEimErrorTLV returns the INTEGER TLV for listEimError.
+// Accepts bare UNIVERSAL INTEGER, CONTEXT PRIMITIVE [1] (AUTOMATIC TAGS), or
+// CONTEXT CONSTRUCTED [1] wrapping a single INTEGER.
+func listEimErrorTLV(tlv *bertlv.TLV) (*bertlv.TLV, bool) {
+	if tlv == nil {
+		return nil, false
+	}
+	if hasTag(tlv, tagInteger) || hasTag(tlv, bertlv.ContextSpecific.Primitive(1)) {
+		return tlv, true
+	}
+	if hasTag(tlv, bertlv.ContextSpecific.Constructed(1)) && len(tlv.Children) == 1 && hasTag(tlv.Children[0], tagInteger) {
+		return tlv.Children[0], true
+	}
+	return nil, false
 }
 
 // EuiccPackageErrorCode is SGP.32 EuiccPackageErrorCode.

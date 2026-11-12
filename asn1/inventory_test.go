@@ -63,7 +63,7 @@ var sgp32ModuleInventory = []moduleStructureInventoryEntry{
 	{"AddEimResult", implementationStructured, "Part 3 CHOICE of associationToken or result code."},
 	{"DeleteEimResult", implementationIntegerAlias, "Part 3 EuiccResultData INTEGER alternative."},
 	{"UpdateEimResult", implementationIntegerAlias, "Part 3 EuiccResultData INTEGER alternative."},
-	{"ListEimResult", implementationStructured, "Part 3 CHOICE of EimIdInfo list or error."},
+	{"ListEimResult", implementationStructured, "Part 3 CHOICE of EimIdInfo list or error; decodes AUTOMATIC TAGS [0]/[1] and bare SEQUENCE/INTEGER."},
 	{"EimIdInfo", implementationStructured, "Part 3 ListEimResult entry."},
 	{"IpaEuiccDataErrorCode", implementationIntegerAlias, "Stage 12 IPA eUICC data response error enumeration."},
 	{"IpaEuiccDataResponseError", implementationStructured, "Stage 12 IPA eUICC data response error."},

@@ -845,6 +845,45 @@ func TestECOResultsMapAndApplyState(t *testing.T) {
 	}
 }
 
+func TestListEimResultAutomaticTagsChoiceApplies(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := memory.New()
+	eimSigner := newTestSigner(t)
+	euiccSigner := newTestSigner(t)
+	service := &Service{Store: store, Signer: eimSigner, EimID: "eim.example"}
+	eid := "eid-list-eim-automatic"
+	registerWithState(t, store, eid)
+
+	listRequest := signPackage(t, ctx, service, eid, testEID(2), []byte{0x11}, ListEim())
+	idType := protocolasn1.EimIDTypeFQDN
+	info, err := (&protocolasn1.EimIDInfo{EimID: "eim.symb-iot.com", EimIDType: &idType}).MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("EimIDInfo.MarshalBERTLV() error = %v", err)
+	}
+	// Production listEimResult [11] wraps eimIdList as CONTEXT CONSTRUCTED [0].
+	arm := bertlv.NewChildren(
+		bertlv.ContextSpecific.Constructed(11),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0), info),
+	)
+	listResult, err := service.VerifyAndApplyResult(ctx, ResultInput{
+		Request:        listRequest,
+		ResultDER:      signedResultDataDER(t, euiccSigner, listRequest, 1, []protocolasn1.EuiccResultData{{Raw: arm}}, listRequest.CounterValue),
+		EUICCPublicKey: euiccSigner.PublicKey(),
+		SequenceNumber: 1,
+	})
+	if err != nil {
+		t.Fatalf("VerifyAndApplyResult(list AUTOMATIC [0]) error = %v", err)
+	}
+	if !listResult.OK || listResult.Operation != OperationListEIM || len(listResult.EIMs) != 1 || listResult.EIMs[0].EIMID != "eim.symb-iot.com" {
+		t.Fatalf("list result = %#v, want eim.symb-iot.com", listResult)
+	}
+	if listResult.EIMs[0].EIMIDType == nil || *listResult.EIMs[0].EIMIDType != protocolasn1.EimIDTypeFQDN {
+		t.Fatalf("EIMIDType = %#v, want FQDN", listResult.EIMs[0].EIMIDType)
+	}
+}
+
 func TestPSMOResultsMapAndApplyState(t *testing.T) {
 	t.Parallel()
 
