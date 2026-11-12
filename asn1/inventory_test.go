@@ -132,7 +132,7 @@ var sgp32ModuleInventory = []moduleStructureInventoryEntry{
 	{"CompactEuiccCancelSessionSigned", implementationNotImplemented, "Deferred compact cancellation flow."},
 	{"EsipaMessageFromIpaToEim", implementationRawTLV, "Top-level ESipa envelope validates allowed IPA-to-eIM tags and preserves payload TLV."},
 	{"EsipaMessageFromEimToIpa", implementationRawTLV, "Top-level ESipa envelope validates allowed eIM-to-IPA tags and preserves payload TLV."},
-	{"InitiateAuthenticationRequestEsipa", implementationRawTLV, "Stage 14 indirect-download relay routes by BF39 and forwards the raw ES9+ TLV unchanged."},
+	{"InitiateAuthenticationRequestEsipa", implementationRawTLV, "Stage 14 indirect-download relay routes by BF39 and adapts ESipa BF39 to ES9+ by stripping unsigned ESipa-only children such as eimTransactionId [2]."},
 	{"InitiateAuthenticationResponseEsipa", implementationRawTLV, "Stage 14 indirect-download relay returns the raw SM-DP+ BF39 response unchanged."},
 	{"InitiateAuthenticationOkEsipa", implementationRawTLV, "Stage 14 relay preserves response contents; structured OK decoding remains deferred."},
 	{"AuthenticateClientRequestEsipa", implementationRawTLV, "Stage 14 indirect-download relay routes by BF3B and forwards the raw ES9+ TLV unchanged."},

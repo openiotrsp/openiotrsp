@@ -44,8 +44,11 @@ var (
 	errUnknownSession     = errors.New("relay: unknown SM-DP+ relay session")
 
 	tagTransactionID             = bertlv.ContextSpecific.Primitive(0)
+	tagEuiccChallenge            = bertlv.ContextSpecific.Primitive(1)
 	tagSMDPAddress               = bertlv.ContextSpecific.Primitive(3)
 	tagUTF8                      = bertlv.Universal.Primitive(12)
+	tagInitiateAuthentication    = bertlv.ContextSpecific.Constructed(57)
+	tagEUICCInfo1                = bertlv.ContextSpecific.Constructed(32)
 	tagRemoteProfileProvisioning = byte(0xa2)
 )
 
@@ -86,16 +89,27 @@ func (r *Relay) Active() bool {
 }
 
 // InitiateAuthentication relays ES9+.InitiateAuthentication.
+//
+// The IPA posts ESipa InitiateAuthenticationRequestEsipa (BF39), which may
+// carry unsigned eIM correlation metadata such as eimTransactionId [2]. The
+// SM-DP+ ES9+ InitiateAuthenticationRequest shares tag BF39 but must not
+// include those ESipa-only fields, so the outbound request is adapted before
+// the SM-DP+ hop. Signed eUICC-originated TLVs on later relay arms stay
+// byte-preserving.
 func (r *Relay) InitiateAuthentication(ctx context.Context, request []byte) (Response, error) {
 	smdpAddress, err := smdpAddressFromInitiateAuthentication(request)
 	if err != nil {
 		return Response{}, err
 	}
-	response, err := r.post(ctx, smdpAddress, EndpointInitiateAuthentication, request)
+	es9Request, err := es9InitiateAuthenticationRequest(request)
 	if err != nil {
 		return Response{}, err
 	}
-	r.rememberTransaction(transactionID(request), smdpAddress)
+	response, err := r.post(ctx, smdpAddress, EndpointInitiateAuthentication, es9Request)
+	if err != nil {
+		return Response{}, err
+	}
+	r.rememberTransaction(transactionID(es9Request), smdpAddress)
 	r.rememberTransaction(transactionID(response.Payload), smdpAddress)
 	return response, nil
 }
@@ -411,6 +425,52 @@ func smdpAddressFromInitiateAuthentication(data []byte) (string, error) {
 		return "", errMissingSMDPAddress
 	}
 	return string(child.Value), nil
+}
+
+// es9InitiateAuthenticationRequest adapts ESipa BF39
+// InitiateAuthenticationRequestEsipa to ES9+ InitiateAuthenticationRequest.
+// Only ES9+ children are kept: euiccChallenge [1], smdpAddress [3], and
+// EUICCInfo1 (BF20). ESipa-only unsigned metadata such as eimTransactionId [2]
+// is stripped. Child TLV bytes that remain are copied verbatim.
+func es9InitiateAuthenticationRequest(data []byte) ([]byte, error) {
+	tag, content, err := tlvContent(data)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(tag, tagInitiateAuthentication) {
+		return nil, fmt.Errorf("relay: initiateAuthentication tag %x, want bf39", tag)
+	}
+	kept := make([]byte, 0, len(content))
+	stripped := false
+	rest := content
+	for len(rest) > 0 {
+		childTag, childLen, headerLen, err := tlvHeader(rest)
+		if err != nil {
+			return nil, err
+		}
+		total := headerLen + childLen
+		if total > len(rest) {
+			return nil, errors.New("relay: truncated BER-TLV child")
+		}
+		if keepES9InitiateAuthenticationChild(childTag) {
+			kept = append(kept, rest[:total]...)
+		} else {
+			stripped = true
+		}
+		rest = rest[total:]
+	}
+	if !stripped {
+		return cloneBytes(data), nil
+	}
+	out := append(cloneBytes(tag), encodeDERLength(len(kept))...)
+	out = append(out, kept...)
+	return out, nil
+}
+
+func keepES9InitiateAuthenticationChild(tag []byte) bool {
+	return bytes.Equal(tag, tagEuiccChallenge) ||
+		bytes.Equal(tag, tagSMDPAddress) ||
+		bytes.Equal(tag, tagEUICCInfo1)
 }
 
 func transactionID(data []byte) []byte {

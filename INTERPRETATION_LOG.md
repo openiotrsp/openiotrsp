@@ -129,21 +129,33 @@ Each entry must include:
   `cancelSessionRequestEsipa`.
 - Ambiguity: The eIM must route indirect profile-download messages to the
   SM-DP+, but the relayed ES9+ exchange is signed between the eUICC and SM-DP+.
+  ESipa and ES9+ also share function tags (for example BF39) while their
+  SEQUENCEs are not identical: SGP.32 §6.3.2.1
+  `InitiateAuthenticationRequestEsipa` may carry `eimTransactionId [2]` for
+  eIM correlation when the download trigger supplied the same id, but SGP.22
+  `InitiateAuthenticationRequest` has no such field.
 - Chosen reading: The eIM routes by the ESipa tag and extracts the minimum
   routing metadata needed to choose the SM-DP+ address. On the SM-DP+ leg,
   ES9+' uses the SGP.22 ES9+ binding with the eIM in the LPA role; for ASN.1
   this means the BF39/BF3B/BF3A/BF41/BF3D function object is carried inside the
   `RemoteProfileProvisioningRequest`/`Response` `[2]` (`A2`) wrapper on
-  `/gsma/rsp2/asn1`. The relayed signed eUICC payloads, including
+  `/gsma/rsp2/asn1`. The relay adapts the unsigned outer ESipa binding to the
+  ES9+ shape: for InitAuth it keeps only `euiccChallenge [1]`, `smdpAddress
+  [3]`, and `EUICCInfo1` (BF20) and strips ESipa-only unsigned metadata such as
+  `eimTransactionId [2]`. The relayed signed eUICC payloads, including
   `ProfileInstallationResult` and compact variants, remain raw TLV bytes unless
-  a future consumer needs structured decoded fields.
+  a future consumer needs structured decoded fields. Byte-preserving applies to
+  those signed eUICC TLVs, not to unsigned ESipa correlation fields.
 - Rationale: Decoding and re-encoding the signed ES9+ objects would add eIM
   trust in data it does not own and risks changing signature input bytes. The
   eIM may adapt the unsigned outer interface binding, but must preserve the
-  signed eUICC-originated TLVs.
+  signed eUICC-originated TLVs. Forwarding Esipa-shaped InitAuth byte-for-byte
+  caused production SM-DP+ rejections (`ciPKIdNotSupported` / `invalidInputData`)
+  for an activation code that succeeded on direct download.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms the
   interface behavior, but byte-preserving relay handling is an implementation
-  boundary.
+  boundary. The InitAuth field split follows from comparing SGP.32 §6.3.2.1
+  with SGP.22 `InitiateAuthenticationRequest`.
 
 ## SGP.32 EimConfigurationData X.509 CHOICE Encoding
 

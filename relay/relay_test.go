@@ -177,6 +177,93 @@ func TestRelayRoutesConcurrentTransactionsWithoutDefaultFallback(t *testing.T) {
 	assertTransportCalls(t, transport.calls, want)
 }
 
+func TestInitiateAuthenticationStripsESipaEimTransactionID(t *testing.T) {
+	t.Parallel()
+
+	// Production IPA BF39 capture (2026-11-12) against Telit SM-DP+: ESipa
+	// InitiateAuthenticationRequestEsipa with eimTransactionId [2]. Source:
+	// enterprise eIM relay request_hex inner BF39 (A2 wrapper removed).
+	esipaRequest := mustHex(t, ""+
+		"bf397f"+
+		"81105b539930bdf3ac2ee75e6716f93ab6c8"+
+		"8321746c742e70726f642e6f6e64656d616e64636f6e6e65637469766974792e636f6d"+
+		"bf20358203020300a916041481370f5125d0b1d408d4c3b232e6d25e795bebfbaa16041481370f5125d0b1d408d4c3b232e6d25e795bebfb"+
+		"821051561a2e078eebc600caf9116b1b9949")
+	wantES9 := mustHex(t, ""+
+		"bf396d"+
+		"81105b539930bdf3ac2ee75e6716f93ab6c8"+
+		"8321746c742e70726f642e6f6e64656d616e64636f6e6e65637469766974792e636f6d"+
+		"bf20358203020300a916041481370f5125d0b1d408d4c3b232e6d25e795bebfbaa16041481370f5125d0b1d408d4c3b232e6d25e795bebfb")
+	initResponse := mustHex(t, "bf3981058003010203")
+
+	transport := &recordingTransport{
+		responses: map[Endpoint]Response{
+			EndpointInitiateAuthentication: {Payload: initResponse},
+		},
+	}
+	relay := New(transport)
+	got, err := relay.InitiateAuthentication(context.Background(), esipaRequest)
+	if err != nil {
+		t.Fatalf("InitiateAuthentication() error = %v", err)
+	}
+	if !bytes.Equal(got.Payload, initResponse) {
+		t.Fatalf("response payload = %x, want %x", got.Payload, initResponse)
+	}
+	if len(transport.calls) != 1 {
+		t.Fatalf("transport calls = %d, want 1", len(transport.calls))
+	}
+	call := transport.calls[0]
+	if call.address != "tlt.prod.ondemandconnectivity.com" {
+		t.Fatalf("SM-DP+ address = %q", call.address)
+	}
+	if call.endpoint != EndpointInitiateAuthentication {
+		t.Fatalf("endpoint = %s, want %s", call.endpoint, EndpointInitiateAuthentication)
+	}
+	if !bytes.Equal(call.payload, wantES9) {
+		t.Fatalf("posted payload = %x, want %x", call.payload, wantES9)
+	}
+	if bytes.Contains(call.payload, mustHex(t, "821051561a2e078eebc600caf9116b1b9949")) {
+		t.Fatalf("posted payload still contains eimTransactionId")
+	}
+	if !bytes.Contains(call.payload, mustHex(t, "81105b539930bdf3ac2ee75e6716f93ab6c8")) {
+		t.Fatalf("posted payload missing euiccChallenge")
+	}
+	if !bytes.Contains(call.payload, []byte("tlt.prod.ondemandconnectivity.com")) {
+		t.Fatalf("posted payload missing smdpAddress")
+	}
+	if !bytes.Contains(call.payload, mustHex(t, "bf2035")) {
+		t.Fatalf("posted payload missing EUICCInfo1")
+	}
+}
+
+func TestES9InitiateAuthenticationRequestDropsUnknownESipaChildren(t *testing.T) {
+	t.Parallel()
+
+	// ES9+ fields plus a hypothetical future ESipa-only sibling [4].
+	input := mustHex(t, "bf391d8110aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa83036578618404deadbeef")
+	got, err := es9InitiateAuthenticationRequest(input)
+	if err != nil {
+		t.Fatalf("es9InitiateAuthenticationRequest() error = %v", err)
+	}
+	want := mustHex(t, "bf39178110aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8303657861")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %x, want %x", got, want)
+	}
+}
+
+func TestES9InitiateAuthenticationRequestIdentityWithoutESipaExtras(t *testing.T) {
+	t.Parallel()
+
+	input := mustHex(t, "bf398110830b6578616d706c652e636f6d8101ff")
+	got, err := es9InitiateAuthenticationRequest(input)
+	if err != nil {
+		t.Fatalf("es9InitiateAuthenticationRequest() error = %v", err)
+	}
+	if !bytes.Equal(got, input) {
+		t.Fatalf("got %x, want identical %x", got, input)
+	}
+}
+
 func TestRelayRejectsUnknownTransactionInsteadOfUsingLatestSMDP(t *testing.T) {
 	t.Parallel()
 
