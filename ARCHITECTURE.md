@@ -78,8 +78,9 @@ implementations can be substituted:
   change. Unverified results are not trusted.
 - Signed ES9+ payloads relayed between the IPA and the SM-DP+ are forwarded
   byte-for-byte without re-encoding. Decoding and re-encoding data the eIM
-  does not own would risk altering signature input bytes; the eIM adapts only
-  the unsigned outer transport envelope.
+  does not own would risk altering signature input bytes; the eIM adapts the
+  unsigned outer transport envelope (including stripping ESipa-only InitAuth
+  metadata such as `eimTransactionId` before the SM-DP+ hop).
 - All cryptographic primitives come from the Go standard library
   (`crypto/ecdsa`, `crypto/x509`, and friends). The project implements no
   cryptography of its own.
