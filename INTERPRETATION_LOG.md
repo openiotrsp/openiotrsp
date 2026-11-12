@@ -490,3 +490,25 @@ Each entry must include:
   `TestParseOperationResultBaseTypeIntegerArm`, and
   `TestDefaultHandlerResolvesAndTerminatesBaseTypeResultArm`.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 ListEimResult CHOICE under listEimResult [11]
+
+- Spec section: SGP.32 v1.3 `ListEimResult ::= CHOICE { eimIdList SEQUENCE OF
+  EimIdInfo, listEimError INTEGER { undefinedError(127) } }` with AUTOMATIC
+  TAGS, selected as `EuiccResultData.listEimResult [11]`.
+- Ambiguity: Whether success under `[11]` is a bare UNIVERSAL 16 SEQUENCE of
+  `EimIdInfo` (mockIPA / fixtures) or CONTEXT CONSTRUCTED `[0]` whose children
+  are the `EimIdInfo` values directly (IMPLICIT AUTOMATIC TAGS). Whether the
+  error arm is a bare INTEGER or CONTEXT `[1]`.
+- Chosen reading: Accept both success forms on decode of the single child of
+  `[11]`. Unwrap `[0]` to a synthetic SEQUENCE over its children before the
+  existing `EimIdInfo` loop. Accept bare INTEGER, CONTEXT PRIMITIVE `[1]`, and
+  CONTEXT CONSTRUCTED `[1]` wrapping a single INTEGER for the error arm.
+  Encode continues to emit bare SEQUENCE / bare INTEGER for fixtures and
+  mockIPA.
+- Rationale: A production Kigen eUICC returned listEim success as `[11] { [0]
+  { EimIdInfo } }`. Strict `expectTag(SEQUENCE)` failed apply with
+  `got [0], want [UNIVERSAL 16]`, left the operation pending, and dropped the
+  result before EID recovery. Same AUTOMATIC TAGS CHOICE class as BF2D / BF52.
+  Dual-accept decode avoids an enterprise eIM TLV rewrite.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

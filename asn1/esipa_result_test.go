@@ -432,6 +432,94 @@ func TestProfileInfoListResponseErrorArms(t *testing.T) {
 	}
 }
 
+func TestListEimResultChoiceArms(t *testing.T) {
+	t.Parallel()
+
+	// UnmarshalBERTLV receives the single child of listEimResult [11], which
+	// is what euiccpkg.explicitResultChild passes through.
+	fqdn := EimIDTypeFQDN
+	first, err := (&EimIDInfo{EimID: "eim.symb-iot.com", EimIDType: &fqdn}).MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("EimIDInfo.MarshalBERTLV() error = %v", err)
+	}
+	second, err := (&EimIDInfo{EimID: "other.eim"}).MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("EimIDInfo.MarshalBERTLV() error = %v", err)
+	}
+
+	sequence := constructed(tagSequence, first, second)
+	var fromSequence ListEimResult
+	if err := fromSequence.UnmarshalBERTLV(sequence); err != nil {
+		t.Fatalf("UnmarshalBERTLV(SEQUENCE form) error = %v", err)
+	}
+	assertListEimIDs(t, fromSequence, "eim.symb-iot.com", "other.eim")
+	if fromSequence.EimIDList[0].EimIDType == nil || *fromSequence.EimIDList[0].EimIDType != EimIDTypeFQDN {
+		t.Fatalf("EimIDType = %#v, want FQDN", fromSequence.EimIDList[0].EimIDType)
+	}
+
+	encoded, err := fromSequence.MarshalBERTLV()
+	if err != nil {
+		t.Fatalf("MarshalBERTLV() error = %v", err)
+	}
+	if !hasTag(encoded, tagSequence) {
+		t.Fatalf("marshal tag = %s, want UNIVERSAL 16 SEQUENCE", encoded.Tag)
+	}
+
+	automatic := constructed(bertlv.ContextSpecific.Constructed(0), first, second)
+	var fromAutomatic ListEimResult
+	if err := fromAutomatic.UnmarshalBERTLV(automatic); err != nil {
+		t.Fatalf("UnmarshalBERTLV(CONTEXT [0]) error = %v", err)
+	}
+	assertListEimIDs(t, fromAutomatic, "eim.symb-iot.com", "other.eim")
+	if fromAutomatic.Error != nil {
+		t.Fatalf("Error = %#v, want nil", fromAutomatic.Error)
+	}
+}
+
+func TestListEimResultErrorArms(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		tlv  *bertlv.TLV
+	}{
+		{name: "BareInteger", tlv: mustIntegerTLV(t, tagInteger, 127)},
+		{name: "ContextPrimitive1", tlv: mustIntegerTLV(t, bertlv.ContextSpecific.Primitive(1), 127)},
+		{name: "ContextConstructed1", tlv: constructed(bertlv.ContextSpecific.Constructed(1), mustIntegerTLV(t, tagInteger, 127))},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var decoded ListEimResult
+			if err := decoded.UnmarshalBERTLV(tc.tlv); err != nil {
+				t.Fatalf("UnmarshalBERTLV() error = %v", err)
+			}
+			if decoded.Error == nil || *decoded.Error != 127 {
+				t.Fatalf("error = %#v, want 127", decoded.Error)
+			}
+			if len(decoded.EimIDList) != 0 {
+				t.Fatalf("eimIdList = %d, want 0", len(decoded.EimIDList))
+			}
+		})
+	}
+}
+
+func assertListEimIDs(t *testing.T, result ListEimResult, want ...string) {
+	t.Helper()
+	if result.Error != nil {
+		t.Fatalf("Error = %#v, want nil", result.Error)
+	}
+	if len(result.EimIDList) != len(want) {
+		t.Fatalf("eimIdList = %d, want %d", len(result.EimIDList), len(want))
+	}
+	for i, id := range want {
+		if result.EimIDList[i].EimID != id {
+			t.Fatalf("eimIdList[%d] = %q, want %q", i, result.EimIDList[i].EimID, id)
+		}
+	}
+}
+
 func TestProfileInfoListResponseChoiceA0_ProductionSample(t *testing.T) {
 	t.Parallel()
 
