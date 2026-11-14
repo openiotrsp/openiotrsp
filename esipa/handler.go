@@ -168,7 +168,7 @@ func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID,
 
 	switch {
 	case shouldRelay(request.Message.Raw, relayService):
-		return handleRelay(ctx, request, relayService)
+		return handleRelay(ctx, store, tenantID, request, relayService)
 	case request.Message.Raw.Tag.Equal(tagGetEimPackage):
 		if store == nil {
 			return Response{}, errors.New("esipa: nil Store")
@@ -232,15 +232,16 @@ func isLocalHandleNotification(tlv *bertlv.TLV) bool {
 	return tlv.Children[0].Tag.Equal(tagNotificationList)
 }
 
-func handleRelay(ctx context.Context, request Request, relayService *relay.Relay) (Response, error) {
+func handleRelay(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, relayService *relay.Relay) (Response, error) {
 	payload, err := relayRequestPayload(request)
 	if err != nil {
 		return Response{}, err
 	}
+	if request.Message.Raw.Tag.Equal(tagInitiateAuth) {
+		return handleInitiateAuthentication(ctx, store, tenantID, payload, relayService)
+	}
 	var relayed relay.Response
 	switch {
-	case request.Message.Raw.Tag.Equal(tagInitiateAuth):
-		relayed, err = relayService.InitiateAuthentication(ctx, payload)
 	case request.Message.Raw.Tag.Equal(tagAuthenticate):
 		relayed, err = relayService.AuthenticateClient(ctx, payload)
 	case request.Message.Raw.Tag.Equal(tagGetBoundPackage):

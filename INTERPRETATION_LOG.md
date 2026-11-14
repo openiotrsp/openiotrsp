@@ -142,20 +142,37 @@ Each entry must include:
   `/gsma/rsp2/asn1`. The relay adapts the unsigned outer ESipa binding to the
   ES9+ shape: for InitAuth it keeps only `euiccChallenge [1]`, `smdpAddress
   [3]`, and `EUICCInfo1` (BF20) and strips ESipa-only unsigned metadata such as
-  `eimTransactionId [2]`. The relayed signed eUICC payloads, including
-  `ProfileInstallationResult` and compact variants, remain raw TLV bytes unless
-  a future consumer needs structured decoded fields. Byte-preserving applies to
-  those signed eUICC TLVs, not to unsigned ESipa correlation fields.
+  `eimTransactionId [2]`. When an IPA with `minimizeEsipaBytes` /
+  `eimDownloadDataHandling` omits optional `smdpAddress` or `euiccInfo1`,
+  shared `esipa` restores them before the relay hop: it identifies the pending
+  `profile-download-trigger` by `eimTransactionId`, takes the FQDN from that
+  trigger's activation code, and takes `EUICCInfo1` from stored
+  `EUICCState` for that EID (never invented). Unknown `eimTransactionId`
+  returns BF39 `invalidEimTransactionId(52)`; missing stored `EUICCInfo1`
+  returns BF39 `undefinedError(127)`. Both are ESipa INTEGER responses, not
+  plain-text transport errors. After a successful SM-DP+ OK, if the eIM
+  restored the FQDN it checks `serverSigned1.serverAddress` and returns
+  `smdpAddressMismatch(50)` on mismatch; if the activation code carries an
+  SM-DP+ OID it compares that OID to the subject
+  `organizationIdentifier` (2.5.4.97) of `serverCertificate` and returns
+  `smdpOidMismatch(51)` on mismatch. The relayed signed eUICC payloads,
+  including `ProfileInstallationResult` and compact variants, remain raw TLV
+  bytes unless a future consumer needs structured decoded fields.
+  Byte-preserving applies to those signed eUICC TLVs, not to unsigned ESipa
+  correlation fields.
 - Rationale: Decoding and re-encoding the signed ES9+ objects would add eIM
   trust in data it does not own and risks changing signature input bytes. The
   eIM may adapt the unsigned outer interface binding, but must preserve the
   signed eUICC-originated TLVs. Forwarding Esipa-shaped InitAuth byte-for-byte
   caused production SM-DP+ rejections (`ciPKIdNotSupported` / `invalidInputData`)
-  for an activation code that succeeded on direct download.
+  for an activation code that succeeded on direct download. Production IPAe
+  devices that omit address/`euiccInfo1` on BF39 never reached the SM-DP+ until
+  restore ran in shared esipa using the trigger's `eimTransactionId`.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No. It confirms the
   interface behavior, but byte-preserving relay handling is an implementation
   boundary. The InitAuth field split follows from comparing SGP.32 §6.3.2.1
-  with SGP.22 `InitiateAuthenticationRequest`.
+  with SGP.22 `InitiateAuthenticationRequest`. Omitted-field restore follows
+  SGP.32 indirect download procedure step 8 / ESipa.InitiateAuthentication.
 
 ## SGP.32 EimConfigurationData X.509 CHOICE Encoding
 

@@ -11,10 +11,13 @@ import (
 type ActivationCode struct {
 	SMDPAddress string
 	MatchingID  string
-	Raw         string
+	// OID is the optional SM-DP+ Object Identifier from the fourth '$'-separated
+	// activation-code field (SGP.22 section 4.1).
+	OID string
+	Raw string
 }
 
-// ParseActivationCode parses "1$host$matchingId" and "LPA:1$host$matchingId".
+// ParseActivationCode parses "1$host$matchingId[$oid]" and the "LPA:" QR form.
 func ParseActivationCode(value string) (ActivationCode, error) {
 	raw := strings.TrimSpace(value)
 	trimmed := strings.TrimPrefix(raw, "LPA:")
@@ -28,6 +31,9 @@ func ParseActivationCode(value string) (ActivationCode, error) {
 	}
 	if len(parts) > 2 {
 		code.MatchingID = strings.TrimSpace(parts[2])
+	}
+	if len(parts) > 3 {
+		code.OID = strings.TrimSpace(parts[3])
 	}
 	return code, nil
 }
