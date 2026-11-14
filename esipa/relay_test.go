@@ -19,7 +19,14 @@ import (
 func TestRelayHandlerForwardsAndReturnsRawBERWithoutReencoding(t *testing.T) {
 	t.Parallel()
 
-	requestPayload := mustRelayHex(t, "bf398110830b6578616d706c652e636f6d8101ff")
+	// Complete ESipa BF39 (challenge + smdpAddress + EUICCInfo1) keeps the
+	// v0.2.21 strip-only path: original request bytes reach the relay.
+	requestPayload := mustMarshalInitAuth(t,
+		bytes.Repeat([]byte{0xff}, 16),
+		"example.com",
+		sampleEUICCInfo1(t),
+		nil,
+	)
 	responsePayload := mustRelayHex(t, "bf3981058003010203")
 	transport := &esipaRecordingTransport{
 		responses: map[relay.Endpoint]relay.Response{

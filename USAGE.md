@@ -72,6 +72,10 @@ A trigger result reports `profileDownloadError` with a `profileDownloadErrorReas
 
 A successful download records the operation result and the install notification, and nothing else. No profile row is derived from the trigger: an activation code carries a matching ID, which is only sometimes an ICCID, and SGP.22 §3.1.3 installs a downloaded profile in the Disabled state. The profile inventory is populated from the eUICC's own `ProfileInfoListResponse` — `POST /v1/devices/{eid}/profiles/list`, or the `profileInfoList` object of an `IpaEuiccDataResponse` — which carries the real ICCID, `profileState`, and fallback attribute. Until one of those runs, `GET /v1/devices/{eid}/status` lists no profile for a freshly downloaded one. Consistently with that, the ICCID path segment of the profile routes must be 10 hex-encoded bytes (SGP.22 `Iccid`), so a matching ID cannot be mistaken for a profile and signed into a PSMO.
 
+### Indirect download: omitted InitAuth fields
+
+An IPA with `minimizeEsipaBytes` / `eimDownloadDataHandling` may post ESipa `InitiateAuthentication` (BF39) with only `euiccChallenge` and the trigger's `eimTransactionId`. Shared `esipa` restores missing `smdpAddress` from that pending activation code and missing `EUICCInfo1` from stored `EUICCState` before the ES9+ relay hop (which still strips `eimTransactionId`). Unknown transaction id → BF39 `invalidEimTransactionId(52)`. No stored `EUICCInfo1` → BF39 `undefinedError(127)`. A restored FQDN that does not match `serverSigned1.serverAddress` → BF39 `smdpAddressMismatch(50)`. Hosts must not paper this over outside `esipa`/`relay`: session lookup and request assembly belong there. A card that has never delivered BF20 via `IpaEuiccData` cannot complete InitAuth until that state exists.
+
 ### eUICC Package Result signatures (`euiccSignEPR` / `euiccSignEPE`)
 
 Strict verify accepts both ASN.1 DER ECDSA and BSI TR-03111 fixed-width `r||s` (64 octets on P-256) under tag `5F37`. DER is tried first; TR-03111 is the common encoding from production eUICC silicon.
