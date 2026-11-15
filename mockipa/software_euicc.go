@@ -63,6 +63,14 @@ func (s *SoftwareEUICC) EUICCInfo1() *bertlv.TLV {
 	return s.euiccInfo1.Clone()
 }
 
+// EUICCInfo2 returns the software eUICC EUICCInfo2 TLV.
+func (s *SoftwareEUICC) EUICCInfo2() *bertlv.TLV {
+	if s == nil || s.euiccInfo2 == nil {
+		return nil
+	}
+	return s.euiccInfo2.Clone()
+}
+
 // Transmit handles structured ES10 requests from euicc-go.
 func (s *SoftwareEUICC) Transmit(request bertlv.Marshaler, response bertlv.Unmarshaler) error {
 	switch request.(type) {

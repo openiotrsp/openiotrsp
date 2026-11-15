@@ -20,15 +20,17 @@ import (
 // list is delivered as a signed euiccPackageRequest carrying listProfileInfo
 // PSMO (BF51), not via IpaEuiccData. BF52 remains the channel for EUM/eUICC
 // certificate presentation (tagList including A5/A6), eUICCInfo, IPA
-// capabilities, and notifications. Hosts must not use BF52 as a substitute for
-// listProfileInfo.
+// capabilities, deviceInfo (A9), and notifications. Hosts must not use BF52 as
+// a substitute for listProfileInfo. deviceInfo is required when an IPA sets
+// eimCtxParams1Generation and the eIM must build ctxParams1.
 var DefaultTagList = []byte{
 	0xbf, 0x20, // eUICCInfo1
 	0xbf, 0x22, // eUICCInfo2
-	0xa0,       // notificationsList
-	0xa5,       // EUM certificate
-	0xa6,       // eUICC certificate
-	0xa8,       // IPA capabilities
+	0xa0, // notificationsList
+	0xa5, // EUM certificate
+	0xa6, // eUICC certificate
+	0xa8, // IPA capabilities
+	0xa9, // deviceInfo
 }
 
 // RequestInput configures one IpaEuiccDataRequest.

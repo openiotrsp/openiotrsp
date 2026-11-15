@@ -155,9 +155,11 @@ Each entry must include:
   `smdpAddressMismatch(50)` on mismatch; if the activation code carries an
   SM-DP+ OID it compares that OID to the subject
   `organizationIdentifier` (2.5.4.97) of `serverCertificate` and returns
-  `smdpOidMismatch(51)` on mismatch. The relayed signed eUICC payloads,
-  including `ProfileInstallationResult` and compact variants, remain raw TLV
-  bytes unless a future consumer needs structured decoded fields.
+  `smdpOidMismatch(51)` on mismatch. Compact ESipa forms
+  (`compactAuthenticateResponseOk`, `compactDownloadResponseOk`,
+  `compactProfileInstallationResult`) are rebuilt into the SGP.22 structures
+  before the ES9+ hop; the rebuilt signed TLV is the byte string the eUICC
+  signed. A non-compact signed eUICC TLV is still forwarded unchanged.
   Byte-preserving applies to those signed eUICC TLVs, not to unsigned ESipa
   correlation fields.
 - Rationale: Decoding and re-encoding the signed ES9+ objects would add eIM
@@ -540,4 +542,48 @@ Each entry must include:
   `got [0], want [UNIVERSAL 16]`, left the operation pending, and dropped the
   result before EID recovery. Same AUTOMATIC TAGS CHOICE class as BF2D / BF52.
   Dual-accept decode avoids an enterprise eIM TLV rewrite.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 eIM ctxParams1 and compact ESipa before ES9+
+
+- Spec section: SGP.32 v1.3 `InitiateAuthenticationOkEsipa`, `IpaCapabilities`
+  bits `eimDownloadDataHandling` (2), `eimCtxParams1Generation` (3), and
+  `minimizeEsipaBytes` (5); `CompactEuiccSigned1`, `CompactEuiccSigned2`,
+  `CompactProfileInstallationResult`. SGP.22 `CtxParams1`, `EuiccSigned1`,
+  `EUICCSigned2`, `ProfileInstallationResultData`.
+- Ambiguity: `InitiateAuthenticationOkEsipa` mixes explicitly tagged members
+  with an untagged `matchingId` under `AUTOMATIC TAGS`. `ctxParams1` is a
+  CHOICE under an explicit tag. Compact forms omit bytes the eUICC already
+  signed, including all but the last two octets of the ISD-P AID, and they do
+  not carry `profileManagementOperation`. SGP.32 §5.14.1 also says the eIM
+  shall not send `transactionId` and shall truncate `euiccCiPKIdentifierToBeUsed`
+  when `minimizeEsipaBytes` is set.
+- Chosen reading: `matchingId` on the OK stays a universal UTF8String (`0C`)
+  and is appended after `serverCertificate` when bit 2 is set.
+  `ctxParams1 [2]` is explicit around the CHOICE: `A2 { A0 { 80 matchingId,
+  A1 deviceInfo } }`. `deviceInfo` is the stored IpaEuiccData `A9` retagged as
+  `[1]`; the SEQUENCE contents are unchanged. If bit 3 is set and `DeviceInfo`
+  is missing, the eIM returns BF39 `undefinedError(127)` and does not forward
+  the SM-DP+ OK. The SM-DP+ `transactionId` and CI public-key identifier are
+  left as received: both are optional on the ESipa OK, and the IPA can read
+  the transaction id from `serverSigned1`. Per SM-DP+ transaction id the relay
+  remembers `serverSigned1`'s transaction id, server address, and server
+  challenge, plus the generated CtxParams1 CHOICE (`A0`, not the `A2`
+  wrapper). Compact BF38, BF21, and `compactProfileInstallationResult` are
+  rebuilt into the SGP.22 structures before ES9+. `euiccSigned1` uses stored
+  EUICCInfo2 with `extCardResource` replaced by the compact value, and
+  `ctxParams1` from the IPA when present, otherwise the remembered value.
+  Certificates come from the IPA or stored `A6`/`A5`. A compact install
+  result restores `notificationInstall` as a one-bit BIT STRING, the
+  notification address from `serverSigned1.serverAddress`, ICCID and the full
+  ISD-P AID from the download context (filled from AuthenticateClient profile
+  metadata when those tags are present), the nine-byte success `simaResponse`
+  when the compact form omits it, and the activation-code SM-DP+ OID when one
+  was present. The two-byte `compactAid` must be the suffix of the remembered
+  AID.
+- Rationale: An IPAe that sets `eimCtxParams1Generation` does not build
+  `ctxParams1` and cannot call ES10b.AuthenticateServer until the eIM returns
+  it. The same class of IPA sends compact ES10b results; the SM-DP+ verifies
+  the eUICC signature over the full SGP.22 structure, so the rebuilt bytes
+  have to be the bytes that were signed.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
