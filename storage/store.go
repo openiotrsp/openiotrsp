@@ -34,6 +34,9 @@ type ProfileState struct {
 	IsEnabled   bool
 	IsFallback  bool
 	SMDPAddress string
+	// ProfileClass is SGP.22 ProfileClass when the eUICC sent tag 95.
+	// Nil means the inventory did not include a class. Operational is 2.
+	ProfileClass *int64
 }
 
 // EUICCState is the eIM's current IPA-reported observability view of one eUICC.
@@ -55,7 +58,10 @@ type EUICCState struct {
 	EUICCCertificate       []byte
 	CertificateIdentifiers []string
 	RawPayload             []byte
-	UpdatedAt              time.Time
+	// RulesAuthorisationTable is the verified getRATResult TLV (tag A6).
+	// An IpaEuiccData refresh does not clear it: that response has no RAT.
+	RulesAuthorisationTable []byte
+	UpdatedAt               time.Time
 }
 
 // OperationStatus is the lifecycle state of an operation queued for an IPA poll.

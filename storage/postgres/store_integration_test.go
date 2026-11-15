@@ -34,14 +34,14 @@ func TestMigrationRoundTrip(t *testing.T) {
 	runMigration(t, dsn, func(migration *migrate.Migrate) error {
 		return migration.Up()
 	})
-	assertMigrationVersion(t, dsn, 5, false)
+	assertMigrationVersion(t, dsn, 6, false)
 	runMigration(t, dsn, func(migration *migrate.Migrate) error {
 		return migration.Down()
 	})
 	runMigration(t, dsn, func(migration *migrate.Migrate) error {
 		return migration.Up()
 	})
-	assertMigrationVersion(t, dsn, 5, false)
+	assertMigrationVersion(t, dsn, 6, false)
 }
 
 func TestStoreConformance(t *testing.T) {

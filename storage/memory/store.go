@@ -203,6 +203,11 @@ func (s *Store) SetEUICCState(ctx context.Context, tenantID storage.TenantID, st
 	}
 	state.EID = key.eid
 	state.UpdatedAt = time.Now().UTC()
+	if len(state.RulesAuthorisationTable) == 0 {
+		if prev, ok := s.euiccStates[key]; ok && len(prev.RulesAuthorisationTable) > 0 {
+			state.RulesAuthorisationTable = prev.RulesAuthorisationTable
+		}
+	}
 	s.euiccStates[key] = cloneEUICCState(state)
 	return nil
 }
@@ -667,6 +672,10 @@ func normalizeResultStatus(status storage.OperationStatus) storage.OperationStat
 }
 
 func cloneProfileState(state storage.ProfileState) storage.ProfileState {
+	if state.ProfileClass != nil {
+		value := *state.ProfileClass
+		state.ProfileClass = &value
+	}
 	return state
 }
 
@@ -697,6 +706,7 @@ func cloneEUICCState(state storage.EUICCState) storage.EUICCState {
 	state.EUMCertificate = cloneBytes(state.EUMCertificate)
 	state.EUICCCertificate = cloneBytes(state.EUICCCertificate)
 	state.RawPayload = cloneBytes(state.RawPayload)
+	state.RulesAuthorisationTable = cloneBytes(state.RulesAuthorisationTable)
 	if state.CertificateIdentifiers != nil {
 		state.CertificateIdentifiers = append([]string(nil), state.CertificateIdentifiers...)
 	}

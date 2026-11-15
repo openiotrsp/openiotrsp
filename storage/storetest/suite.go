@@ -110,6 +110,39 @@ func testRecords(t *testing.T, store storage.Store) {
 	if len(gotEUICCState.CertificateIdentifiers) != 2 || gotEUICCState.CertificateIdentifiers[0] != "aa01" {
 		t.Fatalf("certificate identifiers = %#v, want aa01/bb02", gotEUICCState.CertificateIdentifiers)
 	}
+	class := int64(2)
+	if err := store.SetProfileState(ctx, tenantID, storage.ProfileState{
+		EID:          eid,
+		ICCID:        "892",
+		ProfileClass: &class,
+	}); err != nil {
+		t.Fatalf("SetProfileState(class) error = %v", err)
+	}
+	gotClass, err := store.GetProfileState(ctx, tenantID, eid, "892")
+	if err != nil {
+		t.Fatalf("GetProfileState(class) error = %v", err)
+	}
+	if gotClass.ProfileClass == nil || *gotClass.ProfileClass != 2 {
+		t.Fatalf("profile class = %#v, want 2", gotClass.ProfileClass)
+	}
+	gotEUICCState.RulesAuthorisationTable = []byte{0xa6, 0x00}
+	if err := store.SetEUICCState(ctx, tenantID, gotEUICCState); err != nil {
+		t.Fatalf("SetEUICCState(RAT) error = %v", err)
+	}
+	if err := store.SetEUICCState(ctx, tenantID, storage.EUICCState{
+		EID:                eid,
+		DefaultSMDPAddress: "smdp.refreshed",
+	}); err != nil {
+		t.Fatalf("SetEUICCState(refresh) error = %v", err)
+	}
+	refreshed, err := store.GetEUICCState(ctx, tenantID, eid)
+	if err != nil {
+		t.Fatalf("GetEUICCState(refresh) error = %v", err)
+	}
+	if refreshed.DefaultSMDPAddress != "smdp.refreshed" {
+		t.Fatalf("refreshed address = %q", refreshed.DefaultSMDPAddress)
+	}
+	assertBytes(t, "rules authorisation table", refreshed.RulesAuthorisationTable, []byte{0xa6, 0x00})
 
 	configPayload := []byte("encoded-eim-config")
 	if err := store.StoreEIMConfig(ctx, tenantID, storage.EIMConfig{EIMID: "eim.example", Data: configPayload}); err != nil {

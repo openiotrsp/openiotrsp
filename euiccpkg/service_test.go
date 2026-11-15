@@ -989,6 +989,13 @@ func TestPSMOResultsMapAndApplyState(t *testing.T) {
 	if !ratResult.OK || ratResult.Operation != OperationGetRAT || ratResult.RulesAuthorisationTable == nil {
 		t.Fatalf("RAT result = %#v, want raw RAT", ratResult)
 	}
+	saved, err := store.GetEUICCState(ctx, storage.DefaultTenantID, eid)
+	if err != nil {
+		t.Fatalf("GetEUICCState() error = %v", err)
+	}
+	if !bytes.Equal(saved.RulesAuthorisationTable, []byte{0xa6, 0x00}) {
+		t.Fatalf("stored RAT = %x, want a600", saved.RulesAuthorisationTable)
+	}
 
 	defaultDPRequest := signPackage(t, ctx, service, eid, testEID(3), []byte{0x15}, SetDefaultDPAddress("smdp.example"))
 	defaultDPResultData, err := protocolasn1.SetDefaultDPAddressEuiccResult(&protocolasn1.SetDefaultDPAddressResponse{Result: 0})

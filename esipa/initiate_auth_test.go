@@ -354,7 +354,7 @@ func TestInitiateAuthenticationAppendsMatchingIDAndCtxParams1(t *testing.T) {
 	if err := store.SetEUICCState(ctx, storage.DefaultTenantID, storage.EUICCState{
 		EID:             eidKey,
 		EUICCInfo1:      info1Bytes,
-		IPACapabilities: sampleIPACapabilities(t, 0xf4),
+		IPACapabilities: sampleIPACapabilities(t, 0xf0),
 		DeviceInfo:      device,
 	}); err != nil {
 		t.Fatalf("SetEUICCState() error = %v", err)

@@ -21,6 +21,12 @@ type DownloadContext struct {
 	// SMDPOID is the content of the activation-code SM-DP+ OBJECT IDENTIFIER,
 	// without the universal tag.
 	SMDPOID []byte
+	// CIPKID is the full euiccCiPKIdentifierToBeUsed from the SM-DP+.
+	// The ESipa response may carry only a truncated prefix.
+	CIPKID []byte
+	// ProfileMetadata is the StoreMetadataRequest TLV from AuthenticateClient,
+	// kept so GetBoundProfilePackage can compare the bound package copy.
+	ProfileMetadata []byte
 }
 
 // RememberDownload stores context for transactionId, replacing any previous
@@ -80,5 +86,7 @@ func cloneDownloadContext(ctx DownloadContext) DownloadContext {
 	ctx.HashCC = cloneBytes(ctx.HashCC)
 	ctx.EUICCOTPK = cloneBytes(ctx.EUICCOTPK)
 	ctx.SMDPOID = cloneBytes(ctx.SMDPOID)
+	ctx.CIPKID = cloneBytes(ctx.CIPKID)
+	ctx.ProfileMetadata = cloneBytes(ctx.ProfileMetadata)
 	return ctx
 }

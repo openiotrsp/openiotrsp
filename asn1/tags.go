@@ -22,6 +22,7 @@ var (
 
 	tagProfileInfoList     = bertlv.ContextSpecific.Constructed(45)
 	tagProfileInfo         = bertlv.Private.Constructed(3)
+	tagProfileClass        = bertlv.ContextSpecific.Primitive(21)
 	tagProfileState        = bertlv.ContextSpecific.Primitive(112)
 	tagFallbackAttribute   = bertlv.ContextSpecific.Primitive(38)
 	tagNotificationList    = bertlv.ContextSpecific.Constructed(0)

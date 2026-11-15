@@ -74,15 +74,16 @@ func importDevice(ctx context.Context, tx pgx.Tx, tenantID storage.TenantID, dev
 func importProfileState(ctx context.Context, tx pgx.Tx, tenantID storage.TenantID, state dataact.ProfileStateRecord) error {
 	createdAt, updatedAt := dataact.ImportTimestamps(state.CreatedAt, state.UpdatedAt)
 	_, err := tx.Exec(ctx, `
-		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, is_fallback, smdp_address, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, is_fallback, smdp_address, profile_class, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (tenant_id, eid, iccid)
 		DO UPDATE SET is_enabled = EXCLUDED.is_enabled,
 			is_fallback = EXCLUDED.is_fallback,
 			smdp_address = EXCLUDED.smdp_address,
+			profile_class = EXCLUDED.profile_class,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at
-	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.IsFallback, state.SMDPAddress, createdAt, updatedAt)
+	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.IsFallback, state.SMDPAddress, state.ProfileClass, createdAt, updatedAt)
 	return err
 }
 
@@ -137,6 +138,10 @@ func importEUICCState(ctx context.Context, tx pgx.Tx, tenantID storage.TenantID,
 	if err != nil {
 		return err
 	}
+	rat, err := dataact.DecodeOptionalBase64(state.RulesAuthorisationTable)
+	if err != nil {
+		return err
+	}
 	identifiers, err := dataact.DecodeCertificateIdentifiers(state.CertificateIdentifiers)
 	if err != nil {
 		return err
@@ -151,9 +156,9 @@ func importEUICCState(ctx context.Context, tx pgx.Tx, tenantID storage.TenantID,
 			tenant_id, eid, eid_value, default_smdp_address, root_smds_address,
 			euicc_info1, euicc_info2, ipa_capabilities, device_info,
 			eum_certificate, euicc_certificate, certificate_identifiers, raw_payload,
-			created_at, updated_at
+			rules_authorisation_table, created_at, updated_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (tenant_id, eid)
 		DO UPDATE SET eid_value = EXCLUDED.eid_value,
 			default_smdp_address = EXCLUDED.default_smdp_address,
@@ -166,10 +171,11 @@ func importEUICCState(ctx context.Context, tx pgx.Tx, tenantID storage.TenantID,
 			euicc_certificate = EXCLUDED.euicc_certificate,
 			certificate_identifiers = EXCLUDED.certificate_identifiers,
 			raw_payload = EXCLUDED.raw_payload,
+			rules_authorisation_table = EXCLUDED.rules_authorisation_table,
 			created_at = EXCLUDED.created_at,
 			updated_at = EXCLUDED.updated_at
 	`, tenantString(tenantID), state.EID, eidValue, state.DefaultSMDPAddress, state.RootSMDSAddress,
-		info1, info2, caps, deviceInfo, eumCert, euiccCert, encodedIdentifiers, rawPayload, createdAt, updatedAt)
+		info1, info2, caps, deviceInfo, eumCert, euiccCert, encodedIdentifiers, rawPayload, rat, createdAt, updatedAt)
 	return err
 }
 

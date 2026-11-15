@@ -13,8 +13,10 @@ import (
 
 // SGP.32 IpaCapabilities.ipaFeatures bit positions.
 const (
-	ipaFeatureEimDownloadDataHandling = 2
-	ipaFeatureEimCtxParams1Generation = 3
+	ipaFeatureEimDownloadDataHandling        = 2
+	ipaFeatureEimCtxParams1Generation        = 3
+	ipaFeatureEimProfileMetadataVerification = 4
+	ipaFeatureMinimizeEsipaBytes             = 5
 )
 
 var (
@@ -172,7 +174,22 @@ func ipaFeatureSet(raw []byte, bit int) bool {
 	if bit >= width {
 		return false
 	}
-	return features.Value[1+bit/8]&(1<<uint(7-bit%8)) != 0
+	return bitSet(features.Value, bit)
+}
+
+func bitSet(value []byte, bit int) bool {
+	if len(value) < 2 || bit < 0 {
+		return false
+	}
+	unused := int(value[0])
+	if unused > 7 {
+		return false
+	}
+	width := (len(value)-1)*8 - unused
+	if bit >= width {
+		return false
+	}
+	return value[1+bit/8]&(1<<uint(7-bit%8)) != 0
 }
 
 func oidContent(dotted string) []byte {

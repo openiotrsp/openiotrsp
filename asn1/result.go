@@ -1211,9 +1211,12 @@ const (
 )
 
 // ProfileInfo is the subset of SGP.32/SGP.22 ProfileInfo that the eIM persists.
+// ProfileClass is SGP.22 ProfileClass (test 0, provisioning 1, operational 2)
+// when tag 95 is present. An omitted class is not treated as operational.
 type ProfileInfo struct {
 	ICCID             []byte
 	ProfileState      *ProfileState
+	ProfileClass      *int64
 	FallbackAttribute bool
 }
 
@@ -1228,6 +1231,13 @@ func (p *ProfileInfo) MarshalBERTLV() (*bertlv.TLV, error) {
 	}
 	if p.ProfileState != nil {
 		child, err := integerTLV(tagProfileState, *p.ProfileState)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, child)
+	}
+	if p.ProfileClass != nil {
+		child, err := integerTLV(tagProfileClass, *p.ProfileClass)
 		if err != nil {
 			return nil, err
 		}
@@ -1262,6 +1272,13 @@ func (p *ProfileInfo) UnmarshalBERTLV(tlv *bertlv.TLV) error {
 			return err
 		}
 		out.ProfileState = &value
+	}
+	if child := tlv.First(tagProfileClass); child != nil {
+		value, err := integerValue[int64](child)
+		if err != nil {
+			return err
+		}
+		out.ProfileClass = &value
 	}
 	if child := tlv.First(tagFallbackAttribute); child != nil {
 		out.FallbackAttribute, err = booleanValue(child)
