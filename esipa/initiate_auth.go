@@ -8,6 +8,7 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/damonto/euicc-go/bertlv"
@@ -52,6 +53,7 @@ type initiateAuthSession struct {
 	activation   profiledownload.ActivationCode
 	checkAddress bool
 	checkOID     bool
+	eid          string
 }
 
 func handleInitiateAuthentication(
@@ -60,6 +62,7 @@ func handleInitiateAuthentication(
 	tenantID storage.TenantID,
 	payload []byte,
 	relayService *relay.Relay,
+	logger *slog.Logger,
 ) (Response, error) {
 	fields, err := parseInitiateAuthRequest(payload)
 	if err != nil {
@@ -93,7 +96,40 @@ func handleInitiateAuthentication(
 	} else if errResp != nil {
 		return *errResp, nil
 	}
-	return relayResponse(relayed.Payload)
+	return finishInitiateAuthentication(ctx, store, tenantID, relayService, logger, session, relayed.Payload)
+}
+
+func finishInitiateAuthentication(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	relayService *relay.Relay,
+	logger *slog.Logger,
+	session initiateAuthSession,
+	payload []byte,
+) (Response, error) {
+	var state storage.EUICCState
+	if session.eid != "" && store != nil {
+		loaded, err := store.GetEUICCState(ctx, tenantID, session.eid)
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return Response{}, err
+		}
+		if err == nil {
+			state = loaded
+		}
+	}
+	state.EID = session.eid
+	augmented, download, err := augmentInitiateAuthentication(payload, state, session.activation, logger)
+	if errors.Is(err, errCtxParams1NeedsDeviceInfo) {
+		return initiateAuthErrorResponse(initiateAuthErrorUndefined)
+	}
+	if err != nil {
+		return Response{}, err
+	}
+	if relayService != nil && len(download.TransactionID) > 0 && session.eid != "" && !isInitiateAuthErrorPayload(payload) {
+		relayService.RememberDownload(download)
+	}
+	return relayResponse(augmented)
 }
 
 func parseInitiateAuthRequest(payload []byte) (initiateAuthFields, error) {
@@ -152,7 +188,7 @@ func resolveInitiateAuthSession(
 		resp, err := initiateAuthErrorResponse(initiateAuthErrorInvalidEimTransactionID)
 		return initiateAuthSession{}, &resp, err
 	}
-	var session initiateAuthSession
+	session := initiateAuthSession{eid: operation.EID}
 	if trigger.ProfileDownloadData != nil &&
 		trigger.ProfileDownloadData.Kind == protocolasn1.ProfileDownloadActivationCode {
 		activation, err := profiledownload.ParseActivationCode(trigger.ProfileDownloadData.ActivationCode)

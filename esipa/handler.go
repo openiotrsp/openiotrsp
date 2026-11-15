@@ -168,7 +168,7 @@ func handle(ctx context.Context, store storage.Store, tenantID storage.TenantID,
 
 	switch {
 	case shouldRelay(request.Message.Raw, relayService):
-		return handleRelay(ctx, store, tenantID, request, relayService)
+		return handleRelay(ctx, store, tenantID, request, relayService, logger)
 	case request.Message.Raw.Tag.Equal(tagGetEimPackage):
 		if store == nil {
 			return Response{}, errors.New("esipa: nil Store")
@@ -229,29 +229,51 @@ func isLocalHandleNotification(tlv *bertlv.TLV) bool {
 	if tlv == nil || !tlv.Tag.Equal(tagHandleNotify) || len(tlv.Children) != 1 {
 		return false
 	}
-	return tlv.Children[0].Tag.Equal(tagNotificationList)
+	if !tlv.Children[0].Tag.Equal(tagNotificationList) {
+		return false
+	}
+	// pendingNotification [0] is also context [0]. A compact profile
+	// installation result under that tag is an SM-DP+ notification, not a
+	// local notificationsList.
+	return findCompactProfileInstallation(tlv) == nil
 }
 
-func handleRelay(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, relayService *relay.Relay) (Response, error) {
+func handleRelay(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, relayService *relay.Relay, logger *slog.Logger) (Response, error) {
 	payload, err := relayRequestPayload(request)
 	if err != nil {
 		return Response{}, err
 	}
 	if request.Message.Raw.Tag.Equal(tagInitiateAuth) {
-		return handleInitiateAuthentication(ctx, store, tenantID, payload, relayService)
+		return handleInitiateAuthentication(ctx, store, tenantID, payload, relayService, logger)
 	}
 	var relayed relay.Response
 	switch {
 	case request.Message.Raw.Tag.Equal(tagAuthenticate):
-		relayed, err = relayService.AuthenticateClient(ctx, payload)
+		payload, err = expandCompactAuthenticateClient(ctx, store, tenantID, relayService, payload)
+		if err == nil {
+			relayed, err = relayService.AuthenticateClient(ctx, payload)
+		}
+		if err == nil {
+			noteAuthenticateClientResponse(relayService, relayed.Payload)
+		}
 	case request.Message.Raw.Tag.Equal(tagGetBoundPackage):
-		relayed, err = relayService.GetBoundProfilePackage(ctx, payload)
+		payload, err = expandCompactPrepareDownload(relayService, payload)
+		if err == nil {
+			relayed, err = relayService.GetBoundProfilePackage(ctx, payload)
+		}
 	case request.Message.Raw.Tag.Equal(tagCancelSession):
 		relayed, err = relayService.CancelSession(ctx, payload)
 	case request.Message.Raw.Tag.Equal(tagHandleNotify):
-		relayed, err = relayService.HandleNotification(ctx, payload)
+		payload, err = expandCompactNotification(relayService, payload)
+		if err == nil {
+			relayed, err = relayService.HandleNotification(ctx, payload)
+		}
 	default:
 		err = fmt.Errorf("%w: %s", errUnsupportedMessage, request.Message.Raw.Tag.String())
+	}
+	if errors.Is(err, errCompactUnavailable) {
+		logCompactRejected(logger, request.Message.Raw, err)
+		return functionErrorResponse(request.Message.Raw.Tag, initiateAuthErrorUndefined)
 	}
 	if err != nil {
 		return Response{}, err

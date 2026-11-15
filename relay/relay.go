@@ -70,6 +70,7 @@ type Relay struct {
 
 	mu            sync.Mutex
 	byTransaction map[string]string
+	downloads     map[string]DownloadContext
 }
 
 // New creates a Relay using transport.

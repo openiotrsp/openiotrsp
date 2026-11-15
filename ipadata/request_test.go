@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/damonto/euicc-go/bertlv"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/storage"
 	"github.com/openiotrsp/openiotrsp/storage/memory"
@@ -18,7 +19,7 @@ func TestDefaultTagListExcludesEID(t *testing.T) {
 	if slices.Contains(DefaultTagList, byte(0x5a)) {
 		t.Fatalf("DefaultTagList = %x, must not contain EID tag 5A", DefaultTagList)
 	}
-	want := []byte{0xbf, 0x20, 0xbf, 0x22, 0xa0, 0xa5, 0xa6, 0xa8}
+	want := []byte{0xbf, 0x20, 0xbf, 0x22, 0xa0, 0xa5, 0xa6, 0xa8, 0xa9}
 	if !bytes.Equal(DefaultTagList, want) {
 		t.Fatalf("DefaultTagList = %x, want %x", DefaultTagList, want)
 	}
@@ -79,6 +80,31 @@ func TestEnqueueRequestDefaultTagListExcludesEID(t *testing.T) {
 	}
 	if operation.Kind != storage.OperationIpaEuiccData {
 		t.Fatalf("operation kind = %q, want ipa-euicc-data", operation.Kind)
+	}
+}
+
+func TestStateFromResponseStoresDeviceInfo(t *testing.T) {
+	t.Parallel()
+
+	device := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(9),
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{0x35, 0x32, 0x30, 0x31}),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(1)),
+	)
+	deviceBytes, err := device.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(deviceInfo) error = %v", err)
+	}
+	responseTLV := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(82), device)
+	var response protocolasn1.IpaEuiccDataResponse
+	if err := response.UnmarshalBERTLV(responseTLV); err != nil {
+		t.Fatalf("UnmarshalBERTLV() error = %v", err)
+	}
+	state, err := StateFromResponse("89044045930000000000002153893210", &response, nil)
+	if err != nil {
+		t.Fatalf("StateFromResponse() error = %v", err)
+	}
+	if !bytes.Equal(state.DeviceInfo, deviceBytes) {
+		t.Fatalf("DeviceInfo = %x, want %x", state.DeviceInfo, deviceBytes)
 	}
 }
 
