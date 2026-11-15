@@ -16,13 +16,14 @@ type DeviceRecord struct {
 
 // ProfileStateRecord is one exported profile state row.
 type ProfileStateRecord struct {
-	EID         string    `json:"eid"`
-	ICCID       string    `json:"iccid"`
-	IsEnabled   bool      `json:"isEnabled"`
-	IsFallback  bool      `json:"isFallback"`
-	SMDPAddress string    `json:"smdpAddress"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	EID          string    `json:"eid"`
+	ICCID        string    `json:"iccid"`
+	IsEnabled    bool      `json:"isEnabled"`
+	IsFallback   bool      `json:"isFallback"`
+	SMDPAddress  string    `json:"smdpAddress"`
+	ProfileClass *int64    `json:"profileClass,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // AssociatedEIMRecord is one exported associated eIM row.
@@ -37,20 +38,21 @@ type AssociatedEIMRecord struct {
 
 // EUICCStateRecord is one exported eUICC state row.
 type EUICCStateRecord struct {
-	EID                    string          `json:"eid"`
-	EIDValue               string          `json:"eidValueBase64,omitempty"`
-	DefaultSMDPAddress     string          `json:"defaultSmdpAddress"`
-	RootSMDSAddress        string          `json:"rootSmdsAddress"`
-	EUICCInfo1             string          `json:"euiccInfo1Base64,omitempty"`
-	EUICCInfo2             string          `json:"euiccInfo2Base64,omitempty"`
-	IPACapabilities        string          `json:"ipaCapabilitiesBase64,omitempty"`
-	DeviceInfo             string          `json:"deviceInfoBase64,omitempty"`
-	EUMCertificate         string          `json:"eumCertificateBase64,omitempty"`
-	EUICCCertificate       string          `json:"euiccCertificateBase64,omitempty"`
-	CertificateIdentifiers json.RawMessage `json:"certificateIdentifiers"`
-	RawPayload             string          `json:"rawPayloadBase64,omitempty"`
-	CreatedAt              time.Time       `json:"createdAt"`
-	UpdatedAt              time.Time       `json:"updatedAt"`
+	EID                     string          `json:"eid"`
+	EIDValue                string          `json:"eidValueBase64,omitempty"`
+	DefaultSMDPAddress      string          `json:"defaultSmdpAddress"`
+	RootSMDSAddress         string          `json:"rootSmdsAddress"`
+	EUICCInfo1              string          `json:"euiccInfo1Base64,omitempty"`
+	EUICCInfo2              string          `json:"euiccInfo2Base64,omitempty"`
+	IPACapabilities         string          `json:"ipaCapabilitiesBase64,omitempty"`
+	DeviceInfo              string          `json:"deviceInfoBase64,omitempty"`
+	EUMCertificate          string          `json:"eumCertificateBase64,omitempty"`
+	EUICCCertificate        string          `json:"euiccCertificateBase64,omitempty"`
+	CertificateIdentifiers  json.RawMessage `json:"certificateIdentifiers"`
+	RawPayload              string          `json:"rawPayloadBase64,omitempty"`
+	RulesAuthorisationTable string          `json:"rulesAuthorisationTableBase64,omitempty"`
+	CreatedAt               time.Time       `json:"createdAt"`
+	UpdatedAt               time.Time       `json:"updatedAt"`
 }
 
 // OperationRecord is one exported operation row.

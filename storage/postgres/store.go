@@ -57,10 +57,10 @@ func (s *Store) RegisterDevice(ctx context.Context, tenantID storage.TenantID, d
 func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, eid string, iccid string) (storage.ProfileState, error) {
 	var state storage.ProfileState
 	err := s.pool.QueryRow(ctx, `
-		SELECT eid, iccid, is_enabled, is_fallback, smdp_address
+		SELECT eid, iccid, is_enabled, is_fallback, smdp_address, profile_class
 		FROM profile_state
 		WHERE tenant_id = $1 AND eid = $2 AND iccid = $3
-	`, tenantString(tenantID), eid, iccid).Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.IsFallback, &state.SMDPAddress)
+	`, tenantString(tenantID), eid, iccid).Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.IsFallback, &state.SMDPAddress, &state.ProfileClass)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ProfileState{}, storage.ErrNotFound
 	}
@@ -70,7 +70,7 @@ func (s *Store) GetProfileState(ctx context.Context, tenantID storage.TenantID, 
 // ListProfileStates reads all known profile states for one eUICC.
 func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID, eid string) ([]storage.ProfileState, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT eid, iccid, is_enabled, is_fallback, smdp_address
+		SELECT eid, iccid, is_enabled, is_fallback, smdp_address, profile_class
 		FROM profile_state
 		WHERE tenant_id = $1 AND eid = $2
 		ORDER BY iccid
@@ -83,7 +83,7 @@ func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID
 	states := make([]storage.ProfileState, 0)
 	for rows.Next() {
 		var state storage.ProfileState
-		if err := rows.Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.IsFallback, &state.SMDPAddress); err != nil {
+		if err := rows.Scan(&state.EID, &state.ICCID, &state.IsEnabled, &state.IsFallback, &state.SMDPAddress, &state.ProfileClass); err != nil {
 			return nil, err
 		}
 		states = append(states, cloneProfileState(state))
@@ -111,14 +111,15 @@ func (s *Store) ListProfileStates(ctx context.Context, tenantID storage.TenantID
 // SetProfileState stores one profile state.
 func (s *Store) SetProfileState(ctx context.Context, tenantID storage.TenantID, state storage.ProfileState) error {
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, is_fallback, smdp_address)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO profile_state (tenant_id, eid, iccid, is_enabled, is_fallback, smdp_address, profile_class)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (tenant_id, eid, iccid)
 		DO UPDATE SET is_enabled = EXCLUDED.is_enabled,
 			is_fallback = EXCLUDED.is_fallback,
 			smdp_address = EXCLUDED.smdp_address,
+			profile_class = EXCLUDED.profile_class,
 			updated_at = now()
-	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.IsFallback, state.SMDPAddress)
+	`, tenantString(tenantID), state.EID, state.ICCID, state.IsEnabled, state.IsFallback, state.SMDPAddress, state.ProfileClass)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return storage.ErrNotFound
@@ -154,7 +155,7 @@ func (s *Store) GetEUICCState(ctx context.Context, tenantID storage.TenantID, ei
 		SELECT eid, eid_value, default_smdp_address, root_smds_address,
 			euicc_info1, euicc_info2, ipa_capabilities, device_info,
 			eum_certificate, euicc_certificate, certificate_identifiers,
-			raw_payload, updated_at
+			raw_payload, rules_authorisation_table, updated_at
 		FROM euicc_state
 		WHERE tenant_id = $1 AND eid = $2
 	`, tenantString(tenantID), eid).Scan(
@@ -170,6 +171,7 @@ func (s *Store) GetEUICCState(ctx context.Context, tenantID storage.TenantID, ei
 		&state.EUICCCertificate,
 		&identifiers,
 		&state.RawPayload,
+		&state.RulesAuthorisationTable,
 		&state.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -196,9 +198,10 @@ func (s *Store) SetEUICCState(ctx context.Context, tenantID storage.TenantID, st
 		INSERT INTO euicc_state (
 			tenant_id, eid, eid_value, default_smdp_address, root_smds_address,
 			euicc_info1, euicc_info2, ipa_capabilities, device_info,
-			eum_certificate, euicc_certificate, certificate_identifiers, raw_payload
+			eum_certificate, euicc_certificate, certificate_identifiers, raw_payload,
+			rules_authorisation_table
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (tenant_id, eid)
 		DO UPDATE SET eid_value = EXCLUDED.eid_value,
 			default_smdp_address = EXCLUDED.default_smdp_address,
@@ -211,10 +214,11 @@ func (s *Store) SetEUICCState(ctx context.Context, tenantID storage.TenantID, st
 			euicc_certificate = EXCLUDED.euicc_certificate,
 			certificate_identifiers = EXCLUDED.certificate_identifiers,
 			raw_payload = EXCLUDED.raw_payload,
+			rules_authorisation_table = COALESCE(EXCLUDED.rules_authorisation_table, euicc_state.rules_authorisation_table),
 			updated_at = now()
 	`, tenantString(tenantID), state.EID, state.EIDValue, state.DefaultSMDPAddress, state.RootSMDSAddress,
 		state.EUICCInfo1, state.EUICCInfo2, state.IPACapabilities, state.DeviceInfo,
-		state.EUMCertificate, state.EUICCCertificate, identifiers, state.RawPayload)
+		state.EUMCertificate, state.EUICCCertificate, identifiers, state.RawPayload, state.RulesAuthorisationTable)
 	if err != nil {
 		if isForeignKeyViolation(err) {
 			return storage.ErrNotFound
@@ -737,6 +741,10 @@ func isForeignKeyViolation(err error) bool {
 }
 
 func cloneProfileState(state storage.ProfileState) storage.ProfileState {
+	if state.ProfileClass != nil {
+		value := *state.ProfileClass
+		state.ProfileClass = &value
+	}
 	return state
 }
 
@@ -767,6 +775,7 @@ func cloneEUICCState(state storage.EUICCState) storage.EUICCState {
 	state.EUMCertificate = cloneBytes(state.EUMCertificate)
 	state.EUICCCertificate = cloneBytes(state.EUICCCertificate)
 	state.RawPayload = cloneBytes(state.RawPayload)
+	state.RulesAuthorisationTable = cloneBytes(state.RulesAuthorisationTable)
 	if state.CertificateIdentifiers != nil {
 		state.CertificateIdentifiers = append([]string(nil), state.CertificateIdentifiers...)
 	}

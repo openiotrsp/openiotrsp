@@ -281,6 +281,12 @@ func handleRelay(ctx context.Context, store storage.Store, tenantID storage.Tena
 	if request.Message.Raw.Tag.Equal(tagHandleNotify) || relayed.NoContent {
 		return Response{}, nil
 	}
+	if request.Message.Raw.Tag.Equal(tagAuthenticate) {
+		return finishAuthenticateClient(ctx, store, tenantID, relayService, logger, payload, relayed.Payload)
+	}
+	if request.Message.Raw.Tag.Equal(tagGetBoundPackage) {
+		return finishGetBoundProfilePackage(ctx, store, tenantID, relayService, logger, payload, relayed.Payload)
+	}
 	return relayResponse(relayed.Payload)
 }
 

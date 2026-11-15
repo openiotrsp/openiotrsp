@@ -110,10 +110,11 @@ type enqueueResponse struct {
 }
 
 type profileResponse struct {
-	ICCID       string `json:"iccid"`
-	IsEnabled   bool   `json:"isEnabled"`
-	IsFallback  bool   `json:"isFallback"`
-	SMDPAddress string `json:"smdpAddress"`
+	ICCID        string `json:"iccid"`
+	IsEnabled    bool   `json:"isEnabled"`
+	IsFallback   bool   `json:"isFallback"`
+	SMDPAddress  string `json:"smdpAddress"`
+	ProfileClass *int64 `json:"profileClass,omitempty"`
 }
 
 type statusResponse struct {
@@ -183,20 +184,21 @@ type eimStatusResponse struct {
 }
 
 type euiccDataResponse struct {
-	EID                    string            `json:"eid"`
-	EIDValueBase64         string            `json:"eidValueBase64,omitempty"`
-	DefaultSMDPAddress     string            `json:"defaultSmdpAddress,omitempty"`
-	RootSMDSAddress        string            `json:"rootSmdsAddress,omitempty"`
-	EUICCInfo1Base64       string            `json:"euiccInfo1Base64,omitempty"`
-	EUICCInfo2Base64       string            `json:"euiccInfo2Base64,omitempty"`
-	IPACapabilitiesBase64  string            `json:"ipaCapabilitiesBase64,omitempty"`
-	DeviceInfoBase64       string            `json:"deviceInfoBase64,omitempty"`
-	EUMCertificateBase64   string            `json:"eumCertificateBase64,omitempty"`
-	EUICCCertificateBase64 string            `json:"euiccCertificateBase64,omitempty"`
-	CertificateIdentifiers []string          `json:"certificateIdentifiers,omitempty"`
-	Profiles               []profileResponse `json:"profiles"`
-	RawPayloadBase64       string            `json:"rawPayloadBase64,omitempty"`
-	UpdatedAt              time.Time         `json:"updatedAt"`
+	EID                     string            `json:"eid"`
+	EIDValueBase64          string            `json:"eidValueBase64,omitempty"`
+	DefaultSMDPAddress      string            `json:"defaultSmdpAddress,omitempty"`
+	RootSMDSAddress         string            `json:"rootSmdsAddress,omitempty"`
+	EUICCInfo1Base64        string            `json:"euiccInfo1Base64,omitempty"`
+	EUICCInfo2Base64        string            `json:"euiccInfo2Base64,omitempty"`
+	IPACapabilitiesBase64   string            `json:"ipaCapabilitiesBase64,omitempty"`
+	DeviceInfoBase64        string            `json:"deviceInfoBase64,omitempty"`
+	EUMCertificateBase64    string            `json:"eumCertificateBase64,omitempty"`
+	EUICCCertificateBase64  string            `json:"euiccCertificateBase64,omitempty"`
+	CertificateIdentifiers  []string          `json:"certificateIdentifiers,omitempty"`
+	Profiles                []profileResponse `json:"profiles"`
+	RawPayloadBase64        string            `json:"rawPayloadBase64,omitempty"`
+	RulesAuthorisationTable string            `json:"rulesAuthorisationTableBase64,omitempty"`
+	UpdatedAt               time.Time         `json:"updatedAt"`
 }
 
 type resultResponse struct {
@@ -647,10 +649,11 @@ func (h *Handler) deviceStatus(w http.ResponseWriter, r *http.Request) {
 	profiles := make([]profileResponse, 0, len(states))
 	for _, state := range states {
 		profiles = append(profiles, profileResponse{
-			ICCID:       state.ICCID,
-			IsEnabled:   state.IsEnabled,
-			IsFallback:  state.IsFallback,
-			SMDPAddress: state.SMDPAddress,
+			ICCID:        state.ICCID,
+			IsEnabled:    state.IsEnabled,
+			IsFallback:   state.IsFallback,
+			SMDPAddress:  state.SMDPAddress,
+			ProfileClass: state.ProfileClass,
 		})
 	}
 	writeJSON(w, http.StatusOK, statusResponse{EID: eid, Profiles: profiles})
@@ -1014,27 +1017,29 @@ func (h *Handler) initialAssociationConfig(ctx context.Context, tenantID storage
 
 func newEUICCDataResponse(state storage.EUICCState, profiles []storage.ProfileState) euiccDataResponse {
 	out := euiccDataResponse{
-		EID:                    state.EID,
-		EIDValueBase64:         encodeOptionalBase64(state.EIDValue),
-		DefaultSMDPAddress:     state.DefaultSMDPAddress,
-		RootSMDSAddress:        state.RootSMDSAddress,
-		EUICCInfo1Base64:       encodeOptionalBase64(state.EUICCInfo1),
-		EUICCInfo2Base64:       encodeOptionalBase64(state.EUICCInfo2),
-		IPACapabilitiesBase64:  encodeOptionalBase64(state.IPACapabilities),
-		DeviceInfoBase64:       encodeOptionalBase64(state.DeviceInfo),
-		EUMCertificateBase64:   encodeOptionalBase64(state.EUMCertificate),
-		EUICCCertificateBase64: encodeOptionalBase64(state.EUICCCertificate),
-		CertificateIdentifiers: append([]string(nil), state.CertificateIdentifiers...),
-		RawPayloadBase64:       encodeOptionalBase64(state.RawPayload),
-		UpdatedAt:              state.UpdatedAt,
-		Profiles:               make([]profileResponse, 0, len(profiles)),
+		EID:                     state.EID,
+		EIDValueBase64:          encodeOptionalBase64(state.EIDValue),
+		DefaultSMDPAddress:      state.DefaultSMDPAddress,
+		RootSMDSAddress:         state.RootSMDSAddress,
+		EUICCInfo1Base64:        encodeOptionalBase64(state.EUICCInfo1),
+		EUICCInfo2Base64:        encodeOptionalBase64(state.EUICCInfo2),
+		IPACapabilitiesBase64:   encodeOptionalBase64(state.IPACapabilities),
+		DeviceInfoBase64:        encodeOptionalBase64(state.DeviceInfo),
+		EUMCertificateBase64:    encodeOptionalBase64(state.EUMCertificate),
+		EUICCCertificateBase64:  encodeOptionalBase64(state.EUICCCertificate),
+		CertificateIdentifiers:  append([]string(nil), state.CertificateIdentifiers...),
+		RawPayloadBase64:        encodeOptionalBase64(state.RawPayload),
+		RulesAuthorisationTable: encodeOptionalBase64(state.RulesAuthorisationTable),
+		UpdatedAt:               state.UpdatedAt,
+		Profiles:                make([]profileResponse, 0, len(profiles)),
 	}
 	for _, profile := range profiles {
 		out.Profiles = append(out.Profiles, profileResponse{
-			ICCID:       profile.ICCID,
-			IsEnabled:   profile.IsEnabled,
-			IsFallback:  profile.IsFallback,
-			SMDPAddress: profile.SMDPAddress,
+			ICCID:        profile.ICCID,
+			IsEnabled:    profile.IsEnabled,
+			IsFallback:   profile.IsFallback,
+			SMDPAddress:  profile.SMDPAddress,
+			ProfileClass: profile.ProfileClass,
 		})
 	}
 	return out

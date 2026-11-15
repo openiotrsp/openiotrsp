@@ -126,6 +126,19 @@ func finishInitiateAuthentication(
 	if err != nil {
 		return Response{}, err
 	}
+	if !isInitiateAuthErrorPayload(augmented) {
+		if ipaFeatureSet(state.IPACapabilities, ipaFeatureMinimizeEsipaBytes) {
+			minimized, fullCIPK, err := minimizeInitiateAuthentication(augmented, state.EUICCInfo1)
+			if err != nil {
+				logCtxParamsRejected(logger, session.eid, err)
+				return initiateAuthErrorResponse(initiateAuthErrorUndefined)
+			}
+			download.CIPKID = fullCIPK
+			augmented = minimized
+		} else if full := ciPKIdentifier(augmented); len(full) > 0 {
+			download.CIPKID = full
+		}
+	}
 	if relayService != nil && len(download.TransactionID) > 0 && session.eid != "" && !isInitiateAuthErrorPayload(payload) {
 		relayService.RememberDownload(download)
 	}

@@ -253,9 +253,10 @@ type EIMInfo struct {
 
 // ProfileInfo is the domain form of the persisted subset of SGP.32 ProfileInfo.
 type ProfileInfo struct {
-	ICCID      string
-	IsEnabled  bool
-	IsFallback bool
+	ICCID        string
+	IsEnabled    bool
+	IsFallback   bool
+	ProfileClass *int64
 }
 
 // ParseOperationResult maps raw EuiccResultData to the domain result for one
@@ -530,9 +531,10 @@ func listProfileInfoResult(raw *protocolasn1.TLV) (*Result, error) {
 			isEnabled = *profile.ProfileState == protocolasn1.ProfileStateEnabled
 		}
 		result.Profiles = append(result.Profiles, ProfileInfo{
-			ICCID:      fmt.Sprintf("%x", profile.ICCID),
-			IsEnabled:  isEnabled,
-			IsFallback: profile.FallbackAttribute,
+			ICCID:        fmt.Sprintf("%x", profile.ICCID),
+			IsEnabled:    isEnabled,
+			IsFallback:   profile.FallbackAttribute,
+			ProfileClass: profile.ProfileClass,
 		})
 	}
 	return result, nil

@@ -91,6 +91,15 @@ func applyPSMOState(
 			return nil
 		}
 		return syncProfileInventory(ctx, store, tenantID, eid, result.Profiles)
+	case OperationGetRAT:
+		if result == nil || result.RulesAuthorisationTable == nil {
+			return nil
+		}
+		raw, err := result.RulesAuthorisationTable.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return setRulesAuthorisationTable(ctx, store, tenantID, eid, raw)
 	case OperationSetFallbackAttribute:
 		return setProfileFallback(ctx, store, tenantID, eid, iccidHex)
 	case OperationUnsetFallbackAttribute:
@@ -141,12 +150,14 @@ func syncProfileInventory(ctx context.Context, store storage.Store, tenantID sto
 		state.ICCID = profile.ICCID
 		state.IsEnabled = profile.IsEnabled
 		state.IsFallback = profile.IsFallback
+		state.ProfileClass = profile.ProfileClass
 		if err := store.SetProfileState(ctx, tenantID, storage.ProfileState{
-			EID:         state.EID,
-			ICCID:       state.ICCID,
-			IsEnabled:   state.IsEnabled,
-			IsFallback:  state.IsFallback,
-			SMDPAddress: state.SMDPAddress,
+			EID:          state.EID,
+			ICCID:        state.ICCID,
+			IsEnabled:    state.IsEnabled,
+			IsFallback:   state.IsFallback,
+			SMDPAddress:  state.SMDPAddress,
+			ProfileClass: state.ProfileClass,
 		}); err != nil {
 			return err
 		}
@@ -215,6 +226,18 @@ func defaultDPAddressFromPackage(pkg protocolasn1.EuiccPackage) string {
 		return ""
 	}
 	return psmo.SetDefaultDPAddress.DefaultDPAddress
+}
+
+func setRulesAuthorisationTable(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, raw []byte) error {
+	state, err := store.GetEUICCState(ctx, tenantID, eid)
+	if errors.Is(err, storage.ErrNotFound) {
+		state = storage.EUICCState{EID: eid}
+	} else if err != nil {
+		return err
+	}
+	state.EID = eid
+	state.RulesAuthorisationTable = raw
+	return store.SetEUICCState(ctx, tenantID, state)
 }
 
 func setEUICCDefaultSMDPAddress(ctx context.Context, store storage.Store, tenantID storage.TenantID, eid string, address string) error {

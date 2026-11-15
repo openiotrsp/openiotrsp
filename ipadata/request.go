@@ -137,6 +137,7 @@ func syncProfileInventory(ctx context.Context, store storage.Store, tenantID sto
 		state.ICCID = iccid
 		state.IsEnabled = enabled
 		state.IsFallback = profile.FallbackAttribute
+		state.ProfileClass = profile.ProfileClass
 		if err := store.SetProfileState(ctx, tenantID, state); err != nil {
 			return err
 		}

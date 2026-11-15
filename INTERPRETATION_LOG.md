@@ -564,13 +564,17 @@ Each entry must include:
   A1 deviceInfo } }`. `deviceInfo` is the stored IpaEuiccData `A9` retagged as
   `[1]`; the SEQUENCE contents are unchanged. If bit 3 is set and `DeviceInfo`
   is missing, the eIM returns BF39 `undefinedError(127)` and does not forward
-  the SM-DP+ OK. The SM-DP+ `transactionId` and CI public-key identifier are
-  left as received: both are optional on the ESipa OK, and the IPA can read
-  the transaction id from `serverSigned1`. Per SM-DP+ transaction id the relay
-  remembers `serverSigned1`'s transaction id, server address, and server
+  the SM-DP+ OK. When `minimizeEsipaBytes` is set, the ESipa OK omits
+  `transactionId [0]` and sends `euiccCiPKIdentifierToBeUsed` truncated against
+  `EUICCInfo1.euiccCiPKIdListForSigning` (zero-length OCTET STRING when that
+  list has one entry). The relay still remembers the full identifier and the
+  transaction id taken from `serverSigned1`. Without that capability both
+  fields are forwarded as the SM-DP+ sent them. Per SM-DP+ transaction id the
+  relay remembers `serverSigned1`'s transaction id, server address, and server
   challenge, plus the generated CtxParams1 CHOICE (`A0`, not the `A2`
-  wrapper). Compact BF38, BF21, and `compactProfileInstallationResult` are
-  rebuilt into the SGP.22 structures before ES9+. `euiccSigned1` uses stored
+  wrapper) and the full CI public-key identifier. Compact BF38, BF21, and
+  `compactProfileInstallationResult` are rebuilt into the SGP.22 structures
+  before ES9+. `euiccSigned1` uses stored
   EUICCInfo2 with `extCardResource` replaced by the compact value, and
   `ctxParams1` from the IPA when present, otherwise the remembered value.
   Certificates come from the IPA or stored `A6`/`A5`. A compact install
@@ -586,4 +590,36 @@ Each entry must include:
   it. The same class of IPA sends compact ES10b results; the SM-DP+ verifies
   the eUICC signature over the full SGP.22 structure, so the rebuilt bytes
   have to be the bytes that were signed.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 eIM profile metadata verification
+
+- Spec section: SGP.32 v1.3 §5.14.2 `GetBoundProfilePackage`, §5.14.3
+  `AuthenticateClient`, IPA capability `eimProfileMetadataVerification`.
+  SGP.22 §3.1.3 steps 7a, 7b, 7c, and 8, and §2.9.2.1 Profile Policy
+  Authorisation Rules. §2.9.2.3 is void; §2.9.2.4 is the LPA check that
+  replaced it.
+- Ambiguity: Step 7a rejects PPRs when the LPAd refuses them on a removable
+  eUICC. Step 8 also asks the end user for consent when the RAT says
+  `consentRequired`. The eIM has no end-user prompt. `profileClass` is
+  optional on `ProfileInfo`, while `StoreMetadataRequest` defaults an absent
+  class to operational. The bound-package `StoreMetadata` is MAC-protected in
+  `88` segments and is not a cleartext field of `BoundProfilePackage`.
+- Chosen reading: The eIM does not apply step 7a. It allows a PPR when a PPAR
+  lists that PPR and an allowed operator matches the metadata `profileOwner`
+  (MCC/MNC nibble `E` and empty gid are wildcards; an omitted gid matches only
+  an omitted gid). `consentRequired` does not reject the download. PPR1 is
+  refused when a stored profile has `profileClass` operational(2). A missing
+  class is not treated as operational, so a bootstrap profile that omits tag
+  `95` does not block PPR1. No RAT, or no matching PPAR, is
+  `pprNotAllowed(50)`. The BPP check concatenates each `88` value without its
+  last eight MAC bytes and requires those bytes to equal the
+  `StoreMetadataRequest` from AuthenticateClient. A mismatch is
+  `metadataMismatch(50)`. The verified `getRATResult` (tag `A6`) is stored on
+  the eUICC record and is kept when a later `IpaEuiccData` refresh does not
+  carry a RAT.
+- Rationale: SGP.32 requires the eIM to perform the LPA's PPR check and to
+  withhold `profileMetadata`. Treating every class-less profile as operational
+  would refuse PPR1 next to a provisioning profile. The `88` segment layout is
+  the only place SGP.22 puts an unencrypted StoreMetadata command.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

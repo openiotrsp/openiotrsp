@@ -519,6 +519,9 @@ func noteAuthenticateClientResponse(relayService *relay.Relay, payload []byte) {
 			if aid := meta.First(tagISDPAID); aid != nil && len(aid.Value) > 0 {
 				ctx.ISDPAID = cloneBytes(aid.Value)
 			}
+			if raw, err := meta.MarshalBinary(); err == nil {
+				ctx.ProfileMetadata = raw
+			}
 		}
 		for _, child := range ok.Children {
 			if child.Tag.Equal(tagSequence) && child.First(bertlv.ContextSpecific.Primitive(0)) != nil {
