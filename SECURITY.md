@@ -41,3 +41,12 @@ The project depends only on permissively-licensed (MIT, BSD, Apache 2.0,
 ISC) pure-Go dependencies, recorded in [LICENSES.md](LICENSES.md) and
 enforced by `go-licenses check` in CI. The project builds with CGO disabled
 (`CGO_ENABLED=0`), so no C code is linked into the binaries.
+
+## Security acknowledgments
+** Adam Bedard, Security Researcher** reported issues in ESipa provide-result
+handling, including replay of old signed eUICC package results affecting eIM
+state and acceptance of unsigned package errors when eUICC verification is
+enabled. Regression coverage lives under `esipa/replay_security_test.go`.
+GHSA-chwp-gmww-6v85
+GHSA-6vvj-g7qc-6xh2
+

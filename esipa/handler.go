@@ -70,6 +70,13 @@ var (
 	errUnsupportedMessage    = errors.New("esipa: unsupported IPA-to-eIM message")
 	errMissingEUICCPublicKey = errors.New("esipa: eUICC public key resolver is required")
 
+	// errUnsignedEuiccPackageErrorRejected is returned when an IPA provides a
+	// EuiccPackageResultErrorUnsigned while the handler is configured to verify
+	// eUICC package results. Unsigned errors carry no eUICC signature; accepting
+	// them as terminal failures would let any caller who knows correlation IDs
+	// from GetEimPackage clear the pending queue without proof from the card.
+	errUnsignedEuiccPackageErrorRejected = errors.New("esipa: unsigned EuiccPackageResult rejected when eUICC result verification is enabled")
+
 	tagSequence         = bertlv.Universal.Constructed(16)
 	tagEID              = bertlv.Application.Primitive(26)
 	tagEuiccPackage     = bertlv.ContextSpecific.Constructed(81)
@@ -638,6 +645,9 @@ func recordEimPackageResult(
 		return nil, false, err
 	}
 	logProvideResultOutcome(logger, eid, &result)
+	if result.Kind == protocolasn1.EuiccPackageResultErrorUnsigned && !allowUnverifiedEUICCPackageResults {
+		return nil, false, errUnsignedEuiccPackageErrorRejected
+	}
 	resultDER, err := resultTLV.MarshalBinary()
 	if err != nil {
 		return nil, false, err
@@ -661,6 +671,9 @@ func recordEimPackageResult(
 	}
 	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
 	for _, operation := range operations {
+		// Idempotent redelivery may correlate a completed operation; do not
+		// re-apply package side effects when that operation already finished.
+		alreadyCompleted := operation.Status == storage.OperationDone
 		var status storage.OperationStatus
 		var domain *euiccpkg.Result
 		if allowUnverifiedEUICCPackageResults {
@@ -683,7 +696,7 @@ func recordEimPackageResult(
 		}); err != nil {
 			return nil, false, err
 		}
-		if status == storage.OperationDone {
+		if status == storage.OperationDone && !alreadyCompleted {
 			if allowUnverifiedEUICCPackageResults {
 				err = applyEUICCPackageOperationState(ctx, store, tenantID, operation, &result)
 			} else {
