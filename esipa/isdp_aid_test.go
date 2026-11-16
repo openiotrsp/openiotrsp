@@ -56,7 +56,7 @@ func TestBoundPackageCleartextISDPAIDRestoresCompactSuccess(t *testing.T) {
 	}
 
 	before := notificationCalls(transport)
-	handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess(aid[len(aid)-2:])))
+	handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess(compactAidOf(aid))))
 	if notificationCalls(transport) != before+1 {
 		t.Fatal("ES9+ HandleNotification was not called for the restored AID")
 	}
@@ -72,7 +72,7 @@ func TestBoundPackageCleartextISDPAIDRestoresCompactSuccess(t *testing.T) {
 	rejected := handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess([]byte{0x00, 0x00})))
 	assertIntegerError(t, rejected, tagHandleNotify, initiateAuthErrorUndefined)
 	if notificationCalls(transport) != before+1 {
-		t.Fatal("ES9+ HandleNotification was called for a compactAid that is not the stored suffix")
+		t.Fatal("ES9+ HandleNotification was called for a compactAid that is not bytes 14 and 15")
 	}
 }
 
@@ -117,7 +117,7 @@ func TestMetadataISDPAIDIsKeptWhenBoundPackageHasAnother(t *testing.T) {
 	}
 
 	before := notificationCalls(transport)
-	handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess(fromMetadata[len(fromMetadata)-2:])))
+	handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess(compactAidOf(fromMetadata))))
 	if notificationCalls(transport) != before+1 {
 		t.Fatal("ES9+ HandleNotification was not called for the metadata AID")
 	}
@@ -126,10 +126,96 @@ func TestMetadataISDPAIDIsKeptWhenBoundPackageHasAnother(t *testing.T) {
 	if restored == nil || !bytes.Equal(restored.Value, fromMetadata) {
 		t.Fatalf("SuccessResult.aid = %v, want %x", restored, fromMetadata)
 	}
-	rejected := handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess(other[len(other)-2:])))
+	rejected := handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess(compactAidOf(other))))
 	assertIntegerError(t, rejected, tagHandleNotify, initiateAuthErrorUndefined)
 	if notificationCalls(transport) != before+1 {
-		t.Fatal("ES9+ HandleNotification was called for the other AID suffix")
+		t.Fatal("ES9+ HandleNotification was called for the other AID")
+	}
+}
+
+func TestCompactSuccessRebuildsGSMAISDPAID(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	meta := sampleStoreMetadata(t, false)
+	handler, transport := setupIndirectDownload(t, 0xcc, meta)
+	txn := []byte{0x01, 0x02, 0x03}
+	session, ok := handler.Relay.DownloadContext(txn)
+	if !ok || len(session.ISDPAID) != 0 {
+		t.Fatalf("ISD-P AID after AuthenticateClient = %x, want empty", session.ISDPAID)
+	}
+
+	metaBytes := marshalTLV(t, meta)
+	segment := append(append([]byte{}, metaBytes...), bytes.Repeat([]byte{0xab}, scp03tMACLen)...)
+	bpp := longFormTLV(tagBoundPackage, marshalTLV(t, bertlv.NewValue(tagSegment88, segment)))
+	txnTLV := marshalTLV(t, bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), txn))
+	payload := mustRawSuccess(t, tagGetBoundPackage, true, txnTLV, bpp)
+	transport.responses[relay.EndpointGetBoundProfilePackage] = relay.Response{Payload: payload}
+
+	response := handleTLV(t, ctx, handler, mustGetBoundRequest(t, txn))
+	got, err := EncodeResponse(response)
+	if err != nil {
+		t.Fatalf("EncodeResponse() error = %v", err)
+	}
+	if !bytes.Equal(got, mustRawSuccess(t, tagGetBoundPackage, true, bpp)) {
+		t.Fatalf("GetBoundProfilePackage rewrote BF36\n got %x\nwant original BF36", got)
+	}
+	session, ok = handler.Relay.DownloadContext(txn)
+	if !ok || len(session.ISDPAID) != 0 {
+		t.Fatalf("ISD-P AID after bound package = %x, want empty", session.ISDPAID)
+	}
+
+	want := []byte{0xa0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10, 0xff, 0xff, 0xff, 0xff, 0x89, 0x00, 0x00, 0x14, 0x00}
+	before := notificationCalls(transport)
+	handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess([]byte{0x00, 0x14})))
+	if notificationCalls(transport) != before+1 {
+		t.Fatal("ES9+ HandleNotification was not called for the rebuilt AID")
+	}
+	posted := lastNotification(t, transport)
+	restored := findTLV(parseTLV(t, posted), tagISDPAID)
+	if restored == nil || !bytes.Equal(restored.Value, want) {
+		t.Fatalf("SuccessResult.aid = %v, want %x", restored, want)
+	}
+	if !bytes.Contains(posted, defaultSimaResponse) {
+		t.Fatalf("rebuilt notification missing default simaResponse: %x", posted)
+	}
+	session, ok = handler.Relay.DownloadContext(txn)
+	if !ok || !bytes.Equal(session.ISDPAID, want) {
+		t.Fatalf("download session AID = %x, want %x", session.ISDPAID, want)
+	}
+}
+
+func TestStoredISDPAIDMatchesBytes14And15(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	aid := []byte{0xa0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10, 0xff, 0xff, 0xff, 0xff, 0x89, 0x00, 0x00, 0x14, 0x00}
+	meta := bertlv.NewChildren(tagProfileMetadata,
+		bertlv.NewValue(tagEID, bytes.Repeat([]byte{0x89}, 10)),
+		bertlv.NewValue(tagISDPAID, aid),
+	)
+	handler, transport := setupIndirectDownload(t, 0xcc, meta)
+	txn := []byte{0x01, 0x02, 0x03}
+	session, ok := handler.Relay.DownloadContext(txn)
+	if !ok || !bytes.Equal(session.ISDPAID, aid) {
+		t.Fatalf("ISD-P AID = %x, want %x", session.ISDPAID, aid)
+	}
+
+	before := notificationCalls(transport)
+	handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess([]byte{0x00, 0x14})))
+	if notificationCalls(transport) != before+1 {
+		t.Fatal("ES9+ HandleNotification was not called for compactAid 0014")
+	}
+	posted := lastNotification(t, transport)
+	restored := findTLV(parseTLV(t, posted), tagISDPAID)
+	if restored == nil || !bytes.Equal(restored.Value, aid) {
+		t.Fatalf("SuccessResult.aid = %v, want %x", restored, aid)
+	}
+
+	rejected := handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess([]byte{0x14, 0x00})))
+	assertIntegerError(t, rejected, tagHandleNotify, initiateAuthErrorUndefined)
+	if notificationCalls(transport) != before+1 {
+		t.Fatal("ES9+ HandleNotification was called for the last two AID octets")
 	}
 }
 
@@ -140,12 +226,6 @@ func TestCompactNotificationWithoutCleartextAID(t *testing.T) {
 	handler, transport := setupIndirectDownload(t, 0xcc, sampleStoreMetadata(t, false))
 	txn := []byte{0x01, 0x02, 0x03}
 	before := notificationCalls(transport)
-
-	rejected := handleTLV(t, ctx, handler, compactInstall(t, txn, compactSuccess([]byte{0x12, 0x34})))
-	assertIntegerError(t, rejected, tagHandleNotify, initiateAuthErrorUndefined)
-	if notificationCalls(transport) != before {
-		t.Fatal("ES9+ HandleNotification was called without a full ISD-P AID")
-	}
 
 	handleTLV(t, ctx, handler, compactInstall(t, txn, compactErrorResult()))
 	if notificationCalls(transport) != before+1 {
@@ -221,6 +301,11 @@ func compactInstall(t *testing.T, txn []byte, final *bertlv.TLV) []byte {
 			bertlv.NewValue(tagSignature, []byte{0x01}),
 		),
 	))
+}
+
+// compactAidOf is bytes 14 and 15 of an ISD-P AID, counted from 1.
+func compactAidOf(aid []byte) []byte {
+	return aid[13:15]
 }
 
 func compactSuccess(suffix []byte) *bertlv.TLV {

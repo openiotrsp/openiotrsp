@@ -38,6 +38,15 @@ var (
 	// defaultSimaResponse is the success EUICCResponse compact form omits.
 	// SGP.32 CompactSuccessResult: 30 07 A0 05 30 03 80 01 00.
 	defaultSimaResponse = []byte{0x30, 0x07, 0xa0, 0x05, 0x30, 0x03, 0x80, 0x01, 0x00}
+
+	// gsmaISDPAIDPrefix is bytes 1–13 of an ISD-P AID in the SGP.02 layout
+	// that SGP.22 Annex D points at. Byte 16 is 0x00. SGP.32
+	// CompactSuccessResult.compactAid is bytes 14 and 15, which the eUICC
+	// chooses when it creates the ISD-P.
+	gsmaISDPAIDPrefix = []byte{
+		0xa0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10,
+		0xff, 0xff, 0xff, 0xff, 0x89, 0x00,
+	}
 )
 
 func compactError(reason string) error {
@@ -421,6 +430,9 @@ func rebuildProfileInstallationResult(relayService *relay.Relay, compact *bertlv
 	if err != nil {
 		return nil, err
 	}
+	if len(session.ISDPAID) == 0 {
+		rememberRebuiltISDPAID(relayService, txNode.Value, final)
+	}
 	seqTLV, err := bertlv.MarshalValue(bertlv.ContextSpecific.Primitive(0), primitive.MarshalInt(seq))
 	if err != nil {
 		return nil, err
@@ -469,16 +481,9 @@ func expandCompactFinalResult(final *bertlv.TLV, session relay.DownloadContext) 
 	if aidNode == nil || len(aidNode.Value) == 0 {
 		return nil, compactError("compact success result missing aid")
 	}
-	aid := session.ISDPAID
-	if len(aid) == 0 {
-		return nil, compactError("download session missing ISD-P AID")
-	}
-	if len(aidNode.Value) == 2 {
-		if len(aid) < 2 || !bytes.Equal(aid[len(aid)-2:], aidNode.Value) {
-			return nil, compactError("compactAid does not match the stored ISD-P AID")
-		}
-	} else if !bytes.Equal(aid, aidNode.Value) {
-		aid = cloneBytes(aidNode.Value)
+	aid, err := aidFromCompactSuccess(session.ISDPAID, aidNode.Value)
+	if err != nil {
+		return nil, err
 	}
 	sima := defaultSimaResponse
 	if child := success.First(tagOctetString); child != nil && len(child.Value) > 0 {
@@ -486,10 +491,58 @@ func expandCompactFinalResult(final *bertlv.TLV, session relay.DownloadContext) 
 	}
 	return bertlv.NewChildren(tagCompactOK,
 		bertlv.NewChildren(tagCompactSigned1,
-			bertlv.NewValue(tagISDPAID, cloneBytes(aid)),
+			bertlv.NewValue(tagISDPAID, aid),
 			bertlv.NewValue(tagOctetString, sima),
 		),
 	), nil
+}
+
+// aidFromCompactSuccess returns SuccessResult.aid. A two-byte compactAid is
+// bytes 14 and 15 of the ISD-P AID (SGP.32 CompactSuccessResult). With no
+// stored AID those bytes are written into the SGP.02 layout. A stored AID is
+// kept when compactAid matches bytes 14 and 15 of that value.
+func aidFromCompactSuccess(stored, compact []byte) ([]byte, error) {
+	if len(compact) == 2 {
+		if len(stored) == 0 {
+			aid := make([]byte, 16)
+			copy(aid, gsmaISDPAIDPrefix)
+			copy(aid[13:15], compact)
+			return aid, nil
+		}
+		if len(stored) < 15 || !bytes.Equal(stored[13:15], compact) {
+			return nil, compactError("compactAid does not match the stored ISD-P AID")
+		}
+		return cloneBytes(stored), nil
+	}
+	if len(stored) == 0 {
+		return nil, compactError("download session missing ISD-P AID")
+	}
+	if bytes.Equal(stored, compact) {
+		return cloneBytes(stored), nil
+	}
+	return cloneBytes(compact), nil
+}
+
+// rememberRebuiltISDPAID keeps a GSMA-layout AID built from compactAid on the
+// in-memory download session. A tag 4F already stored from metadata or
+// cleartext BF36 is left as it is.
+func rememberRebuiltISDPAID(relayService *relay.Relay, transactionID []byte, final *bertlv.TLV) {
+	if relayService == nil || len(transactionID) == 0 || final == nil {
+		return
+	}
+	success := final.First(tagCompactSigned1)
+	if success == nil {
+		return
+	}
+	aidNode := success.First(tagISDPAID)
+	if aidNode == nil || len(aidNode.Value) != 16 {
+		return
+	}
+	relayService.UpdateDownload(transactionID, func(ctx *relay.DownloadContext) {
+		if len(ctx.ISDPAID) == 0 {
+			ctx.ISDPAID = cloneBytes(aidNode.Value)
+		}
+	})
 }
 
 func noteAuthenticateClientResponse(relayService *relay.Relay, payload []byte) {

@@ -554,7 +554,7 @@ Each entry must include:
 - Ambiguity: `InitiateAuthenticationOkEsipa` mixes explicitly tagged members
   with an untagged `matchingId` under `AUTOMATIC TAGS`. `ctxParams1` is a
   CHOICE under an explicit tag. Compact forms omit bytes the eUICC already
-  signed, including all but the last two octets of the ISD-P AID, and they do
+  signed, carrying only bytes 14 and 15 of the ISD-P AID, and they do
   not carry `profileManagementOperation`. SGP.32 §5.14.1 also says the eIM
   shall not send `transactionId` and shall truncate `euiccCiPKIdentifierToBeUsed`
   when `minimizeEsipaBytes` is set.
@@ -580,11 +580,12 @@ Each entry must include:
   Certificates come from the IPA or stored `A6`/`A5`. A compact install
   result restores `notificationInstall` as a one-bit BIT STRING, the
   notification address from `serverSigned1.serverAddress`, ICCID and the full
-  ISD-P AID from the download context (filled from AuthenticateClient profile
-  metadata when those tags are present), the nine-byte success `simaResponse`
-  when the compact form omits it, and the activation-code SM-DP+ OID when one
-  was present. The two-byte `compactAid` must be the suffix of the remembered
-  AID.
+  ISD-P AID from the download context (a tag `4F` from AuthenticateClient
+  profile metadata or cleartext BF36 when one is present, otherwise the
+  SGP.02 layout filled from `compactAid`), the nine-byte success
+  `simaResponse` when the compact form omits it, and the activation-code
+  SM-DP+ OID when one was present. The two-byte `compactAid` is bytes 14 and
+  15 of that AID.
 - Rationale: An IPAe that sets `eimCtxParams1Generation` does not build
   `ctxParams1` and cannot call ES10b.AuthenticateServer until the eIM returns
   it. The same class of IPA sends compact ES10b results; the SM-DP+ verifies
@@ -653,8 +654,8 @@ Each entry must include:
 
 ## SGP.32 compact installation result restores the full ISD-P AID
 
-- Spec section: SGP.32 v1.3 `CompactSuccessResult.compactAid` ("Byte 14 and 15 of ISD-P AID") and `SuccessResult.aid`. SGP.22 v2.7 §2.5.4 `BoundProfilePackage`, §5.5.2 `ConfigureISDP`, §5.5.3 `StoreMetadataRequest`.
-- Ambiguity: The eUICC assigns the ISD-P AID while processing ConfigureISDP, and that command is an encrypted tag `87`. `StoreMetadataRequest` has no `isdpAid`. AuthenticateClient `profileMetadata` is the same structure and, for a profile such as Telit's, carries no tag `4F`. The compact result then contains only two AID bytes, which are not enough for the `ProfileInstallationResult` the eUICC signed.
-- Chosen reading: Keep a tag `4F` from AuthenticateClient metadata when it is present. Otherwise, when GetBoundProfilePackage is handled, store the first cleartext tag `4F` of 5 to 16 bytes in that success. Do not search encrypted tag `86` or `87` values. A tag `88` segment is MAC-only, so search its command bytes and stop before the eight-byte MAC. `compactAid` must be the last two bytes of the stored AID. `SuccessResult.aid` is that full value. A missing `simaResponse` stays `30 07 A0 05 30 03 80 01 00`. If no full AID was in the clear, return `undefinedError` and do not invent a GSMA RID in front of the two compact bytes. A compact `errorResult` is cloned as received. The search reads the parsed tree and does not change any byte of BF36.
-- Rationale: The signed installation result carries the full AID. A wrong prefix is rejected by the SM-DP+. The metadata comparison already requires the bound-package StoreMetadata to equal the AuthenticateClient copy, so a missing `4F` there cannot be filled from that field. The AID has to be taken from some other cleartext field the download actually contains.
+- Spec section: SGP.32 v1.3 `CompactSuccessResult.compactAid` ("Byte 14 and 15 of ISD-P AID"), §5.14.7, and `SuccessResult.aid`. SGP.22 v2.7 Annex D, §2.5.4 `BoundProfilePackage`, §5.5.2 `ConfigureISDP`, §5.5.3 `StoreMetadataRequest`. SGP.02 AID coding.
+- Ambiguity: The eUICC assigns the ISD-P AID while processing ConfigureISDP, and that command is an encrypted tag `87`. `StoreMetadataRequest` has no `isdpAid`. AuthenticateClient `profileMetadata` is the same structure and, for a profile such as Telit's, carries no tag `4F`. The compact result then contains only two AID bytes. Those bytes are numbered 14 and 15 of the 16-byte SGP.02 ISD-P AID, whose other bytes are fixed, and not the final two octets.
+- Chosen reading: Keep a tag `4F` from AuthenticateClient metadata when it is present. Otherwise, when GetBoundProfilePackage is handled, store the first cleartext tag `4F` of 5 to 16 bytes in that success. Do not search encrypted tag `86` or `87` values. A tag `88` segment is MAC-only, so search its command bytes and stop before the eight-byte MAC. When a full AID is stored, `compactAid` must equal bytes 14 and 15 of it and `SuccessResult.aid` is that stored value. When no full AID is stored, build `A0000005591010FFFFFFFF8900 || compactAid || 00`, put that value in `SuccessResult.aid`, and keep it on the in-memory download session. A missing `simaResponse` stays `30 07 A0 05 30 03 80 01 00`. A mismatch against a stored AID is `undefinedError` and ES9+ is not called. A compact `errorResult` is cloned as received. The search reads the parsed tree and does not change any byte of BF36.
+- Rationale: SGP.32 §5.14.7 restores a compact notification from information the eIM already has. The SGP.02 layout fixes bytes 1–13 and byte 16; the eUICC chooses bytes 14 and 15, which is `compactAid`. Comparing those two bytes with the AID suffix rejects a real success (`0014` against an AID ending `1400`). A stored tag `4F` is still preferred, because that is the AID the download actually carried.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

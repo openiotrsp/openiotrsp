@@ -125,7 +125,7 @@ var sgp32ModuleInventory = []moduleStructureInventoryEntry{
 	{"ProfileInstallationResult", implementationPartial, "Decodes ProfileInstallationResultData metadata and finalResult success/failure; detailed SGP.22 success/error payloads remain raw TLV."},
 	{"CompactProfileInstallationResult", implementationRawTLV, "esipa expands this into ProfileInstallationResult before ES9+.HandleNotification."},
 	{"CompactProfileInstallationResultData", implementationRawTLV, "esipa reads transactionId, seqNumber, iccidPresent, and compactFinalResult when rebuilding the signed PIR."},
-	{"CompactSuccessResult", implementationRawTLV, "esipa restores the full ISD-P AID and the default success simaResponse when the compact form omits them."},
+	{"CompactSuccessResult", implementationRawTLV, "esipa restores SuccessResult.aid from a stored tag 4F or the SGP.02 layout, and the default success simaResponse when the compact form omits them."},
 	{"CompactOtherSignedNotification", implementationNotImplemented, "Deferred compact notification model."},
 	{"CancelSessionResponse", implementationRawTLV, "Stage 14 indirect-download relay preserves cancel-session response bytes; structured decoding remains deferred."},
 	{"CompactCancelSessionResponseOk", implementationNotImplemented, "Deferred compact cancellation flow."},
