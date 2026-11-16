@@ -222,6 +222,12 @@ func shouldRelay(tlv *bertlv.TLV, relayService *relay.Relay) bool {
 	if err != nil {
 		return false
 	}
+	// A compact installation result is rebuilt before the SM-DP+ hop. Route
+	// it here even when the transaction is unknown, so a missing download
+	// session fails expansion and does not fall through to local storage.
+	if findCompactProfileInstallation(tlv) != nil {
+		return true
+	}
 	return relayService.CanHandleNotification(payload)
 }
 
@@ -235,10 +241,14 @@ func isLocalHandleNotification(tlv *bertlv.TLV) bool {
 	if !tlv.Children[0].Tag.Equal(tagNotificationList) {
 		return false
 	}
-	// pendingNotification [0] is also context [0]. A compact profile
-	// installation result under that tag is an SM-DP+ notification, not a
-	// local notificationsList.
-	return findCompactProfileInstallation(tlv) == nil
+	// pendingNotification [0] is also context [0]. A profile installation
+	// result under that tag is an SM-DP+ notification, not a local
+	// notificationsList. The compact arm is context [0]; the full arm is BF37.
+	if findCompactProfileInstallation(tlv) != nil {
+		return false
+	}
+	pending := tlv.Children[0]
+	return len(pending.Children) != 1 || !pending.Children[0].Tag.Equal(tagProfileInstall)
 }
 
 func handleRelay(ctx context.Context, store storage.Store, tenantID storage.TenantID, request Request, relayService *relay.Relay, logger *slog.Logger) (Response, error) {
@@ -281,7 +291,18 @@ func handleRelay(ctx context.Context, store storage.Store, tenantID storage.Tena
 	if err != nil {
 		return Response{}, err
 	}
-	if request.Message.Raw.Tag.Equal(tagHandleNotify) || relayed.NoContent {
+	if request.Message.Raw.Tag.Equal(tagHandleNotify) {
+		// SGP.32 v1.3 §3.2.3.2 step 23: the IPA sent the installation result
+		// as a pending notification. The SM-DP+ has accepted it. Record the
+		// trigger locally as BF54 and still answer with an empty 204. Do not
+		// send that BF54 to the IPA. §2.11.2.3's direct BF54 stays on the
+		// local HandleNotification path.
+		if err := recordIndirectProfileInstallation(ctx, store, tenantID, relayService, payload); err != nil {
+			return Response{}, err
+		}
+		return Response{}, nil
+	}
+	if relayed.NoContent {
 		return Response{}, nil
 	}
 	if request.Message.Raw.Tag.Equal(tagAuthenticate) {
@@ -1058,6 +1079,74 @@ func applyEUICCPackageOperationState(
 		domain = parsed
 	}
 	return euiccpkg.ApplyPackageResultState(ctx, store, tenantID, operation.EID, request.EuiccPackageSigned.EuiccPackage, domain)
+}
+
+// recordIndirectProfileInstallation closes the profile-download-trigger that
+// started this download after ES9+.HandleNotification has accepted a
+// ProfileInstallationResult. payload is the notification that was forwarded,
+// including a compact result after it was rebuilt into BF37.
+//
+// The trigger is the one whose eimTransactionId was stored on the download
+// session at InitiateAuthentication. Another pending trigger for the same
+// eUICC is left pending. A session with no remembered eimTransactionId, or a
+// notification that is not a ProfileInstallationResult, writes nothing.
+// Profile inventory is unchanged: recordProfileDownloadTriggerResult does not
+// invent an ICCID or profileState from the installation result.
+func recordIndirectProfileInstallation(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	relayService *relay.Relay,
+	payload []byte,
+) error {
+	if store == nil || relayService == nil {
+		return nil
+	}
+	root, err := parseRelayTLV(payload)
+	if err != nil {
+		return nil
+	}
+	installation := findProfileInstallation(root)
+	if installation == nil {
+		return nil
+	}
+	var parsed protocolasn1.ProfileInstallationResult
+	if err := parsed.UnmarshalBERTLV(installation); err != nil || parsed.Data == nil || len(parsed.Data.TransactionID) == 0 {
+		return nil
+	}
+	session, ok := relayService.DownloadContext(parsed.Data.TransactionID)
+	if !ok || session.EID == "" || len(session.EimTransactionID) == 0 {
+		return nil
+	}
+	result := &protocolasn1.ProfileDownloadTriggerResult{
+		EimTransactionID:       cloneBytes(session.EimTransactionID),
+		ProfileInstallationRaw: installation.Clone(),
+	}
+	tlv, err := result.MarshalBERTLV()
+	if err != nil {
+		return err
+	}
+	encoded, err := tlv.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	_, err = recordProfileDownloadTriggerResult(ctx, store, tenantID, session.EID, tlv, encoded)
+	return err
+}
+
+func findProfileInstallation(tlv *bertlv.TLV) *bertlv.TLV {
+	if tlv == nil {
+		return nil
+	}
+	if tlv.Tag.Equal(tagProfileInstall) {
+		return tlv
+	}
+	for _, child := range tlv.Children {
+		if found := findProfileInstallation(child); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func recordProfileDownloadTriggerResult(

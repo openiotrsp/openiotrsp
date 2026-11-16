@@ -50,10 +50,11 @@ type initiateAuthFields struct {
 }
 
 type initiateAuthSession struct {
-	activation   profiledownload.ActivationCode
-	checkAddress bool
-	checkOID     bool
-	eid          string
+	activation       profiledownload.ActivationCode
+	checkAddress     bool
+	checkOID         bool
+	eid              string
+	eimTransactionID []byte
 }
 
 func handleInitiateAuthentication(
@@ -139,6 +140,7 @@ func finishInitiateAuthentication(
 			download.CIPKID = full
 		}
 	}
+	download.EimTransactionID = cloneBytes(session.eimTransactionID)
 	if relayService != nil && len(download.TransactionID) > 0 && session.eid != "" && !isInitiateAuthErrorPayload(payload) {
 		relayService.RememberDownload(download)
 	}
@@ -201,7 +203,10 @@ func resolveInitiateAuthSession(
 		resp, err := initiateAuthErrorResponse(initiateAuthErrorInvalidEimTransactionID)
 		return initiateAuthSession{}, &resp, err
 	}
-	session := initiateAuthSession{eid: operation.EID}
+	session := initiateAuthSession{
+		eid:              operation.EID,
+		eimTransactionID: cloneBytes(fields.transactionID),
+	}
 	if trigger.ProfileDownloadData != nil &&
 		trigger.ProfileDownloadData.Kind == protocolasn1.ProfileDownloadActivationCode {
 		activation, err := profiledownload.ParseActivationCode(trigger.ProfileDownloadData.ActivationCode)

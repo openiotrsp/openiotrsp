@@ -27,6 +27,11 @@ type DownloadContext struct {
 	// ProfileMetadata is the StoreMetadataRequest TLV from AuthenticateClient,
 	// kept so GetBoundProfilePackage can compare the bound package copy.
 	ProfileMetadata []byte
+	// EimTransactionID is the eimTransactionId of the pending
+	// profile-download-trigger that InitiateAuthentication resolved for this
+	// download. It is empty when the download was not started by a trigger.
+	// The value lives only in this in-memory record.
+	EimTransactionID []byte
 }
 
 // RememberDownload stores context for transactionId, replacing any previous
@@ -88,5 +93,6 @@ func cloneDownloadContext(ctx DownloadContext) DownloadContext {
 	ctx.SMDPOID = cloneBytes(ctx.SMDPOID)
 	ctx.CIPKID = cloneBytes(ctx.CIPKID)
 	ctx.ProfileMetadata = cloneBytes(ctx.ProfileMetadata)
+	ctx.EimTransactionID = cloneBytes(ctx.EimTransactionID)
 	return ctx
 }
