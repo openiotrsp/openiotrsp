@@ -54,16 +54,23 @@ func (h *Handler) ServeCoAP(w mux.ResponseWriter, r *mux.Message) {
 		return
 	}
 	cacheKey := coapBlockwiseCacheKey(w, r)
-	if len(payload) == 0 && r.HasOption(message.Block2) && cacheKey != "" {
-		if responsePayload, ok := h.cachedBlockwiseResponse(cacheKey); ok {
-			blockPayload, opts, err := coapBlock2Response(responsePayload, r)
-			if err != nil {
-				_ = w.SetResponse(codes.BadRequest, message.TextPlain, strings.NewReader(fmt.Sprintf("read ESipa block2 request: %v", err)))
+	if len(payload) == 0 && r.HasOption(message.Block2) {
+		if cacheKey != "" {
+			if responsePayload, ok := h.cachedBlockwiseResponse(cacheKey); ok {
+				blockPayload, opts, err := coapBlock2Response(responsePayload, r)
+				if err != nil {
+					_ = w.SetResponse(codes.BadRequest, message.TextPlain, strings.NewReader(fmt.Sprintf("read ESipa block2 request: %v", err)))
+					return
+				}
+				h.touchBlockwiseResponse(cacheKey)
+				_ = w.SetResponse(codes.Content, message.AppOctets, bytes.NewReader(blockPayload), opts...)
 				return
 			}
-			_ = w.SetResponse(codes.Content, message.AppOctets, bytes.NewReader(blockPayload), opts...)
-			return
 		}
+		// An empty Block2 continuation is not an ESipa message. A cache miss
+		// stays a bad request and is not decoded or split into blocks.
+		_ = w.SetResponse(codes.BadRequest, message.TextPlain, strings.NewReader("ESipa block2 transfer is not active"))
+		return
 	}
 	encoded, err := h.handleEncodedResponse(r.Context(), payload)
 	if err != nil {
@@ -75,7 +82,7 @@ func (h *Handler) ServeCoAP(w mux.ResponseWriter, r *mux.Message) {
 		return
 	}
 	responsePayload := encoded.Payload
-	if cacheKey != "" {
+	if cacheKey != "" && int64(len(responsePayload)) > coapResponseBlockSZX.Size() {
 		h.cacheBlockwiseResponse(cacheKey, responsePayload)
 	}
 	if blockPayload, opts, ok, err := coapFirstBlock2Response(responsePayload); err != nil {
@@ -101,9 +108,20 @@ func (h *Handler) ListenAndServeCoAPDTLS(ctx context.Context, network string, ad
 	return coap.ListenAndServeDTLSWithOptions(network, addr, cfg, base...)
 }
 
+// blockwiseIdle is how long a Block2 transfer may sit between blocks.
+// Serving a block moves the deadline; a transfer that goes quiet is dropped.
+const blockwiseIdle = time.Minute
+
 type coapBlockwiseResponse struct {
 	payload []byte
 	expires time.Time
+}
+
+func (h *Handler) clock() time.Time {
+	if h != nil && h.now != nil {
+		return h.now()
+	}
+	return time.Now()
 }
 
 func coapBlockwiseCacheKey(w mux.ResponseWriter, r *mux.Message) string {
@@ -124,11 +142,28 @@ func (h *Handler) cachedBlockwiseResponse(key string) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	if time.Now().After(response.expires) {
+	if h.clock().After(response.expires) {
 		delete(h.blockwiseResponses, key)
 		return nil, false
 	}
 	return cloneBytes(response.payload), true
+}
+
+// touchBlockwiseResponse moves the idle deadline after a cached block was served.
+// The cached bytes stay as stored. An expired entry is removed and not revived.
+func (h *Handler) touchBlockwiseResponse(key string) {
+	h.blockwiseMu.Lock()
+	defer h.blockwiseMu.Unlock()
+	response, ok := h.blockwiseResponses[key]
+	if !ok {
+		return
+	}
+	if h.clock().After(response.expires) {
+		delete(h.blockwiseResponses, key)
+		return
+	}
+	response.expires = h.clock().Add(blockwiseIdle)
+	h.blockwiseResponses[key] = response
 }
 
 func (h *Handler) cacheBlockwiseResponse(key string, response []byte) {
@@ -137,7 +172,7 @@ func (h *Handler) cacheBlockwiseResponse(key string, response []byte) {
 	if h.blockwiseResponses == nil {
 		h.blockwiseResponses = make(map[string]coapBlockwiseResponse)
 	}
-	now := time.Now()
+	now := h.clock()
 	for key, cached := range h.blockwiseResponses {
 		if now.After(cached.expires) {
 			delete(h.blockwiseResponses, key)
@@ -145,7 +180,7 @@ func (h *Handler) cacheBlockwiseResponse(key string, response []byte) {
 	}
 	h.blockwiseResponses[key] = coapBlockwiseResponse{
 		payload: cloneBytes(response),
-		expires: now.Add(time.Minute),
+		expires: now.Add(blockwiseIdle),
 	}
 }
 

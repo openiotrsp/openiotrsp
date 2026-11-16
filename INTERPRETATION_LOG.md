@@ -650,3 +650,11 @@ Each entry must include:
   fetched every block, sent no installation result, and started the download
   again, because the eUICC MAC covers the original segment encoding.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 compact installation result restores the full ISD-P AID
+
+- Spec section: SGP.32 v1.3 `CompactSuccessResult.compactAid` ("Byte 14 and 15 of ISD-P AID") and `SuccessResult.aid`. SGP.22 v2.7 §2.5.4 `BoundProfilePackage`, §5.5.2 `ConfigureISDP`, §5.5.3 `StoreMetadataRequest`.
+- Ambiguity: The eUICC assigns the ISD-P AID while processing ConfigureISDP, and that command is an encrypted tag `87`. `StoreMetadataRequest` has no `isdpAid`. AuthenticateClient `profileMetadata` is the same structure and, for a profile such as Telit's, carries no tag `4F`. The compact result then contains only two AID bytes, which are not enough for the `ProfileInstallationResult` the eUICC signed.
+- Chosen reading: Keep a tag `4F` from AuthenticateClient metadata when it is present. Otherwise, when GetBoundProfilePackage is handled, store the first cleartext tag `4F` of 5 to 16 bytes in that success. Do not search encrypted tag `86` or `87` values. A tag `88` segment is MAC-only, so search its command bytes and stop before the eight-byte MAC. `compactAid` must be the last two bytes of the stored AID. `SuccessResult.aid` is that full value. A missing `simaResponse` stays `30 07 A0 05 30 03 80 01 00`. If no full AID was in the clear, return `undefinedError` and do not invent a GSMA RID in front of the two compact bytes. A compact `errorResult` is cloned as received. The search reads the parsed tree and does not change any byte of BF36.
+- Rationale: The signed installation result carries the full AID. A wrong prefix is rejected by the SM-DP+. The metadata comparison already requires the bound-package StoreMetadata to equal the AuthenticateClient copy, so a missing `4F` there cannot be filled from that field. The AID has to be taken from some other cleartext field the download actually contains.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

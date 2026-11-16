@@ -25,6 +25,8 @@ var (
 	errCIPKNotUnique   = errors.New("esipa: CI public key identifier is not unique in euiccCiPKIdListForSigning")
 	errMetadataChanged = errors.New("esipa: profile metadata in the bound profile package has changed")
 	tagBoundPackage    = bertlv.ContextSpecific.Constructed(54)
+	tagSegment86       = bertlv.ContextSpecific.Primitive(6)
+	tagSegment87       = bertlv.ContextSpecific.Primitive(7)
 	tagSegment88       = bertlv.ContextSpecific.Primitive(8)
 	tagSigningCIPKList = bertlv.ContextSpecific.Constructed(10)
 	tagProfileOwner    = bertlv.ContextSpecific.Constructed(23)
@@ -237,11 +239,9 @@ func finishGetBoundProfilePackage(
 	if !ok {
 		return relayResponse(payload)
 	}
-	state, session, haveState := sessionEUICCState(ctx, store, tenantID, relayService, relayTransactionID(request))
-	if !haveState {
-		return relayResponse(payload)
-	}
-	if ipaFeatureSet(state.IPACapabilities, ipaFeatureEimProfileMetadataVerification) && len(session.ProfileMetadata) > 0 {
+	transactionID := relayTransactionID(request)
+	state, session, haveState := sessionEUICCState(ctx, store, tenantID, relayService, transactionID)
+	if haveState && ipaFeatureSet(state.IPACapabilities, ipaFeatureEimProfileMetadataVerification) && len(session.ProfileMetadata) > 0 {
 		got, err := storeMetadataFromBoundPackage(container)
 		if err != nil || !bytes.Equal(got, session.ProfileMetadata) {
 			if err == nil {
@@ -251,7 +251,10 @@ func finishGetBoundProfilePackage(
 			return functionErrorResponse(tagGetBoundPackage, getBoundPackageErrorMetadataMismatch)
 		}
 	}
-	if ipaFeatureSet(state.IPACapabilities, ipaFeatureMinimizeEsipaBytes) {
+	// The AID is read from the parsed tree. The bytes returned below are the
+	// SM-DP+ encoding, including an untouched BF36.
+	rememberCleartextISDPAID(relayService, transactionID, container)
+	if haveState && ipaFeatureSet(state.IPACapabilities, ipaFeatureMinimizeEsipaBytes) {
 		raw, err := editSuccessPayload(payload, successEdit{dropTransaction: true})
 		if err != nil {
 			return Response{}, err
@@ -503,6 +506,85 @@ func concatRaw(children []rawTLV) []byte {
 		out = append(out, child.raw...)
 	}
 	return out
+}
+
+// rememberCleartextISDPAID stores the first full ISD-P AID carried in the
+// clear in a GetBoundProfilePackage success. An AID already taken from
+// AuthenticateClient profileMetadata is left as it is. Encrypted 86 and 87
+// segments are not searched. A compact installation result can then restore
+// SuccessResult.aid from this value; the two compact bytes are not a prefix
+// the eIM invents.
+func rememberCleartextISDPAID(relayService *relay.Relay, transactionID []byte, container *bertlv.TLV) {
+	if relayService == nil || len(transactionID) == 0 || container == nil {
+		return
+	}
+	session, ok := relayService.DownloadContext(transactionID)
+	if !ok || len(session.ISDPAID) > 0 {
+		return
+	}
+	aid := cleartextISDPAID(container)
+	if len(aid) == 0 {
+		return
+	}
+	relayService.UpdateDownload(transactionID, func(ctx *relay.DownloadContext) {
+		if len(ctx.ISDPAID) == 0 {
+			ctx.ISDPAID = cloneBytes(aid)
+		}
+	})
+}
+
+// cleartextISDPAID returns the first tag 4F value of 5 to 16 bytes.
+// SGP.22 §2.5.4 puts ConfigureISDP in encrypted tag 87 and the profile
+// elements in encrypted tag 86. Tag 88 is MAC-only, so its command bytes are
+// clear once the trailing MAC is removed. StoreMetadataRequest has no
+// isdpAid; a 4F elsewhere in the success is still the AID the eUICC signed.
+func cleartextISDPAID(container *bertlv.TLV) []byte {
+	return firstClearISDPAID(container)
+}
+
+func firstClearISDPAID(tlv *bertlv.TLV) []byte {
+	if tlv == nil {
+		return nil
+	}
+	if tlv.Tag.Equal(tagISDPAID) && isFullISDPAID(tlv.Value) {
+		return cloneBytes(tlv.Value)
+	}
+	if tlv.Tag.Equal(tagSegment86) || tlv.Tag.Equal(tagSegment87) {
+		return nil
+	}
+	if tlv.Tag.Equal(tagSegment88) {
+		if len(tlv.Value) <= scp03tMACLen {
+			return nil
+		}
+		return firstClearISDPAIDInBytes(tlv.Value[:len(tlv.Value)-scp03tMACLen])
+	}
+	for _, child := range tlv.Children {
+		if aid := firstClearISDPAID(child); len(aid) > 0 {
+			return aid
+		}
+	}
+	return nil
+}
+
+func firstClearISDPAIDInBytes(data []byte) []byte {
+	elements, err := readRawTLVs(data)
+	if err != nil {
+		return nil
+	}
+	for _, element := range elements {
+		parsed, err := parseRelayTLV(element.raw)
+		if err != nil {
+			continue
+		}
+		if aid := firstClearISDPAID(parsed); len(aid) > 0 {
+			return aid
+		}
+	}
+	return nil
+}
+
+func isFullISDPAID(value []byte) bool {
+	return len(value) >= 5 && len(value) <= 16
 }
 
 func storeMetadataFromBoundPackage(container *bertlv.TLV) ([]byte, error) {
