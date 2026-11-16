@@ -36,6 +36,9 @@ var (
 // the shortest unique prefix of EUICCInfo1.euiccCiPKIdListForSigning. A list of
 // one entry becomes a zero-length OCTET STRING. full is the SM-DP+ identifier
 // before truncation.
+//
+// serverSigned1, serverSignature1, and serverCertificate are copied from
+// payload. BF39 and its A0 success SEQUENCE are the only lengths rewritten.
 func minimizeInitiateAuthentication(payload, info1 []byte) (minimized, full []byte, err error) {
 	root, err := parseRelayTLV(payload)
 	if err != nil {
@@ -57,8 +60,11 @@ func minimizeInitiateAuthentication(payload, info1 []byte) (minimized, full []by
 	if err != nil {
 		return nil, nil, err
 	}
-	replaceDirectChildren(container, true, prefix)
-	raw, err := root.MarshalBinary()
+	raw, err := editSuccessPayload(payload, successEdit{
+		dropTransaction: true,
+		replaceCIPK:     true,
+		cipk:            prefix,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -152,23 +158,6 @@ func directOctetString(container *bertlv.TLV) []byte {
 	return nil
 }
 
-func replaceDirectChildren(container *bertlv.TLV, dropTransaction bool, ciPrefix []byte) {
-	children := make([]*bertlv.TLV, 0, len(container.Children))
-	replaced := false
-	for _, child := range container.Children {
-		if dropTransaction && child.Tag.Equal(bertlv.ContextSpecific.Primitive(0)) {
-			continue
-		}
-		if ciPrefix != nil && !replaced && child.Tag.Equal(tagOctetString) {
-			children = append(children, bertlv.NewValue(tagOctetString, ciPrefix))
-			replaced = true
-			continue
-		}
-		children = append(children, child)
-	}
-	container.Children = children
-}
-
 func esipaSuccessContainer(root *bertlv.TLV) (*bertlv.TLV, bool) {
 	if root == nil {
 		return nil, false
@@ -204,7 +193,7 @@ func finishAuthenticateClient(
 	state, session, haveState := sessionEUICCState(ctx, store, tenantID, relayService, relayTransactionID(request))
 	minimize := haveState && ipaFeatureSet(state.IPACapabilities, ipaFeatureMinimizeEsipaBytes)
 	verify := haveState && ipaFeatureSet(state.IPACapabilities, ipaFeatureEimProfileMetadataVerification)
-	changed := false
+	dropMetadata := false
 	if verify {
 		if meta := container.First(tagProfileMetadata); meta != nil {
 			profiles, err := store.ListProfileStates(ctx, tenantID, session.EID)
@@ -215,18 +204,17 @@ func finishAuthenticateClient(
 				logProfileMetadataRejected(logger, session.EID, err)
 				return functionErrorResponse(tagAuthenticate, authenticateClientErrorPPRNotAllowed)
 			}
-			dropChild(container, tagProfileMetadata)
-			changed = true
+			dropMetadata = true
 		}
 	}
-	if minimize && container.First(tagSignature) != nil {
-		dropChild(container, bertlv.ContextSpecific.Primitive(0))
-		changed = true
-	}
-	if !changed {
+	dropTransaction := minimize && container.First(tagSignature) != nil
+	if !dropMetadata && !dropTransaction {
 		return relayResponse(payload)
 	}
-	raw, err := root.MarshalBinary()
+	raw, err := editSuccessPayload(payload, successEdit{
+		dropTransaction: dropTransaction,
+		dropMetadata:    dropMetadata,
+	})
 	if err != nil {
 		return Response{}, err
 	}
@@ -264,8 +252,7 @@ func finishGetBoundProfilePackage(
 		}
 	}
 	if ipaFeatureSet(state.IPACapabilities, ipaFeatureMinimizeEsipaBytes) {
-		dropChild(container, bertlv.ContextSpecific.Primitive(0))
-		raw, err := root.MarshalBinary()
+		raw, err := editSuccessPayload(payload, successEdit{dropTransaction: true})
 		if err != nil {
 			return Response{}, err
 		}
@@ -306,18 +293,216 @@ func relayTransactionID(payload []byte) []byte {
 	return nil
 }
 
-func dropChild(container *bertlv.TLV, tag bertlv.Tag) {
-	if container == nil {
-		return
+// successEdit is a byte-level change to the direct children of an ESipa
+// success SEQUENCE. Fields that are not listed are copied unchanged.
+type successEdit struct {
+	dropTransaction bool
+	dropMetadata    bool
+	// replaceCIPK replaces the first universal OCTET STRING. An empty cipk
+	// is the SGP.32 zero-length identifier, so the flag is separate from the
+	// value.
+	replaceCIPK bool
+	cipk        []byte
+}
+
+// rawTLV is one definite BER element. raw is the original tag, length, and
+// content; value is the content only.
+type rawTLV struct {
+	tag   bertlv.Tag
+	raw   []byte
+	value []byte
+}
+
+// editSuccessPayload applies edit to the original SM-DP+ bytes.
+//
+// SGP.22 signs and MACs serverSigned1, smdpSigned2, and BoundProfilePackage
+// over the encoding the SM-DP+ sent. BER length octets are not unique, so
+// rebuilding those elements with shortest lengths produces a different value.
+// The function tag (BF39, BF3B, or BF3A) and, when present, its A0 success
+// SEQUENCE are the only elements that receive new length octets, and only
+// when a direct field was removed or replaced. An unchanged payload is returned
+// as the caller passed it.
+func editSuccessPayload(payload []byte, edit successEdit) ([]byte, error) {
+	root, n, err := readRawTLV(payload)
+	if err != nil {
+		return nil, err
 	}
-	children := make([]*bertlv.TLV, 0, len(container.Children))
-	for _, child := range container.Children {
-		if child.Tag.Equal(tag) {
+	if n != len(payload) {
+		return nil, errors.New("esipa: trailing data after BER-TLV payload")
+	}
+	children, err := readRawTLVs(root.value)
+	if err != nil {
+		return nil, err
+	}
+	container := -1
+	for i, child := range children {
+		if child.tag.Equal(bertlv.ContextSpecific.Constructed(0)) {
+			container = i
+			break
+		}
+	}
+	if container >= 0 {
+		inner, err := readRawTLVs(children[container].value)
+		if err != nil {
+			return nil, err
+		}
+		rewritten, changed, err := rewriteSuccessChildren(inner, edit)
+		if err != nil || !changed {
+			return payload, err
+		}
+		encoded, err := encodeTLV(children[container].tag, concatRaw(rewritten))
+		if err != nil {
+			return nil, err
+		}
+		children[container].raw = encoded
+		return encodeTLV(root.tag, concatRaw(children))
+	}
+	rewritten, changed, err := rewriteSuccessChildren(children, edit)
+	if err != nil || !changed {
+		return payload, err
+	}
+	return encodeTLV(root.tag, concatRaw(rewritten))
+}
+
+func rewriteSuccessChildren(children []rawTLV, edit successEdit) ([]rawTLV, bool, error) {
+	out := make([]rawTLV, 0, len(children))
+	changed := false
+	replaced := false
+	transaction := bertlv.ContextSpecific.Primitive(0)
+	for _, child := range children {
+		if edit.dropTransaction && child.tag.Equal(transaction) {
+			changed = true
 			continue
 		}
-		children = append(children, child)
+		if edit.dropMetadata && child.tag.Equal(tagProfileMetadata) {
+			changed = true
+			continue
+		}
+		if edit.replaceCIPK && !replaced && child.tag.Equal(tagOctetString) {
+			encoded, err := encodeTLV(tagOctetString, edit.cipk)
+			if err != nil {
+				return nil, false, err
+			}
+			if !bytes.Equal(encoded, child.raw) {
+				changed = true
+			}
+			out = append(out, rawTLV{tag: tagOctetString, raw: encoded, value: edit.cipk})
+			replaced = true
+			continue
+		}
+		out = append(out, child)
 	}
-	container.Children = children
+	if edit.replaceCIPK && !replaced {
+		return nil, false, errCIPKNotUnique
+	}
+	return out, changed, nil
+}
+
+func readRawTLVs(data []byte) ([]rawTLV, error) {
+	var out []rawTLV
+	for len(data) > 0 {
+		element, n, err := readRawTLV(data)
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, errors.New("esipa: empty BER-TLV")
+		}
+		out = append(out, element)
+		data = data[n:]
+	}
+	return out, nil
+}
+
+func readRawTLV(data []byte) (rawTLV, int, error) {
+	if len(data) == 0 {
+		return rawTLV{}, 0, errors.New("esipa: empty BER-TLV")
+	}
+	var tag bertlv.Tag
+	tagN, err := tag.ReadFrom(bytes.NewReader(data))
+	if err != nil {
+		return rawTLV{}, 0, err
+	}
+	length, lenN, err := readBERLength(data[tagN:])
+	if err != nil {
+		return rawTLV{}, 0, err
+	}
+	header := int(tagN) + lenN
+	total := header + length
+	if length < 0 || total < header || total > len(data) {
+		return rawTLV{}, 0, errors.New("esipa: BER-TLV length exceeds input")
+	}
+	tagCopy := make(bertlv.Tag, len(tag))
+	copy(tagCopy, tag)
+	return rawTLV{
+		tag:   tagCopy,
+		raw:   data[:total:total],
+		value: data[header:total:total],
+	}, total, nil
+}
+
+func readBERLength(data []byte) (length, n int, err error) {
+	if len(data) == 0 {
+		return 0, 0, errors.New("esipa: missing BER length")
+	}
+	switch data[0] {
+	case 0x81:
+		if len(data) < 2 {
+			return 0, 0, errors.New("esipa: truncated BER length")
+		}
+		return int(data[1]), 2, nil
+	case 0x82:
+		if len(data) < 3 {
+			return 0, 0, errors.New("esipa: truncated BER length")
+		}
+		return int(data[1])<<8 | int(data[2]), 3, nil
+	case 0x83:
+		if len(data) < 4 {
+			return 0, 0, errors.New("esipa: truncated BER length")
+		}
+		return int(data[1])<<16 | int(data[2])<<8 | int(data[3]), 4, nil
+	default:
+		if data[0] >= 0x80 {
+			return 0, 0, errors.New("esipa: unsupported BER length")
+		}
+		return int(data[0]), 1, nil
+	}
+}
+
+func encodeTLV(tag bertlv.Tag, content []byte) ([]byte, error) {
+	if len(content) > 0xffffff {
+		return nil, errors.New("esipa: BER-TLV length exceeds 3-byte limit")
+	}
+	length := definiteLength(len(content))
+	out := make([]byte, 0, len(tag)+len(length)+len(content))
+	out = append(out, tag...)
+	out = append(out, length...)
+	return append(out, content...), nil
+}
+
+func definiteLength(n int) []byte {
+	switch {
+	case n < 0x80:
+		return []byte{byte(n)}
+	case n < 0x100:
+		return []byte{0x81, byte(n)}
+	case n < 0x10000:
+		return []byte{0x82, byte(n >> 8), byte(n)}
+	default:
+		return []byte{0x83, byte(n >> 16), byte(n >> 8), byte(n)}
+	}
+}
+
+func concatRaw(children []rawTLV) []byte {
+	n := 0
+	for _, child := range children {
+		n += len(child.raw)
+	}
+	out := make([]byte, 0, n)
+	for _, child := range children {
+		out = append(out, child.raw...)
+	}
+	return out
 }
 
 func storeMetadataFromBoundPackage(container *bertlv.TLV) ([]byte, error) {

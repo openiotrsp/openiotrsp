@@ -385,6 +385,208 @@ func mustBoundPackage(t *testing.T, txn, metadata []byte) []byte {
 	return raw
 }
 
+// TestGetBoundProfilePackageKeepsBoundPackageBytes uses a BF36 whose length
+// octets are longer than the shortest BER form. That encoding is a fixture,
+// not a specification vector: the eUICC MAC covers those octets, so a
+// shortest-form re-encode is a different package.
+func TestGetBoundProfilePackageKeepsBoundPackageBytes(t *testing.T) {
+	t.Parallel()
+
+	txn := []byte{0x01, 0x02, 0x03}
+	txnTLV := marshalTLV(t, bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), txn))
+	segment := longFormTLV(tagSegment88, []byte{0xaa})
+	bpp := longFormTLV(tagBoundPackage, segment)
+	if len(bpp) < 3 || bpp[2] != 0x82 || !bytes.Contains(bpp, segment) {
+		t.Fatalf("fixture BF36 = %x, want a long-form length around the segment", bpp)
+	}
+	wrapped := mustRawSuccess(t, tagGetBoundPackage, true, txnTLV, bpp)
+	unwrapped := mustRawSuccess(t, tagGetBoundPackage, false, txnTLV, bpp)
+	request := mustGetBoundRequest(t, txn)
+
+	minimized := deliverSMDPPayload(t, 0x04, relay.EndpointGetBoundProfilePackage, request, wrapped)
+	if !bytes.Equal(minimized, mustRawSuccess(t, tagGetBoundPackage, true, bpp)) {
+		t.Fatalf("minimized = %x\nwant BF3A { A0 { original BF36 } }", minimized)
+	}
+	assertParsableTLV(t, minimized)
+	plain := deliverSMDPPayload(t, 0x04, relay.EndpointGetBoundProfilePackage, request, unwrapped)
+	if !bytes.Equal(plain, mustRawSuccess(t, tagGetBoundPackage, false, bpp)) {
+		t.Fatalf("unwrapped minimized = %x\nwant BF3A { original BF36 }", plain)
+	}
+	same := deliverSMDPPayload(t, 0x00, relay.EndpointGetBoundProfilePackage, request, wrapped)
+	if !bytes.Equal(same, wrapped) {
+		t.Fatalf("IPA without minimizeEsipaBytes\n got %x\nwant %x", same, wrapped)
+	}
+
+	// INTEGER 1 with a two-byte length. Shortest form is 02 01 01.
+	errorPayload := []byte{0xbf, 0x3a, 0x05, 0x02, 0x82, 0x00, 0x01, 0x01}
+	gotErr := deliverSMDPPayload(t, 0x04, relay.EndpointGetBoundProfilePackage, request, errorPayload)
+	if !bytes.Equal(gotErr, errorPayload) {
+		t.Fatalf("error = %x\nwant %x", gotErr, errorPayload)
+	}
+}
+
+func TestAuthenticateClientKeepsSignedBytes(t *testing.T) {
+	t.Parallel()
+
+	txn := []byte{0x01, 0x02, 0x03}
+	txnTLV := marshalTLV(t, bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), txn))
+	meta := marshalTLV(t, sampleStoreMetadata(t, false))
+	// SEQUENCE and 5F37 use a two-byte length for a short value so a
+	// shortest-form re-encode cannot match these slices.
+	signed2 := longFormTLV(tagSequence, []byte{0x80, 0x01, 0x7e})
+	signature := longFormTLV(tagSignature, []byte{0x11, 0x22})
+	if signed2[1] != 0x82 || signature[2] != 0x82 {
+		t.Fatalf("signed fixtures = %x %x, want long-form lengths", signed2, signature)
+	}
+	cert := marshalTLV(t, bertlv.NewChildren(tagSequence, bertlv.NewValue(tagOctetString, []byte{0xbb})))
+	payload := mustRawSuccess(t, tagAuthenticate, true, txnTLV, meta, signed2, signature, cert)
+	request := mustAuthRequest(t, txn)
+	got := deliverSMDPPayload(t, 0x0c, relay.EndpointAuthenticateClient, request, payload)
+	want := mustRawSuccess(t, tagAuthenticate, true, signed2, signature, cert)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("AuthenticateClient = %x\nwant %x", got, want)
+	}
+	// Verification without minimizeEsipaBytes still removes profileMetadata
+	// and leaves the signed fields and transactionId encoded as received.
+	metadataOnly := deliverSMDPPayload(t, 0x08, relay.EndpointAuthenticateClient, request, payload)
+	wantTxn := mustRawSuccess(t, tagAuthenticate, true, txnTLV, signed2, signature, cert)
+	if !bytes.Equal(metadataOnly, wantTxn) {
+		t.Fatalf("metadata-only edit = %x\nwant %x", metadataOnly, wantTxn)
+	}
+}
+
+func TestMinimizeInitiateAuthenticationKeepsSignedBytes(t *testing.T) {
+	t.Parallel()
+
+	txnTLV := marshalTLV(t, bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{0x01, 0x02, 0x03}))
+	signed1 := longFormTLV(tagInitAuthOKSeq, []byte{0x80, 0x01, 0x01})
+	signature := longFormTLV(tagSignature, []byte{0x11, 0x22})
+	cipk := longFormTLV(tagOctetString, []byte{0xaa})
+	certificate := longFormTLV(tagSequence, []byte{0x04, 0x01, 0xbb})
+	if signed1[1] != 0x82 || signature[2] != 0x82 || certificate[1] != 0x82 {
+		t.Fatalf("signed fixtures are shortest-form: %x %x %x", signed1, signature, certificate)
+	}
+	payload := mustRawSuccess(t, tagInitiateAuth, true, txnTLV, signed1, signature, cipk, certificate)
+	info1, err := sampleEUICCInfo1(t).MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary(EUICCInfo1) error = %v", err)
+	}
+	got, full, err := minimizeInitiateAuthentication(payload, info1)
+	if err != nil {
+		t.Fatalf("minimizeInitiateAuthentication() error = %v", err)
+	}
+	if !bytes.Equal(full, []byte{0xaa}) {
+		t.Fatalf("full CI = %x, want aa", full)
+	}
+	empty, err := encodeTLV(tagOctetString, nil)
+	if err != nil {
+		t.Fatalf("encodeTLV(empty CI) error = %v", err)
+	}
+	want := mustRawSuccess(t, tagInitiateAuth, true, signed1, signature, empty, certificate)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("minimized = %x\nwant %x", got, want)
+	}
+
+	errorPayload := []byte{0xbf, 0x39, 0x05, 0x02, 0x82, 0x00, 0x01, 0x01}
+	got, full, err = minimizeInitiateAuthentication(errorPayload, info1)
+	if err != nil || full != nil || !bytes.Equal(got, errorPayload) {
+		t.Fatalf("error minimized = %x full %x err %v, want the input", got, full, err)
+	}
+}
+
+func deliverSMDPPayload(t *testing.T, features byte, endpoint relay.Endpoint, request, payload []byte) []byte {
+	t.Helper()
+	ctx := context.Background()
+	store := memory.New()
+	eidKey := hex.EncodeToString(testEID(features))
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eidKey}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	if err := store.SetEUICCState(ctx, storage.DefaultTenantID, storage.EUICCState{
+		EID:             eidKey,
+		IPACapabilities: sampleIPACapabilities(t, features),
+	}); err != nil {
+		t.Fatalf("SetEUICCState() error = %v", err)
+	}
+	relayService := relay.New(nil)
+	relayService.RememberDownload(relay.DownloadContext{
+		EID:           eidKey,
+		TransactionID: append([]byte(nil), relayTransactionID(request)...),
+	})
+	var response Response
+	var err error
+	switch endpoint {
+	case relay.EndpointGetBoundProfilePackage:
+		response, err = finishGetBoundProfilePackage(ctx, store, storage.DefaultTenantID, relayService, discardLogger(), request, payload)
+	case relay.EndpointAuthenticateClient:
+		response, err = finishAuthenticateClient(ctx, store, storage.DefaultTenantID, relayService, discardLogger(), request, payload)
+	default:
+		t.Fatalf("unsupported endpoint %s", endpoint)
+	}
+	if err != nil {
+		t.Fatalf("%s error = %v", endpoint, err)
+	}
+	raw, err := EncodeResponse(response)
+	if err != nil {
+		t.Fatalf("EncodeResponse() error = %v", err)
+	}
+	return raw
+}
+
+func mustRawSuccess(t *testing.T, function bertlv.Tag, wrapped bool, fields ...[]byte) []byte {
+	t.Helper()
+	body := joinBytes(fields...)
+	if wrapped {
+		container, err := encodeTLV(bertlv.ContextSpecific.Constructed(0), body)
+		if err != nil {
+			t.Fatalf("encodeTLV(A0) error = %v", err)
+		}
+		body = container
+	}
+	raw, err := encodeTLV(function, body)
+	if err != nil {
+		t.Fatalf("encodeTLV(%s) error = %v", function, err)
+	}
+	return raw
+}
+
+func marshalTLV(t *testing.T, tlv *bertlv.TLV) []byte {
+	t.Helper()
+	raw, err := tlv.MarshalBinary()
+	if err != nil {
+		t.Fatalf("MarshalBinary() error = %v", err)
+	}
+	return raw
+}
+
+// longFormTLV encodes tag and content with a two-byte definite length even
+// when the content would fit in a short length.
+func longFormTLV(tag bertlv.Tag, content []byte) []byte {
+	out := make([]byte, 0, len(tag)+3+len(content))
+	out = append(out, tag...)
+	out = append(out, 0x82, byte(len(content)>>8), byte(len(content)))
+	return append(out, content...)
+}
+
+func assertParsableTLV(t *testing.T, payload []byte) {
+	t.Helper()
+	if _, err := parseRelayTLV(payload); err != nil {
+		t.Fatalf("edited payload is not valid BER: %v\n%x", err, payload)
+	}
+}
+
+func joinBytes(parts ...[]byte) []byte {
+	n := 0
+	for _, part := range parts {
+		n += len(part)
+	}
+	out := make([]byte, 0, n)
+	for _, part := range parts {
+		out = append(out, part...)
+	}
+	return out
+}
+
 func assertIntegerError(t *testing.T, response Response, tag bertlv.Tag, want int64) {
 	t.Helper()
 	raw, err := EncodeResponse(response)
