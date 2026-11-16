@@ -511,9 +511,9 @@ func concatRaw(children []rawTLV) []byte {
 // rememberCleartextISDPAID stores the first full ISD-P AID carried in the
 // clear in a GetBoundProfilePackage success. An AID already taken from
 // AuthenticateClient profileMetadata is left as it is. Encrypted 86 and 87
-// segments are not searched. A compact installation result can then restore
-// SuccessResult.aid from this value; the two compact bytes are not a prefix
-// the eIM invents.
+// segments are not searched. A compact success prefers this value and checks
+// compactAid against bytes 14 and 15. When this search finds nothing, the
+// compact result rebuilds the SGP.02 ISD-P AID from those two bytes.
 func rememberCleartextISDPAID(relayService *relay.Relay, transactionID []byte, container *bertlv.TLV) {
 	if relayService == nil || len(transactionID) == 0 || container == nil {
 		return

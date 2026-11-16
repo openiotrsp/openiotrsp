@@ -110,14 +110,14 @@ func (s *SoftwareEUICC) CompactPrepareDownloadResponse(transactionID, hashCC []b
 
 // CompactProfileInstallationResult signs ProfileInstallationResultData and
 // returns the compactProfileInstallationResult choice arm. The compact form
-// carries only the last two ISD-P AID bytes and omits simaResponse, seqNumber
+// carries bytes 14 and 15 of the ISD-P AID and omits simaResponse, seqNumber
 // metadata, and the notification address.
 func (s *SoftwareEUICC) CompactProfileInstallationResult(transaction []byte, address string, iccid, aid []byte, seq int64) (compact, signedData *bertlv.TLV, err error) {
 	if s == nil {
 		return nil, nil, errors.New("mockipa: nil software eUICC")
 	}
-	if len(aid) < 2 {
-		return nil, nil, errors.New("mockipa: ISD-P AID shorter than compactAid")
+	if len(aid) < 15 {
+		return nil, nil, errors.New("mockipa: ISD-P AID has no bytes 14 and 15")
 	}
 	data := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(39),
 		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), cloneBytes(transaction)),
@@ -144,7 +144,7 @@ func (s *SoftwareEUICC) CompactProfileInstallationResult(transaction []byte, add
 			mustIntegerTLV(bertlv.Universal.Primitive(2), seq),
 			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(2),
 				bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0),
-					bertlv.NewValue(bertlv.Application.Primitive(15), cloneBytes(aid[len(aid)-2:])),
+					bertlv.NewValue(bertlv.Application.Primitive(15), cloneBytes(aid[13:15])),
 				),
 			),
 		),

@@ -25,7 +25,7 @@ func TestIndirectInstallationResultClosesRememberedTrigger(t *testing.T) {
 		t.Parallel()
 		fx := startIndirectDownload(t, 0x21, bytes.Repeat([]byte{0x21}, 16))
 		before := notificationCalls(fx.transport)
-		response := handleTLV(t, fx.ctx, fx.handler, compactInstall(t, fx.smdpTx, compactSuccess(fx.aid[len(fx.aid)-2:])))
+		response := handleTLV(t, fx.ctx, fx.handler, compactInstall(t, fx.smdpTx, compactSuccess(compactAidOf(fx.aid))))
 		assertEmptyNotification(t, response)
 		if notificationCalls(fx.transport) != before+1 {
 			t.Fatal("ES9+ HandleNotification was not called")
@@ -59,7 +59,7 @@ func TestIndirectInstallationResultClosesRememberedTrigger(t *testing.T) {
 			relay.EndpointHandleNotification: errors.New("smdp rejected notification"),
 		}
 		before := notificationCalls(fx.transport)
-		_, err := handleRequest(t, fx, compactInstall(t, fx.smdpTx, compactSuccess(fx.aid[len(fx.aid)-2:])))
+		_, err := handleRequest(t, fx, compactInstall(t, fx.smdpTx, compactSuccess(compactAidOf(fx.aid))))
 		if err == nil {
 			t.Fatal("HandleNotification error = nil, want the SM-DP+ rejection")
 		}
@@ -123,7 +123,7 @@ func TestIndirectInstallationResultClosesRememberedTrigger(t *testing.T) {
 		}
 		matchedTx := bytes.Repeat([]byte{0x27}, 16)
 		fx := connectIndirectDownload(t, ctx, store, eid, eidKey, matchedTx)
-		handleTLV(t, fx.ctx, fx.handler, compactInstall(t, fx.smdpTx, compactSuccess(fx.aid[len(fx.aid)-2:])))
+		handleTLV(t, fx.ctx, fx.handler, compactInstall(t, fx.smdpTx, compactSuccess(compactAidOf(fx.aid))))
 		assertRecordedTrigger(t, fx, storage.OperationDone, true)
 		pending, err := store.FetchPendingOperations(ctx, storage.DefaultTenantID, eidKey, 10)
 		if err != nil {
@@ -144,7 +144,7 @@ func TestIndirectInstallationResultClosesRememberedTrigger(t *testing.T) {
 			ctx.EimTransactionID = nil
 		})
 		before := notificationCalls(fx.transport)
-		response := handleTLV(t, fx.ctx, fx.handler, compactInstall(t, fx.smdpTx, compactSuccess(fx.aid[len(fx.aid)-2:])))
+		response := handleTLV(t, fx.ctx, fx.handler, compactInstall(t, fx.smdpTx, compactSuccess(compactAidOf(fx.aid))))
 		assertEmptyNotification(t, response)
 		if notificationCalls(fx.transport) != before+1 {
 			t.Fatal("installation result was not forwarded")
