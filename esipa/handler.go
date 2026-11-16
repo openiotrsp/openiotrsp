@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/bertlv/primitive"
@@ -118,6 +119,8 @@ type Handler struct {
 
 	blockwiseMu        sync.Mutex
 	blockwiseResponses map[string]coapBlockwiseResponse
+	// now is the clock for Block2 idle expiry. Tests set it. Nil uses time.Now.
+	now func() time.Time
 }
 
 // NewHandler creates a Store-backed ESipa handler.
