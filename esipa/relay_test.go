@@ -202,6 +202,7 @@ func TestRelayConfiguredHandlerPersistsLocalNotificationDuringRelaySession(t *te
 type esipaRecordingTransport struct {
 	responses map[relay.Endpoint]relay.Response
 	calls     []esipaTransportCall
+	fail      map[relay.Endpoint]error
 }
 
 type esipaTransportCall struct {
@@ -216,6 +217,9 @@ func (t *esipaRecordingTransport) Post(_ context.Context, smdpAddress string, en
 		endpoint: endpoint,
 		payload:  cloneBytes(payload),
 	})
+	if err := t.fail[endpoint]; err != nil {
+		return relay.Response{}, err
+	}
 	return t.responses[endpoint], nil
 }
 

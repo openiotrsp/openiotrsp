@@ -403,6 +403,9 @@ func TestInitiateAuthenticationAppendsMatchingIDAndCtxParams1(t *testing.T) {
 	if string(session.ServerAddress) != "tlt.prod.ondemandconnectivity.com" || len(session.ServerChallenge) != 16 || len(session.CtxParams1) == 0 {
 		t.Fatalf("download session = %#v, want serverSigned1 fields and ctxParams1", session)
 	}
+	if !bytes.Equal(session.EimTransactionID, transactionID) {
+		t.Fatalf("eimTransactionId = %x, want %x", session.EimTransactionID, transactionID)
+	}
 }
 
 func TestInitiateAuthenticationWithoutEIMDataBitsPassesThrough(t *testing.T) {
