@@ -623,3 +623,30 @@ Each entry must include:
   would refuse PPR1 next to a provisioning profile. The `88` segment layout is
   the only place SGP.22 puts an unencrypted StoreMetadata command.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 minimized ESipa responses keep the SM-DP+ encoding
+
+- Spec section: SGP.32 v1.3 §5.14.1 `InitiateAuthentication`, §5.14.2
+  `GetBoundProfilePackage`, §5.14.3 `AuthenticateClient`, IPA capability
+  `minimizeEsipaBytes`. SGP.22 `BoundProfilePackage` and the MAC over each
+  `87`/`88`/`86` segment.
+- Ambiguity: The eIM omits `transactionId` and, for InitiateAuthentication,
+  replaces `euiccCiPKIdentifierToBeUsed`. The text does not say whether the
+  elements that stay are re-encoded. BER length octets are not unique, and
+  the shortest form is not necessarily the form the SM-DP+ sent.
+- Chosen reading: Edit the original bytes. Copy every field that stays as a
+  raw slice, including BF36 `BoundProfilePackage`, `smdpSigned2`,
+  `smdpSignature2`, `serverSigned1`, `serverSignature1`, and
+  `serverCertificate`. Write new length octets only on the function tag
+  (BF39, BF3B, or BF3A) and its A0 success SEQUENCE, and only when a direct
+  field was removed or the CI identifier was replaced. An error INTEGER is
+  forwarded unchanged. An IPA without `minimizeEsipaBytes` receives the
+  SM-DP+ payload unchanged when no field is removed. Removing
+  `profileMetadata` after verification still copies `smdpSigned2` and
+  `smdpSignature2`. `matchingId` and `ctxParams1` are still appended
+  when those capability bits are set.
+- Rationale: A production GetBoundProfilePackage used long-form lengths
+  inside BF36. Re-encoding the parsed tree dropped those octets. The card
+  fetched every block, sent no installation result, and started the download
+  again, because the eUICC MAC covers the original segment encoding.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
