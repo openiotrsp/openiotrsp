@@ -659,3 +659,26 @@ Each entry must include:
 - Chosen reading: Keep a tag `4F` from AuthenticateClient metadata when it is present. Otherwise, when GetBoundProfilePackage is handled, store the first cleartext tag `4F` of 5 to 16 bytes in that success. Do not search encrypted tag `86` or `87` values. A tag `88` segment is MAC-only, so search its command bytes and stop before the eight-byte MAC. When a full AID is stored, `compactAid` must equal bytes 14 and 15 of it and `SuccessResult.aid` is that stored value. When no full AID is stored, build `A0000005591010FFFFFFFF8900 || compactAid || 00`, put that value in `SuccessResult.aid`, and keep it on the in-memory download session. A missing `simaResponse` stays `30 07 A0 05 30 03 80 01 00`. A mismatch against a stored AID is `undefinedError` and ES9+ is not called. A compact `errorResult` is cloned as received. The search reads the parsed tree and does not change any byte of BF36.
 - Rationale: SGP.32 §5.14.7 restores a compact notification from information the eIM already has. The SGP.02 layout fixes bytes 1–13 and byte 16; the eUICC chooses bytes 14 and 15, which is `compactAid`. Comparing those two bytes with the AID suffix rejects a real success (`0014` against an AID ending `1400`). A stored tag `4F` is still preferred, because that is the AID the download actually carried.
 - Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.
+
+## SGP.32 ProvideEimPackageResult eimPackageError while verification is on
+
+- Spec section: SGP.32 `ProvideEimPackageResult` / `EimPackageResult`
+  `eimPackageError` (`EimPackageResultResponseError`). The IPA sends this
+  unsigned; it is not an eUICC signature over a package result.
+- Ambiguity: Whether that error is a terminal result for the eIM operation
+  it names, including when `eimTransactionId` is absent or names an
+  operation that is already done.
+- Chosen reading: With eUICC result verification enabled, record the
+  exchange as empty and leave the operation queue unchanged. Do not fail
+  the first pending euicc-package when the error has no transaction ID, and
+  do not match the error to a completed operation. The package stays
+  pending so the next `getEimPackage` can retry it. A signed eUICC package
+  result remains the only input that completes or rolls back eIM state.
+  The unverified-result escape hatch may still fail a pending operation,
+  and only a pending one. Neither store moves an operation out of `done`.
+- Rationale: The same caller who can submit `ProvideEimPackageResult` can
+  otherwise close a pending operation without an eUICC signature, or move a
+  completed operation to failed and then replay an old signed result so its
+  side effects apply again. An IPA error means the card result was not
+  delivered, so the command is still outstanding.
+- Whether `spec/SGP.33-1-IoT-eUICC-v1.2.docx` settled it: No.

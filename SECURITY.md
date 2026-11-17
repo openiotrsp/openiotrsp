@@ -43,10 +43,13 @@ enforced by `go-licenses check` in CI. The project builds with CGO disabled
 (`CGO_ENABLED=0`), so no C code is linked into the binaries.
 
 ## Security acknowledgments
-** Adam Bedard, Security Researcher** reported issues in ESipa provide-result
-handling, including replay of old signed eUICC package results affecting eIM
-state and acceptance of unsigned package errors when eUICC verification is
-enabled. Regression coverage lives under `esipa/replay_security_test.go`.
+**Adam Bedard, Security Researcher** reported issues in ESipa provide-result
+handling: replay of old signed eUICC package results affecting eIM state,
+acceptance of unsigned eUICC package errors when eUICC verification is
+enabled, and the same effects through the unsigned IPA `eimPackageError`
+arm (including moving a completed operation back to failed so the old
+signed result applies again). Regression coverage lives under
+`esipa/replay_security_test.go` and `esipa/ipa_error_security_test.go`.
 GHSA-chwp-gmww-6v85
 GHSA-6vvj-g7qc-6xh2
 

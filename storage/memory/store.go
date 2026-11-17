@@ -390,7 +390,7 @@ func (s *Store) ListPendingOperations(ctx context.Context, tenantID storage.Tena
 }
 
 // RecordEUICCPackageResult stores a result and marks the matching operation done
-// or failed.
+// or failed. An operation that is already done stays done.
 func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.TenantID, result storage.EUICCPackageResult) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -399,6 +399,7 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 	defer s.mu.Unlock()
 
 	tenantID = storage.NormalizeTenantID(tenantID)
+	var current *storage.Operation
 	if result.OperationID != 0 {
 		stored, ok := s.operations[result.OperationID]
 		if !ok || stored.tenantID != tenantID {
@@ -406,6 +407,20 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 		}
 		result.EID = stored.operation.EID
 		result.SequenceNumber = stored.operation.SequenceNumber
+		op := stored.operation
+		current = &op
+	} else {
+		for _, stored := range s.operations {
+			if stored.tenantID != tenantID {
+				continue
+			}
+			operation := stored.operation
+			if operation.EID == result.EID && operation.SequenceNumber == result.SequenceNumber {
+				op := operation
+				current = &op
+				break
+			}
+		}
 	}
 	key := deviceKey{tenantID: tenantID, eid: result.EID}
 	if _, ok := s.devices[key]; !ok {
@@ -413,6 +428,9 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 	}
 
 	result.Status = normalizeResultStatus(result.Status)
+	if current != nil && current.Status == storage.OperationDone && result.Status != storage.OperationDone {
+		return nil
+	}
 	result.Payload = cloneBytes(result.Payload)
 	s.results[resultKey{
 		tenantID:       tenantID,

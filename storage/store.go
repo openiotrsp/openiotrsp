@@ -182,6 +182,9 @@ type Store interface {
 	// oldest sequence first. Used when Provide/JSON ESipa omits EID and the
 	// handler must recover the device from eimTransactionId.
 	ListPendingOperations(ctx context.Context, tenantID TenantID, limit int) ([]Operation, error)
+	// RecordEUICCPackageResult stores a result and marks the matching operation
+	// done or failed. An operation that is already done stays done: a later
+	// failure must not reopen it.
 	RecordEUICCPackageResult(ctx context.Context, tenantID TenantID, result EUICCPackageResult) error
 	GetOperationResult(ctx context.Context, tenantID TenantID, operationID int64) (OperationResult, error)
 	StoreEIMConfig(ctx context.Context, tenantID TenantID, config EIMConfig) error

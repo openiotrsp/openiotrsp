@@ -457,7 +457,7 @@ func (s *Store) ListPendingOperations(ctx context.Context, tenantID storage.Tena
 }
 
 // RecordEUICCPackageResult stores a result and marks the matching operation done
-// or failed.
+// or failed. An operation that is already done stays done.
 func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.TenantID, result storage.EUICCPackageResult) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -467,18 +467,35 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 
 	tenant := tenantString(tenantID)
 	status := normalizeResultStatus(result.Status)
+	var currentStatus string
 	if result.OperationID != 0 {
 		err = tx.QueryRow(ctx, `
-			SELECT eid, sequence_number
+			SELECT eid, sequence_number, status
 			FROM operations
 			WHERE tenant_id = $1 AND id = $2
-		`, tenant, result.OperationID).Scan(&result.EID, &result.SequenceNumber)
+		`, tenant, result.OperationID).Scan(&result.EID, &result.SequenceNumber, &currentStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return storage.ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
+	} else {
+		err = tx.QueryRow(ctx, `
+			SELECT status
+			FROM operations
+			WHERE tenant_id = $1 AND eid = $2 AND sequence_number = $3
+		`, tenant, result.EID, result.SequenceNumber).Scan(&currentStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			currentStatus = ""
+			err = nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if currentStatus == string(storage.OperationDone) && status != storage.OperationDone {
+		return nil
 	}
 
 	tag, err := tx.Exec(ctx, `
