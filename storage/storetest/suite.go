@@ -27,6 +27,7 @@ func Run(t *testing.T, factory Factory) {
 		{"tenant isolation", testTenantIsolation},
 		{"eUICC package counter monotonicity", testEUICCPackageCounterMonotonicity},
 		{"operation queue polling", testOperationQueuePolling},
+		{"completed operation is not reopened", testCompletedOperationIsNotReopened},
 		{"concurrent queue safety", testConcurrentQueueSafety},
 	}
 
@@ -492,6 +493,80 @@ func testConcurrentQueueSafety(t *testing.T, store storage.Store) {
 		seenSequences[operation.SequenceNumber] = true
 	}
 
+}
+
+func testCompletedOperationIsNotReopened(t *testing.T, store storage.Store) {
+	ctx := context.Background()
+	tenantID := storage.DefaultTenantID
+	eid := uniqueEID(t, "reopen")
+	if err := store.RegisterDevice(ctx, tenantID, storage.Device{EID: eid}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	operation, err := store.EnqueueOperation(ctx, tenantID, storage.OperationRequest{
+		EID:     eid,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: []byte("package"),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+	record := func(id int64, status storage.OperationStatus, payload string) {
+		t.Helper()
+		if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
+			EID:            eid,
+			OperationID:    id,
+			SequenceNumber: operation.SequenceNumber,
+			Status:         status,
+			Payload:        []byte(payload),
+		}); err != nil {
+			t.Fatalf("RecordEUICCPackageResult(%s) error = %v", payload, err)
+		}
+	}
+	record(operation.ID, storage.OperationDone, "signed-ok")
+	record(operation.ID, storage.OperationDone, "redelivery")
+	record(operation.ID, storage.OperationFailed, "failure-by-id")
+	record(0, storage.OperationFailed, "failure-by-sequence")
+
+	got, err := store.GetOperation(ctx, tenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if got.Status != storage.OperationDone {
+		t.Fatalf("operation status = %q, want done", got.Status)
+	}
+	result, err := store.GetOperationResult(ctx, tenantID, operation.ID)
+	if err != nil {
+		t.Fatalf("GetOperationResult() error = %v", err)
+	}
+	if result.Status != storage.OperationDone {
+		t.Fatalf("result status = %q, want done", result.Status)
+	}
+	assertBytes(t, "result payload", result.Payload, []byte("redelivery"))
+
+	pending, err := store.EnqueueOperation(ctx, tenantID, storage.OperationRequest{
+		EID:     eid,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: []byte("still-pending"),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation(pending) error = %v", err)
+	}
+	if err := store.RecordEUICCPackageResult(ctx, tenantID, storage.EUICCPackageResult{
+		EID:            eid,
+		OperationID:    pending.ID,
+		SequenceNumber: pending.SequenceNumber,
+		Status:         storage.OperationFailed,
+		Payload:        []byte("pending-failed"),
+	}); err != nil {
+		t.Fatalf("RecordEUICCPackageResult(pending) error = %v", err)
+	}
+	failed, err := store.GetOperation(ctx, tenantID, pending.ID)
+	if err != nil {
+		t.Fatalf("GetOperation(pending) error = %v", err)
+	}
+	if failed.Status != storage.OperationFailed {
+		t.Fatalf("pending operation status = %q, want failed", failed.Status)
+	}
 }
 
 func uniqueEID(t testing.TB, suffix string) string {

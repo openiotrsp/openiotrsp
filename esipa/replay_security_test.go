@@ -1,3 +1,5 @@
+// Replay and unsigned-result hardening regression tests. Reported by Adam Bedard,
+// Security Researcher.
 package esipa
 
 import (
@@ -237,7 +239,7 @@ func TestResearchOldDeleteEIMResultRemovesNewAssociation(t *testing.T) {
 	}
 
 	secondAdd, secondAddID := queue(0x33, euiccpkg.AddEIM(targetConfig))
-	if (firstAdd.CounterValue >= deleteReq.CounterValue || deleteReq.CounterValue >= secondAdd.CounterValue) {
+	if firstAdd.CounterValue >= deleteReq.CounterValue || deleteReq.CounterValue >= secondAdd.CounterValue {
 		t.Fatalf("request counters not increasing: %d, %d, %d", firstAdd.CounterValue, deleteReq.CounterValue, secondAdd.CounterValue)
 	}
 	secondToken := int64(43)
@@ -276,7 +278,7 @@ func TestResearchOldDeleteEIMResultRemovesNewAssociation(t *testing.T) {
 		}
 		sequences = append(sequences, operation.SequenceNumber)
 	}
-	if (sequences[0] >= sequences[1] || sequences[1] >= sequences[2]) {
+	if sequences[0] >= sequences[1] || sequences[1] >= sequences[2] {
 		t.Fatalf("operation sequences not increasing: %v", sequences)
 	}
 	t.Logf("observed: signed add op=%d seq=%d counter=%d -> target token 42; signed delete op=%d seq=%d counter=%d -> absent; signed re-add op=%d seq=%d counter=%d -> token 43; tampered old delete -> HTTP 400 and token 43 preserved; replay byte-identical old signed delete -> HTTP 200 and token 43 preserved (all operations done)", firstAddID, sequences[0], firstAdd.CounterValue, deleteID, sequences[1], deleteReq.CounterValue, secondAddID, sequences[2], secondAdd.CounterValue)

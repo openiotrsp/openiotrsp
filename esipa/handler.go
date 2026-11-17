@@ -627,8 +627,8 @@ func recordEimPackageResult(
 		if result.Kind != protocolasn1.EimPackageResultError {
 			return nil, false, fmt.Errorf("esipa: unexpected EimPackageResult tag %s", tlv.Tag.String())
 		}
-		ack, err := recordEimPackageResultResponseError(ctx, store, tenantID, eid, result.Error, payload)
-		return ack, false, err
+		ack, empty, err := recordEimPackageResultResponseError(ctx, store, tenantID, eid, result.Error, payload, allowUnverifiedEUICCPackageResults)
+		return ack, empty, err
 	}
 	resultTLV := tlv
 	var notificationList *bertlv.TLV
@@ -937,6 +937,19 @@ func matchPendingEuiccPackageByCorrelation(
 	counter int64,
 	transactionID []byte,
 ) ([]storage.Operation, error) {
+	return matchEuiccPackageByCorrelation(ctx, store, tenantID, eid, eimID, counter, transactionID, true)
+}
+
+func matchEuiccPackageByCorrelation(
+	ctx context.Context,
+	store storage.Store,
+	tenantID storage.TenantID,
+	eid string,
+	eimID string,
+	counter int64,
+	transactionID []byte,
+	includeCompleted bool,
+) ([]storage.Operation, error) {
 	pending, err := store.FetchPendingOperations(ctx, tenantID, eid, 10000)
 	if err != nil {
 		return nil, err
@@ -945,6 +958,12 @@ func matchPendingEuiccPackageByCorrelation(
 		return nil, err
 	} else if ok {
 		return []storage.Operation{operation}, nil
+	}
+	// Error results must not correlate to a completed operation. Doing so
+	// rewrites done to failed, and a later replay of the old signed result
+	// then applies again.
+	if !includeCompleted {
+		return nil, storage.ErrNotFound
 	}
 	// Idempotent redelivery: IPA may resend a Provide after the operation left
 	// the pending queue. Correlate completed euicc-package rows by transaction.
@@ -1042,16 +1061,27 @@ func recordEimPackageResultResponseError(
 	eid string,
 	errData *protocolasn1.EimPackageResultResponseError,
 	payload []byte,
-) (*protocolasn1.EimAcknowledgements, error) {
+	allowUnverifiedEUICCPackageResults bool,
+) (*protocolasn1.EimAcknowledgements, bool, error) {
+	// eimPackageError is an IPA message and is unsigned by design. With eUICC
+	// verification enabled it is not proof that the card executed the package,
+	// so it must not terminally fail a euicc-package operation. Selecting the
+	// first pending operation (no transaction ID) or a completed one (idempotent
+	// fallback) is the same unsigned-failure class as EuiccPackageErrorUnsigned,
+	// and reopening a done operation lets a later replay of the old signed
+	// result apply again. Leave the queue unchanged; the next poll retries.
+	if !allowUnverifiedEUICCPackageResults {
+		return nil, true, nil
+	}
 	var operations []storage.Operation
 	var err error
 	if errData != nil && len(errData.EimTransactionID) > 0 {
-		operations, err = matchPendingEuiccPackageByCorrelation(ctx, store, tenantID, eid, "", 0, errData.EimTransactionID)
+		operations, err = matchEuiccPackageByCorrelation(ctx, store, tenantID, eid, "", 0, errData.EimTransactionID, false)
 	} else {
 		operations, err = firstPendingEuiccPackageOperation(ctx, store, tenantID, eid)
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sequenceNumbers := make([]protocolasn1.SequenceNumber, 0, len(operations))
 	for _, operation := range operations {
@@ -1062,11 +1092,11 @@ func recordEimPackageResultResponseError(
 			Status:         storage.OperationFailed,
 			Payload:        cloneBytes(payload),
 		}); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		sequenceNumbers = append(sequenceNumbers, protocolasn1.SequenceNumber(operation.SequenceNumber))
 	}
-	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, nil
+	return &protocolasn1.EimAcknowledgements{SequenceNumbers: sequenceNumbers}, false, nil
 }
 
 func applyEUICCPackageOperationState(
