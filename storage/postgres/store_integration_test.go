@@ -11,12 +11,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	protocolasn1 "github.com/openiotrsp/openiotrsp/asn1"
 	"github.com/openiotrsp/openiotrsp/storage"
@@ -540,4 +543,315 @@ func postgresTestEID(last byte) []byte {
 	eid := make([]byte, 16)
 	eid[15] = last
 	return eid
+}
+
+// TestRecordEUICCPackageResultFailureDoesNotOverwriteConcurrentDone forces the
+// interleaving where a failed result reads the operation as pending, a done
+// result for the same operation then commits, and only afterwards does the
+// failed result reach its first write. Without a row lock on the status SELECT
+// (SELECT ... FOR UPDATE) the failure overwrites the committed success, so this
+// test fails. With the row lock, the failed call holds the row, the done call
+// waits on it, and done is written last, so this test passes.
+//
+// Ordering uses Postgres locks, not sleeps: a test-only BEFORE INSERT trigger on
+// operation_results makes non-done inserts for this EID take
+// pg_advisory_xact_lock(K), while the test holds K on its own connection.
+func TestRecordEUICCPackageResultFailureDoesNotOverwriteConcurrentDone(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	logPostgresTarget(t, dsn)
+	cleanDatabase(t, dsn)
+	runMigration(t, dsn, func(migration *migrate.Migrate) error {
+		return migration.Up()
+	})
+
+	store, err := storepg.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	cases := []struct {
+		name          string
+		eidLast       byte
+		lockKey       int32
+		byOperationID bool
+	}{
+		{name: "ByOperationID", eidLast: 0x91, lockKey: 1, byOperationID: true},
+		{name: "ByEIDAndSequenceNumber", eidLast: 0x92, lockKey: 2, byOperationID: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runResultRaceCase(t, dsn, store, tc.eidLast, tc.lockKey, tc.byOperationID)
+		})
+	}
+}
+
+// resultRaceLockClass is the first key of the two-int advisory lock used by
+// TestRecordEUICCPackageResultFailureDoesNotOverwriteConcurrentDone.
+const resultRaceLockClass int32 = 0x50475243 // "PGRC"
+
+func runResultRaceCase(t *testing.T, dsn string, store *storepg.Store, eidLast byte, lockKey int32, byOperationID bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	eidBytes := postgresTestEID(eidLast)
+	eid := hex.EncodeToString(eidBytes)
+	if err := store.RegisterDevice(ctx, storage.DefaultTenantID, storage.Device{EID: eid}); err != nil {
+		t.Fatalf("RegisterDevice() error = %v", err)
+	}
+	queued, err := store.EnqueueOperation(ctx, storage.DefaultTenantID, storage.OperationRequest{
+		EID:     eid,
+		Kind:    storage.OperationEuiccPackage,
+		Payload: postgresEncode(t, postgresSampleEuiccPackageRequest(eidBytes, 7)),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueOperation() error = %v", err)
+	}
+	pending, err := store.GetOperation(ctx, storage.DefaultTenantID, queued.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if pending.Status != storage.OperationPending {
+		t.Fatalf("initial status = %s, want pending", pending.Status)
+	}
+
+	// Test-only trigger: a non-done result insert for this EID blocks on K.
+	admin, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgx.Connect(admin) error = %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	suffix := fmt.Sprintf("%d_%d", os.Getpid(), lockKey)
+	function := "test_result_race_gate_" + suffix
+	trigger := "test_result_race_gate_trg_" + suffix
+	_, err = admin.Exec(ctx, fmt.Sprintf(`
+		CREATE FUNCTION %[1]s() RETURNS trigger LANGUAGE plpgsql AS $fn$
+		BEGIN
+			IF NEW.eid = %[2]s AND NEW.status <> 'done' THEN
+				PERFORM pg_advisory_xact_lock(%[3]d, %[4]d);
+			END IF;
+			RETURN NEW;
+		END
+		$fn$;
+		CREATE TRIGGER %[5]s BEFORE INSERT ON operation_results
+			FOR EACH ROW EXECUTE FUNCTION %[1]s();
+	`, function, quoteLiteral(eid), resultRaceLockClass, lockKey, trigger))
+	if err != nil {
+		t.Fatalf("create gate trigger error = %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, err := admin.Exec(cleanupCtx, fmt.Sprintf(
+			`DROP TRIGGER IF EXISTS %s ON operation_results; DROP FUNCTION IF EXISTS %s();`, trigger, function))
+		if err != nil {
+			t.Errorf("drop gate trigger error = %v", err)
+		}
+	})
+
+	// Hold K on a dedicated session connection.
+	holder, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgx.Connect(holder) error = %v", err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_lock($1, $2)`, resultRaceLockClass, lockKey); err != nil {
+		_ = holder.Close(context.Background())
+		t.Fatalf("pg_advisory_lock error = %v", err)
+	}
+	released := false
+	release := func() error {
+		if released {
+			return nil
+		}
+		released = true
+		var ok bool
+		err := holder.QueryRow(ctx, `SELECT pg_advisory_unlock($1, $2)`, resultRaceLockClass, lockKey).Scan(&ok)
+		if err == nil && !ok {
+			err = errors.New("pg_advisory_unlock returned false")
+		}
+		return err
+	}
+
+	successPayload := []byte{0x30, 0x03, 0x02, 0x01, 0x00}
+	failedPayload := []byte{0x30, 0x03, 0x02, 0x01, 0x7f}
+	newResult := func(status storage.OperationStatus, payload []byte) storage.EUICCPackageResult {
+		result := storage.EUICCPackageResult{
+			EID:            eid,
+			SequenceNumber: queued.SequenceNumber,
+			Status:         status,
+			Payload:        payload,
+		}
+		if byOperationID {
+			result.OperationID = queued.ID
+		}
+		return result
+	}
+
+	failedDone := make(chan error, 1)
+	successDone := make(chan error, 1)
+	var wg sync.WaitGroup
+	// On any exit: free K (closing the session also frees it), cancel the
+	// calls' context, then wait so no goroutine outlives the subtest.
+	defer func() {
+		_ = release()
+		_ = holder.Close(context.Background())
+		cancel()
+		wg.Wait()
+	}()
+
+	// 1. failed: reads pending, then blocks in the trigger on K.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		failedDone <- store.RecordEUICCPackageResult(ctx, storage.DefaultTenantID, newResult(storage.OperationFailed, failedPayload))
+	}()
+	failedPID, err := waitForAdvisoryWaiter(ctx, admin, lockKey, failedDone)
+	if err != nil {
+		t.Fatalf("waiting for failed call to block on gate: %v", err)
+	}
+
+	// 2. done: either commits (no row lock) or waits on the row lock held by
+	// the failed call (row lock present).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		successDone <- store.RecordEUICCPackageResult(ctx, storage.DefaultTenantID, newResult(storage.OperationDone, successPayload))
+	}()
+	var successErr error
+	successReturned, err := waitForReturnOrBlockedBy(ctx, admin, failedPID, successDone, &successErr)
+	if err != nil {
+		t.Fatalf("waiting for done call to commit or lock-wait: %v", err)
+	}
+	if successReturned {
+		t.Logf("done call committed while failed call was gated (status SELECT took no row lock)")
+	} else {
+		t.Logf("done call is waiting on a lock held by the failed call (pid %d)", failedPID)
+	}
+
+	// 3. Let the failed call continue to its write.
+	if err := release(); err != nil {
+		t.Fatalf("release gate error = %v", err)
+	}
+	var failedErr error
+	select {
+	case failedErr = <-failedDone:
+	case <-ctx.Done():
+		t.Fatalf("failed call did not return: %v", ctx.Err())
+	}
+	if !successReturned {
+		select {
+		case successErr = <-successDone:
+		case <-ctx.Done():
+			t.Fatalf("done call did not return: %v", ctx.Err())
+		}
+	}
+	if failedErr != nil {
+		t.Fatalf("RecordEUICCPackageResult(failed) error = %v", failedErr)
+	}
+	if successErr != nil {
+		t.Fatalf("RecordEUICCPackageResult(done) error = %v", successErr)
+	}
+
+	// 4. A saved success must survive.
+	operation, err := store.GetOperation(ctx, storage.DefaultTenantID, queued.ID)
+	if err != nil {
+		t.Fatalf("GetOperation() error = %v", err)
+	}
+	if operation.Status != storage.OperationDone {
+		t.Errorf("operations.status = %s, want done (failure overwrote a saved success)", operation.Status)
+	}
+	stored, err := store.GetOperationResult(ctx, storage.DefaultTenantID, queued.ID)
+	if err != nil {
+		t.Fatalf("GetOperationResult() error = %v", err)
+	}
+	if stored.Status != storage.OperationDone {
+		t.Errorf("operation_results.status = %s, want done", stored.Status)
+	}
+	if !bytes.Equal(stored.Payload, successPayload) {
+		t.Errorf("operation_results.payload = %x, want success payload %x", stored.Payload, successPayload)
+	}
+}
+
+// waitForAdvisoryWaiter polls pg_locks until a backend waits (granted = false)
+// on the gate advisory lock and returns its pid. It fails if the gated call
+// returns first, because then the trigger never blocked it.
+func waitForAdvisoryWaiter(ctx context.Context, conn *pgx.Conn, lockKey int32, done <-chan error) (int32, error) {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var pid int32
+		err := conn.QueryRow(ctx, `
+			SELECT l.pid
+			FROM pg_locks l
+			JOIN pg_database d ON d.oid = l.database
+			WHERE l.locktype = 'advisory'
+				AND d.datname = current_database()
+				AND l.classid::bigint = $1
+				AND l.objid::bigint = $2
+				AND l.objsubid = 2
+				AND NOT l.granted
+			LIMIT 1
+		`, int64(resultRaceLockClass), int64(lockKey)).Scan(&pid)
+		if err == nil {
+			return pid, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, err
+		}
+		select {
+		case callErr := <-done:
+			return 0, fmt.Errorf("call returned before blocking on the gate (err = %v)", callErr)
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// waitForReturnOrBlockedBy waits until the call reports on done (returned =
+// true, its error stored in *callErr) or until some backend in this database
+// is in a Lock wait that blockerPID causes (returned = false). The advisory
+// waiter itself is blocked by the test's holder, not by blockerPID, so it never
+// matches.
+func waitForReturnOrBlockedBy(ctx context.Context, conn *pgx.Conn, blockerPID int32, done <-chan error, callErr *error) (bool, error) {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			*callErr = err
+			return true, nil
+		default:
+		}
+		var blocked bool
+		err := conn.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity a
+				WHERE a.datname = current_database()
+					AND a.pid <> pg_backend_pid()
+					AND a.pid <> $1
+					AND a.wait_event_type = 'Lock'
+					AND $1 = ANY (pg_blocking_pids(a.pid))
+			)
+		`, blockerPID).Scan(&blocked)
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return false, nil
+		}
+		select {
+		case err := <-done:
+			*callErr = err
+			return true, nil
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func quoteLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }

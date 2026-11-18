@@ -473,6 +473,7 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 			SELECT eid, sequence_number, status
 			FROM operations
 			WHERE tenant_id = $1 AND id = $2
+			FOR UPDATE
 		`, tenant, result.OperationID).Scan(&result.EID, &result.SequenceNumber, &currentStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return storage.ErrNotFound
@@ -485,6 +486,7 @@ func (s *Store) RecordEUICCPackageResult(ctx context.Context, tenantID storage.T
 			SELECT status
 			FROM operations
 			WHERE tenant_id = $1 AND eid = $2 AND sequence_number = $3
+			FOR UPDATE
 		`, tenant, result.EID, result.SequenceNumber).Scan(&currentStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			currentStatus = ""
